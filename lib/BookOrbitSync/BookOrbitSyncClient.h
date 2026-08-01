@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 
+#include "BookOrbitStatsQueue.h"
 #include "KOReaderSyncClient.h"
 
 /**
@@ -64,6 +65,19 @@ class BookOrbitSyncClient {
    * @return OK on success, error code on failure
    */
   static Error updateProgress(const KOReaderProgress& progress);
+
+  /**
+   * Upload queued reading-session events for one document to BookOrbit's
+   * page-stats endpoint (POST /plugin/page-stats). Upload-only: the endpoint has no
+   * download counterpart, so stats flow CrossInk -> BookOrbit.
+   * @param documentHash The binary partial-MD5 document hash
+   * @param deviceModel Human-readable device name reported alongside the stats
+   * @param events Events to upload (callers batch; keep each call small)
+   * @param count Number of events
+   * @return OK on success, error code on failure
+   */
+  static Error uploadPageStats(const std::string& documentHash, const std::string& deviceModel,
+                               const BookOrbitStatEvent* events, size_t count);
 
   /**
    * Get human-readable error message for the last error.

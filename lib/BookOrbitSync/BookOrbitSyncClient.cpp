@@ -493,6 +493,124 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::updateProgress(const KOReaderPro
 #endif
 }
 
+BookOrbitSyncClient::Error BookOrbitSyncClient::uploadPageStats(const std::string& documentHash,
+                                                                const std::string& deviceModel,
+                                                                const BookOrbitStatEvent* events, size_t count) {
+  lastHttpCode = 0;
+  lastTransportError = 0;
+  if (!BOOKORBIT_STORE.hasCredentials()) {
+    LOG_DBG("BookOrbit", "No credentials configured");
+    return NO_CREDENTIALS;
+  }
+  if (!events || count == 0) {
+    return OK;
+  }
+
+  std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/page-stats";
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  LOG_DBG("BookOrbit", "Uploading %u stat events: %s (heap: %u)", (unsigned)count, url.c_str(), (unsigned)freeHeap);
+  if (freeHeap < MIN_HEAP_FOR_TLS) {
+    LOG_ERR("BookOrbit", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+    return LOW_MEMORY;
+  }
+
+  // Body shape mirrors BookOrbit's own KOReader plugin: device fields at the top
+  // level plus books[].hash and books[].events[].{page,startTime,durationSeconds,totalPages}.
+  // pluginVersion: the server caps this field at 20 characters and rejects the whole
+  // upload with HTTP 400 beyond that (verified against a live server by the samfoy
+  // fork). Never build it from CROSSINK_VERSION — variant/branch builds overflow
+  // (e.g. "crossink-1.4.0-xlarge" is 21 chars). Bump the numeric suffix when the
+  // payload shape changes.
+  // The JsonDocument is scoped so its node pool is freed before the TLS session
+  // starts: only the serialized body stays alive through the handshake.
+  std::string body;
+  {
+    JsonDocument doc;
+    doc["deviceId"] = DEVICE_ID;
+    doc["deviceModel"] = deviceModel;
+    doc["pluginVersion"] = "crossink-bo-1";
+    char deviceTime[20];
+    const time_t now = time(nullptr);
+    struct tm nowUtc = {};
+    gmtime_r(&now, &nowUtc);
+    strftime(deviceTime, sizeof(deviceTime), "%Y-%m-%d %H:%M:%S", &nowUtc);
+    doc["deviceTime"] = deviceTime;
+
+    JsonArray books = doc["books"].to<JsonArray>();
+    JsonObject book = books.add<JsonObject>();
+    book["hash"] = documentHash;
+    JsonArray jsonEvents = book["events"].to<JsonArray>();
+    for (size_t i = 0; i < count; i++) {
+      JsonObject event = jsonEvents.add<JsonObject>();
+      event["page"] = events[i].page;
+      event["startTime"] = events[i].startTime;
+      event["durationSeconds"] = events[i].durationSeconds;
+      event["totalPages"] = events[i].totalPages;
+    }
+    serializeJson(doc, body);
+  }
+
+#ifdef SIMULATOR
+  HTTPClient http;
+  std::unique_ptr<WiFiClientSecure> secureClient;
+  WiFiClient plainClient;
+
+  if (isHttpsUrl(url)) {
+    secureClient.reset(new WiFiClientSecure);
+    secureClient->setInsecure();
+    http.begin(*secureClient, url.c_str());
+  } else {
+    http.begin(plainClient, url.c_str());
+  }
+  addAuthHeaders(http);
+  http.addHeader("Content-Type", "application/json");
+
+  const int httpCode = http.POST(body.c_str());
+  lastHttpCode = httpCode;
+  lastTransportError = (httpCode < 0) ? httpCode : 0;
+  http.end();
+
+  LOG_DBG("BookOrbit", "Upload stats response: %d", httpCode);
+
+  if (httpCode >= 200 && httpCode < 300) return OK;
+  if (httpCode == 401) return AUTH_FAILED;
+  if (httpCode < 0) return NETWORK_ERROR;
+  return SERVER_ERROR;
+#else
+  ResponseBuffer buf;
+  logHeapStats("Before stats client", url.c_str());
+  esp_http_client_handle_t client = createClient(url.c_str(), &buf, HTTP_METHOD_POST);
+  if (!client) {
+    lastTransportError = ESP_ERR_NO_MEM;
+    return NETWORK_ERROR;
+  }
+
+  if (esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
+      esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
+    LOG_ERR("BookOrbit", "Failed to set request body");
+    lastTransportError = ESP_ERR_INVALID_STATE;
+    esp_http_client_cleanup(client);
+    return NETWORK_ERROR;
+  }
+
+  LOG_DBG("BookOrbit", "POST body bytes=%u", static_cast<unsigned>(body.length()));
+  logHeapStats("Before stats perform");
+  esp_err_t err = esp_http_client_perform(client);
+  const int httpCode = esp_http_client_get_status_code(client);
+  lastHttpCode = httpCode;
+  lastTransportError = static_cast<int>(err);
+  logHeapStats("After stats perform");
+  esp_http_client_cleanup(client);
+
+  LOG_DBG("BookOrbit", "Upload stats response: %d (err: %d)", httpCode, err);
+
+  if (err != ESP_OK) return NETWORK_ERROR;
+  if (httpCode >= 200 && httpCode < 300) return OK;
+  if (httpCode == 401) return AUTH_FAILED;
+  return SERVER_ERROR;
+#endif
+}
+
 std::string BookOrbitSyncClient::errorString(Error error) {
   switch (error) {
     case OK:

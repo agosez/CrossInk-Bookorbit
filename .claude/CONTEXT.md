@@ -31,6 +31,8 @@ Keep this file focused on repo-specific gotchas that are worth reusing in future
 
 ## Misc Repo Gotchas
 
+- On the X4, `RTC_NOINIT_ATTR` data does NOT survive deep sleep (every wake read as garbage), while the system clock itself DOES survive both deep sleep and software resets (RTS/EN flash resets included). Never key state to RTC memory across sleeps; persist to SD and use clock plausibility for cold-boot detection (see lib/WallClock).
+- `WallClock` eras are what make retroactive timestamp correction sound: a clock loss always increments the era BEFORE the checkpoint is restored, so within one era the clock can only have drifted, never stepped. That is why a same-era correction may be interpolated between two syncs, while an era that opened on a clock loss takes its measured error as a flat shift — its error starts at the unknown powered-off duration, not at zero. Do not blend the two.
 
 - POSIX TZ signs are inverted from ISO 8601 in `TimeStore::applyTimezone()`: `"UTC-1"` means UTC+1.
 - `LyraTheme::drawHeader()` does not call `BaseTheme::drawHeader()`, so header changes in the base theme must be duplicated in Lyra if needed.

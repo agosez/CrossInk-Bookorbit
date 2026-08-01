@@ -22,6 +22,7 @@ constexpr PreservedCacheFile EPUB_USER_STATE_FILES[] = {
     {"progress.bin", "upload_preserve_progress.bin"},
     {"progress.bin.bak", "upload_preserve_progress.bin.bak"},
     {"reader_settings.bin", "upload_preserve_reader_settings.bin"},
+    {"bookorbit_stats.bin", "upload_preserve_bookorbit_stats.bin"},
 };
 
 constexpr PreservedCacheFile PAGE_PROGRESS_FILES[] = {

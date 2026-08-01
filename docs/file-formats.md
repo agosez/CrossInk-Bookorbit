@@ -227,6 +227,80 @@ Binary layout:
 - `[41-68]` `dayOfWeekSeconds[7]` (`uint32_t` LE each)
 - `[69-72]` `estimatedTimeLeftSeconds` (`uint32_t` LE, `0` means unavailable)
 
+## `bookorbit_stats.bin`
+
+### Version 1
+
+`bookorbit_stats.bin` is a queue of per-page reading events in a book's cache
+directory, waiting to be uploaded to a BookOrbit server's page-stats endpoint
+(the server clusters raw page events into the reading sessions that power its
+time/streak/pace stats). The reader buffers one record per qualifying forward
+page read in RAM and appends them as a single batch when the session ends;
+BookOrbitSyncActivity uploads and deletes the file on the next successful
+BookOrbit sync of that book. The queue is capped at 2000 records; on overflow
+the oldest records are dropped.
+
+Each record carries the WallClock power era its timestamp was taken in, plus a
+flag marking the timestamp approximate (taken from the system clock rather than a
+battery-backed RTC), so it can be corrected to real time at upload — see
+`wallclock.bin`. A queue whose header does not match is discarded on read and
+replaced on append.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `BOQ1`
+- Repeated 16-byte records:
+  - `[0-3]` `startTime` (`uint32_t`, page-read start as UTC epoch seconds, possibly approximate)
+  - `[4-7]` `durationSeconds` (`uint32_t`, dwell seconds on the page)
+  - `[8-9]` `page` (`uint16_t`, overall book position in basis points 0-10000)
+  - `[10-11]` `totalPages` (`uint16_t`, the position denominator, `10000`)
+  - `[12-13]` `era` (`uint16_t`, truncated WallClock power era the timestamp was taken in)
+  - `[14]` `flags` (`uint8_t`, bit0 = clock was approximate / not NTP-confirmed)
+  - `[15]` reserved
+
+## `/.crosspoint/wallclock.bin`
+
+### Version 1
+
+WallClock's persisted state for devices without a battery-backed RTC: the
+clock-timeline counter ("era"), the last known-good time checkpoint used to
+restore an approximate system clock after the clock is lost, and a ring of
+NTP-measured corrections that let queued timestamps (see
+`bookorbit_stats.bin`) be resolved to real time retroactively.
+
+Eras are keyed to clock continuity — a boot with a plausible system time
+continues the previous era — because RTC memory does not reliably survive deep
+sleep on this hardware. A clock loss therefore always opens a new era, which is
+what lets a correction tell drift apart from powered-off time.
+
+Each correction carries its sync anchor pair, which makes it a drift ramp rather
+than a flat offset: `delta` is the error measured at `syncDeviceEpoch`, and
+`windowStartEpoch` is the real time of the previous sync in the same era — an
+instant where the error was zero by construction, since that sync set the clock.
+Timestamps between the two are interpolated. `windowStartEpoch` is 0 when the era
+opened on a clock loss, because the error then starts at the unknown powered-off
+duration and `delta` applies as a flat shift instead.
+
+Only eras where NTP actually ran appear in the ring; it replaces its lowest-era
+entry when full, so timestamps survive several clock losses between syncs.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `WCK1`
+- `[4-7]` `era` (`uint32_t`, incremented once per clock-loss boot)
+- `[8-11]` `checkpointEpoch` (`uint32_t`, UTC epoch of the last trusted checkpoint)
+
+Then `ERA_HISTORY` (6) correction records of 24 bytes each:
+
+- `[0-3]` `era` (`uint32_t`)
+- `[4]` `used` (`uint8_t`, 1 when the slot holds a valid record)
+- `[5-7]` reserved
+- `[8-15]` `delta` (`int64_t`, seconds of clock error at `syncDeviceEpoch`)
+- `[16-19]` `windowStartEpoch` (`uint32_t`, real time of the previous same-era
+  sync, or 0 for a flat correction)
+- `[20-23]` `syncDeviceEpoch` (`uint32_t`, the clock reading just before the
+  sync that measured `delta`)
+
 ## `section.bin`
 
 ### Version 44

@@ -1,4 +1,5 @@
 #pragma once
+#include <BookOrbitStatsQueue.h>
 #include <Epub.h>
 #include <Epub/FootnoteEntry.h>
 #include <Epub/Section.h>
@@ -8,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "BookReadingStats.h"
 #include "BookmarkStore.h"
@@ -85,6 +87,9 @@ class EpubReaderActivity final : public Activity {
   GlobalReadingStats globalStats;
   ReadingStatsDateTime sessionStartLocalDateTime;
   bool hasSessionStartLocalDateTime = false;
+  // Per-page reading events buffered in RAM during the session and flushed to the
+  // book's BookOrbit stats queue on exit (never written once per page turn).
+  std::vector<BookOrbitStatEvent> pendingBookOrbitEvents;
   // Signals that the next render should reposition within the newly loaded section
   // based on a cross-book percentage jump.
   bool pendingPercentJump = false;
@@ -173,6 +178,7 @@ class EpubReaderActivity final : public Activity {
   bool currentPageReadingSecondsForStats(uint32_t& seconds, const char* source) const;
   void recordCurrentPageReadingTime(const char* source = "unknown");
   void recordForwardPagePaceSample(uint32_t seconds, const char* source);
+  void capturePageStatEvent(uint32_t dwellSeconds);
   bool getSessionAveragePaceSeconds(uint16_t& avgSeconds) const;
   void recoverStoredPaceFromSession(const char* reason = "unknown");
   bool getTimeLeftPaceSeconds(uint16_t& avgSeconds, const char*& source, uint16_t& sampleCount) const;

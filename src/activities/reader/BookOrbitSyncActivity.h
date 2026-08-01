@@ -92,6 +92,7 @@ class BookOrbitSyncActivity final : public Activity {
   void onWifiSelectionComplete(bool success);
   void performSync();
   void performUpload();
+  void uploadQueuedStats();
   bool consumeInitialConfirmRelease();
   void ensureEpubLoaded();
   void saveProgressAndReturn(const CrossPointPosition& position);

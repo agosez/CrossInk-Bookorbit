@@ -4,6 +4,7 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <WallClock.h>
 #include <WiFi.h>
 #include <esp_sntp.h>
 #include <esp_wifi.h>
@@ -13,6 +14,7 @@
 #include <ctime>
 
 #include "BookOrbitCredentialStore.h"
+#include "BookOrbitStatsQueue.h"
 #include "CrossPointSettings.h"
 #include "Epub/Section.h"
 #include "EpubReaderUtils.h"
@@ -130,7 +132,12 @@ void BookOrbitSyncActivity::onWifiSelectionComplete(const bool success) {
   }
   requestUpdate(true);
 
+  // Capture the pre-NTP clock so WallClock can compute this power era's correction
+  // delta; queued stats stamped before this moment get fixed to exact time below.
+  uint32_t epochBeforeNtp = 0;
+  WallClock::now(epochBeforeNtp);
   syncTimeWithNTP();
+  WallClock::markNtpSynced(epochBeforeNtp);
 
   {
     RenderLock lock(*this);
@@ -175,6 +182,12 @@ void BookOrbitSyncActivity::performSync() {
   const auto result = BookOrbitSyncClient::getProgress(documentHash, remoteProgress);
   LOG_INF("BookOrbit", "Progress fetch result=%d (http=%d)", static_cast<int>(result),
           BookOrbitSyncClient::lastHttpCode);
+
+  // Progress fetch reaching the server (even with no stored progress) means auth and
+  // connectivity are good: piggyback the queued reading-session stats on this session.
+  if (result == BookOrbitSyncClient::OK || result == BookOrbitSyncClient::NOT_FOUND) {
+    uploadQueuedStats();
+  }
 
   if (result == BookOrbitSyncClient::NOT_FOUND) {
     {
@@ -268,6 +281,108 @@ void BookOrbitSyncActivity::performSync() {
     }
   }
   requestUpdate(true);
+}
+
+void BookOrbitSyncActivity::uploadQueuedStats() {
+  // Reading-session events queued by the reader (see BookOrbitStatsQueue), pushed
+  // while WiFi is already up for the progress sync. Upload-only: BookOrbit has no
+  // stats download API, so stats flow CrossInk -> BookOrbit.
+  std::vector<BookOrbitStatEvent> events;
+  const std::string cachePath = Epub::cachePathForFilePath(epubPath, "/.crosspoint");
+  if (!BookOrbitStatsQueue::readAll(cachePath, events) || events.empty()) {
+    LOG_INF("BookOrbit", "No queued reading stats for this book");
+    return;
+  }
+  LOG_INF("BookOrbit", "Draining %u queued events (era now %u)", (unsigned)events.size(), (unsigned)WallClock::era());
+  // Field-verifiable upload manifest: one line per event (post-correction, below)
+  // would miss the corrections, so log after the correction pass instead.
+
+  // Events stamped by the system clock (all of them on RTC-less devices) are
+  // re-resolved against NTP: each event gets the correction WallClock measured for ITS
+  // era, interpolated along the era's drift ramp when the clock ran continuously since
+  // the previous sync, or applied as a flat per-era shift when the era opened on a clock
+  // loss (see WallClock::correctionForEvent). The current era's anchors were refreshed
+  // by the NTP sync moments ago. Events from eras whose error was never measured keep
+  // their checkpoint-approximate stamp unless outright implausible.
+  uint32_t syncInstant = 0;                           // real time (NTP set the clock moments ago), 0 if it failed
+  if (!WallClock::now(syncInstant)) syncInstant = 0;  // implausible: no upper bound to enforce
+  size_t dropped = 0;
+  uint32_t previousStart = 0;
+  for (auto& event : events) {
+    if (event.flags & BookOrbitStatEvent::FLAG_CLOCK_APPROXIMATE) {
+      int64_t delta = 0;
+      if (WallClock::correctionForEvent(event.era, event.startTime, delta)) {
+        int64_t corrected = static_cast<int64_t>(event.startTime) + delta;
+        // Nothing queued can have happened after the sync that is uploading it, and the
+        // queue is chronological: keep both invariants whatever the measured error was.
+        if (syncInstant != 0 && corrected > static_cast<int64_t>(syncInstant)) corrected = syncInstant;
+        if (corrected < static_cast<int64_t>(previousStart)) corrected = previousStart;
+        if (corrected > 0 && corrected < static_cast<int64_t>(WallClock::MAX_PLAUSIBLE_EPOCH)) {
+          event.startTime = static_cast<uint32_t>(corrected);
+        }
+      } else if (event.startTime < WallClock::MIN_PLAUSIBLE_EPOCH) {
+        event.durationSeconds = 0;  // unresolvable (old era, never had a checkpoint): drop below
+        dropped++;
+      }
+    }
+    previousStart = event.startTime;
+  }
+  if (dropped > 0) {
+    events.erase(std::remove_if(events.begin(), events.end(),
+                                [](const BookOrbitStatEvent& e) { return e.durationSeconds == 0; }),
+                 events.end());
+    LOG_ERR("BookOrbit", "Dropped %u stat events with unresolvable timestamps", (unsigned)dropped);
+    if (events.empty()) {
+      BookOrbitStatsQueue::clear(cachePath);
+      return;
+    }
+  }
+
+  // Upload manifest: the corrected, as-sent timestamps, so "which session is
+  // missing" is answerable from serial logs. Capped to keep log volume sane.
+  constexpr size_t MAX_MANIFEST_LINES = 16;
+  const size_t manifestCount = std::min(events.size(), MAX_MANIFEST_LINES);
+  for (size_t i = 0; i < manifestCount; i++) {
+    char isoTime[24];
+    const time_t start = static_cast<time_t>(events[i].startTime);
+    struct tm startUtc = {};
+    gmtime_r(&start, &startUtc);
+    strftime(isoTime, sizeof(isoTime), "%Y-%m-%d %H:%M:%SZ", &startUtc);
+    LOG_INF("BookOrbit", "  event %u/%u: start=%s dur=%us pos=%u.%02u%%", (unsigned)(i + 1), (unsigned)events.size(),
+            isoTime, (unsigned)events[i].durationSeconds, (unsigned)(events[i].page / 100),
+            (unsigned)(events[i].page % 100));
+  }
+  if (events.size() > MAX_MANIFEST_LINES) {
+    LOG_INF("BookOrbit", "  ... %u more events", (unsigned)(events.size() - MAX_MANIFEST_LINES));
+  }
+
+  // Batch to keep each JSON body small (~100 events = ~7KB) next to the TLS buffers;
+  // the JsonDocument itself is freed before each TLS session starts (see client).
+  constexpr size_t BATCH_SIZE = 100;
+  for (size_t i = 0; i < events.size(); i += BATCH_SIZE) {
+    const size_t n = std::min(BATCH_SIZE, events.size() - i);
+    const auto result =
+        BookOrbitSyncClient::uploadPageStats(documentHash, SETTINGS.getEffectiveDeviceName(), &events[i], n);
+    if (result != BookOrbitSyncClient::OK) {
+      const int httpCode = BookOrbitSyncClient::lastHttpCode;
+      if (httpCode == 404 || httpCode == 405 || httpCode == 501) {
+        // Self-heal: this BookOrbit server predates the page-stats endpoint. Drop
+        // the queue instead of re-firing a doomed upload on every future sync;
+        // progress sync is unaffected. Updating the server starts buffering fresh.
+        LOG_INF("BookOrbit", "Server has no page-stats endpoint (http=%d); discarding queued stats", httpCode);
+        BookOrbitStatsQueue::clear(cachePath);
+        return;
+      }
+      // Transient failure: keep the whole queue for a later attempt; re-sending an
+      // already-accepted batch next time is harmless compared to losing sessions.
+      LOG_ERR("BookOrbit", "Stats upload failed after %u/%u events (http=%d)", (unsigned)i, (unsigned)events.size(),
+              httpCode);
+      return;
+    }
+  }
+
+  LOG_INF("BookOrbit", "Uploaded %u reading-session events", (unsigned)events.size());
+  BookOrbitStatsQueue::clear(cachePath);
 }
 
 void BookOrbitSyncActivity::performUpload() {

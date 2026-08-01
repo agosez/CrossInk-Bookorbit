@@ -4,6 +4,7 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <WallClock.h>
 #include <WiFi.h>
 #include <esp_sntp.h>
 #include <esp_wifi.h>
@@ -130,8 +131,12 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
   }
   requestUpdate(true);
 
-  // Sync time with NTP before making API requests
+  // Sync time with NTP before making API requests; WallClock uses the pre/post
+  // difference to correct timestamps recorded earlier in this power era.
+  uint32_t epochBeforeNtp = 0;
+  WallClock::now(epochBeforeNtp);
   syncTimeWithNTP();
+  WallClock::markNtpSynced(epochBeforeNtp);
 
   {
     RenderLock lock(*this);
@@ -339,6 +344,7 @@ void KOReaderSyncActivity::performUpload() {
 
 void KOReaderSyncActivity::onEnter() {
   Activity::onEnter();
+  LOG_INF("KOSync", "KOReader sync starting");
   ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
   lockInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
 

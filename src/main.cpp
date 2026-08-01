@@ -15,6 +15,7 @@
 #include <Logging.h>
 #include <SPI.h>
 #include <ScratchWorkspace.h>
+#include <WallClock.h>
 #include <builtinFonts/all.h>
 
 #ifdef SIMULATOR
@@ -641,6 +642,11 @@ void enterDeepSleep(bool fromTimeout) {
   deepSleepInProgress = true;
   activityManager.goToSleep(fromTimeout);
 
+  // Checkpoint the wall clock at the last possible moment: if deep sleep loses
+  // timekeeping on this hardware, the wake-time restore is then only off by the
+  // sleep duration instead of hours (see WallClock).
+  WallClock::checkpoint();
+
   if (isQuickResumeSleep) {
     saveSleepFrameBuffer();
   } else {
@@ -800,6 +806,9 @@ void setup() {
 
   SETTINGS.loadFromFile();
   Storage.installDateTimeCallback(&SETTINGS.clockUtcOffsetQ);
+  // Restore an approximate wall clock on cold boot (RTC-less devices) and track the
+  // power era used to correct queued reading-stats timestamps at sync time.
+  WallClock::initAtBoot();
   APP_STATE.loadFromFile();
   RECENT_BOOKS.loadFromFile();
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));

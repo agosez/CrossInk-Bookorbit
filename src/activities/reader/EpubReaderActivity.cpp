@@ -11,6 +11,8 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <MemoryBudget.h>
+#include <WallClock.h>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -23,6 +25,7 @@
 #include "../settings/BookOrbitSettingsActivity.h"
 #include "../settings/KOReaderSettingsActivity.h"
 #include "BookOrbitCredentialStore.h"
+#include "BookOrbitStatsQueue.h"
 #include "BookOrbitSyncActivity.h"
 #include "BookStatsActivity.h"
 #include "ClipSelectionActivity.h"
@@ -1213,6 +1216,46 @@ bool EpubReaderActivity::currentPageReadingSecondsForStats(uint32_t& seconds, co
   return true;
 }
 
+void EpubReaderActivity::capturePageStatEvent(const uint32_t dwellSeconds) {
+  if (dwellSeconds == 0 || !epub || !section || section->pageCount <= 0) {
+    return;
+  }
+  if (!BOOKORBIT_STORE.hasCredentials()) {
+    return;
+  }
+  // Hard bound on session RAM (16 bytes per event); the SD queue applies the same
+  // cap with drop-oldest on flush.
+  if (pendingBookOrbitEvents.size() >= BookOrbitStatsQueue::MAX_QUEUED_EVENTS) {
+    return;
+  }
+
+  uint32_t nowEpoch = 0;
+  bool approximate = true;
+  BookOrbitStatsQueue::captureNow(nowEpoch, approximate);
+  if (nowEpoch == 0) {
+    return;  // no usable clock at all; same-era correction has nothing to anchor on
+  }
+
+  // Overall book position at the end of the page just finished, in basis points.
+  const float chapterProgress = static_cast<float>(section->currentPage + 1) / static_cast<float>(section->pageCount);
+  float overall = epub->calculateSizeProgress(currentSpineIndex, chapterProgress);
+  overall = std::min(1.0f, std::max(0.0f, overall));
+
+  BookOrbitStatEvent event;
+  event.startTime = nowEpoch > dwellSeconds ? nowEpoch - dwellSeconds : nowEpoch;
+  event.durationSeconds = std::min<uint32_t>(dwellSeconds, 86400u);
+  event.page = static_cast<uint16_t>(overall * BookOrbitStatsQueue::PROGRESS_SCALE + 0.5f);
+  event.totalPages = BookOrbitStatsQueue::PROGRESS_SCALE;
+  event.era = static_cast<uint16_t>(WallClock::era());
+  event.flags = approximate ? BookOrbitStatEvent::FLAG_CLOCK_APPROXIMATE : 0;
+
+  // Reserve in chunks so a long session doesn't realloc on every page turn.
+  if (pendingBookOrbitEvents.size() == pendingBookOrbitEvents.capacity()) {
+    pendingBookOrbitEvents.reserve(pendingBookOrbitEvents.size() + 64);
+  }
+  pendingBookOrbitEvents.push_back(event);
+}
+
 void EpubReaderActivity::recordCurrentPageReadingTime(const char* source) {
   if (activeFootnotePreview) {
     pageShownAtMs = 0UL;
@@ -1787,6 +1830,12 @@ void EpubReaderActivity::onEnter() {
   armReadingPaceWarmup("reader_open");
   sessionReadingSeconds = 0;
   hasSessionStartLocalDateTime = getCurrentLocalReadingStatsDateTime(sessionStartLocalDateTime);
+  if (BOOKORBIT_STORE.hasCredentials() && epub) {
+    // Diagnostic breadcrumb: shows whether previously queued sessions survived to
+    // this open — the key evidence when sessions go missing before a sync.
+    LOG_INF("BookOrbit", "Stats queue holds %u events at book open",
+            (unsigned)BookOrbitStatsQueue::queuedCount(epub->getCachePath()));
+  }
 
   globalStats = GlobalReadingStats::load();
 
@@ -1840,6 +1889,21 @@ void EpubReaderActivity::onExit() {
       recoverStoredPaceFromSession("reader_exit");
       refreshCachedTimeLeftEstimate();
       stats.save(epub->getCachePath());
+
+      // Flush the session's buffered per-page BookOrbit events in one batch (never
+      // once per page turn); drained on the next BookOrbit sync of this book.
+      if (!pendingBookOrbitEvents.empty()) {
+        BookOrbitStatsQueue::appendBatch(epub->getCachePath(), pendingBookOrbitEvents);
+        pendingBookOrbitEvents.clear();
+      } else if (BOOKORBIT_STORE.hasCredentials()) {
+        // A "vanished" session often never produced events at all: page turns only
+        // qualify with real dwell time, like the reading-pace stats.
+        LOG_INF("BookOrbit", "No qualifying page events this session (read %us)", (unsigned)elapsedSecs);
+      }
+
+      // Reading sessions are the natural "last known good time" checkpoints for the
+      // boot-time clock restore on RTC-less devices.
+      WallClock::checkpoint();
     }
     globalStats.save();
   }
@@ -3206,6 +3270,7 @@ void EpubReaderActivity::resetCurrentBookStatsAfterDelete() {
   sessionPaceSampleCount = 0;
   pendingReadFolderMove = false;
   hasSessionStartLocalDateTime = getCurrentLocalReadingStatsDateTime(sessionStartLocalDateTime);
+  pendingBookOrbitEvents.clear();
   armReadingPaceWarmup("book_stats_delete");
   initializeCompletionPromptTrigger();
 }
@@ -3758,6 +3823,12 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn, const char* source) {
     uint32_t forwardReadSeconds = 0;
     const bool shouldRecordForwardRead = forwardPageReadElapsed(forwardReadSeconds, source);
     recordCurrentPageReadingTime(source);
+    // Capture the BookOrbit page-stat event for the page being finished, using the
+    // position BEFORE the page/section mutation below (a chapter-exit turn resets
+    // `section`, which the capture needs).
+    if (shouldRecordForwardRead) {
+      capturePageStatEvent(forwardReadSeconds);
+    }
     const bool exitingChapter = section && section->pageCount > 0 && section->currentPage >= section->pageCount - 1;
     if (section->currentPage < section->pageCount - 1) {
       section->currentPage++;
