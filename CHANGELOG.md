@@ -5,6 +5,12 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+### Fixed
+
+- The last entry of the home menu can be selected again on the Classic and Lyra themes. Navigation wrapped using a count maintained separately from the menu itself, and that count was never updated when the BookOrbit entry was added, so it stopped one position short — leaving Settings, which comes last, impossible to reach.
+
 ## [v1.4.1+bookorbit.2] - 2026-08-02
 
 Based on CrossInk v1.4.0.

@@ -597,23 +597,16 @@ static_assert(HomeActivity::kMaxCachedBooks >= LyraCarouselMetrics::values.homeR
               "kMaxCachedBooks must cover all carousel slots");
 
 int HomeActivity::getMenuItemCount() const {
+  // How many positions the selector can occupy: the selectable book rows, when the theme
+  // shows them separately, plus the menu itself.
+  //
+  // Counted from the very list that gets drawn rather than tallied by hand
   const auto& metrics = UITheme::getInstance().getMetrics();
-  int count = 4;  // File Browser, Recents, File transfer, Settings
-  if (!metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
-    count += getVisibleRecentBookCount();
-  } else if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
-    count++;  // Continue Reading menu item
-  }
-  if (hasOpdsServers) {
-    count++;
-  }
-  if (hasReadingStats) {
-    count++;
-  }
-  if (hasBookmarks || hasClippings) {
-    count++;
-  }
-  return count;
+  const bool includeContinueReading = metrics.homeContinueReadingInMenu && !recentBooks.empty();
+  const int bookRows = !metrics.homeContinueReadingInMenu && !recentBooks.empty() ? getVisibleRecentBookCount() : 0;
+  const HomeMenuEntries menuItems =
+      buildSelectableHomeMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings, includeContinueReading);
+  return bookRows + menuItems.size();
 }
 
 void HomeActivity::loadRecentBooks(int maxBooks) {
