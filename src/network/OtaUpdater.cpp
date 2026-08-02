@@ -48,6 +48,13 @@ struct ParsedVersion {
   int segments[VERSION_SEGMENT_COUNT] = {0, 0, 0, 0};
   bool valid = false;
   bool releaseCandidate = false;
+  // This fork releases as <upstream version>+bookorbit.<n>, so what distinguishes two of
+  // its releases lives in semver build metadata — which is defined to carry no precedence
+  // and which the numeric parse below therefore stops at. Read it out separately, or every
+  // release of this fork compares equal to the one already installed and the updater
+  // reports a failure rather than an update. Zero for versions without it, so an upstream
+  // build and a fork build of the same version still order correctly.
+  int forkBuild = 0;
 };
 
 bool isDigit(const char c) { return c >= '0' && c <= '9'; }
@@ -56,6 +63,22 @@ bool startsWithNumberAfterOptionalV(const char* version) {
   if (version == nullptr) return false;
   if ((version[0] == 'v' || version[0] == 'V') && isDigit(version[1])) return true;
   return isDigit(version[0]);
+}
+
+// The counter inside semver build metadata: the first run of digits after '+'. Returns 0
+// when the version carries no metadata or no digits in it. `1.4.1+bookorbit.2-tiny` yields
+// 2, and the variant suffix the firmware appends to its own version is ignored.
+int parseForkBuild(const char* version) {
+  if (version == nullptr) return 0;
+  const char* p = strchr(version, '+');
+  if (p == nullptr) return 0;
+  while (*p != '\0' && !isDigit(*p)) ++p;
+  int value = 0;
+  while (isDigit(*p)) {
+    value = value * 10 + (*p - '0');
+    ++p;
+  }
+  return value;
 }
 
 bool containsRcMarker(const char* version) {
@@ -93,6 +116,7 @@ ParsedVersion parseVersion(const char* version) {
 
   parsed.valid = true;
   parsed.releaseCandidate = containsRcMarker(version);
+  parsed.forkBuild = parseForkBuild(version);
   return parsed;
 }
 
@@ -106,6 +130,9 @@ int compareVersions(const char* latestVersion, const char* currentVersion) {
       return latest.segments[i] > current.segments[i] ? 1 : -1;
     }
   }
+
+  // Same upstream version: this fork's own release counter decides (see ParsedVersion).
+  if (latest.forkBuild != current.forkBuild) return latest.forkBuild > current.forkBuild ? 1 : -1;
 
   if (current.releaseCandidate && !latest.releaseCandidate) return 1;
   return 0;

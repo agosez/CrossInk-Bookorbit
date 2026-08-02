@@ -9,6 +9,7 @@ on; for everything inherited from upstream, see the
 
 ### Fixed
 
+- Firmware updates from the device work again. Every release of this fork carries its number in the part of the version string semver reserves for build metadata, which is defined to carry no precedence, so the updater read two consecutive releases as the same version and reported "Update failed" instead of offering the update. Devices already running an earlier build still need one manual install to pick this up; updates from the device work from there on.
 - The last entry of the home menu can be selected again on the Classic and Lyra themes. Navigation wrapped using a count maintained separately from the menu itself, and that count was never updated when the BookOrbit entry was added, so it stopped one position short — leaving Settings, which comes last, impossible to reach.
 
 ## [v1.4.1+bookorbit.2] - 2026-08-02
