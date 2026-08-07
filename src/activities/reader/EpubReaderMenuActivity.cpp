@@ -275,9 +275,9 @@ void EpubReaderMenuActivity::dictionaryFontChangedForMenu(void* ctx, const char*
     self->dictionaryFontPointSize = pointSize;
   }
   if (self->dictionaryFontChangedCallback) {
-    self->dictionaryFontChangedCallback(
-        self->dictionaryFontChangedContext,
-        self->hasDictionaryFontOverride ? self->dictionaryFontFamilyName : nullptr, self->dictionaryFontPointSize);
+    self->dictionaryFontChangedCallback(self->dictionaryFontChangedContext,
+                                        self->hasDictionaryFontOverride ? self->dictionaryFontFamilyName : nullptr,
+                                        self->dictionaryFontPointSize);
   }
 }
 
@@ -335,22 +335,21 @@ bool EpubReaderMenuActivity::activateSelectedItem() {
 
   if (selectedAction == MenuAction::READER_OPTIONS) {
     const auto before = captureReaderLayoutSettings();
-    startActivityForResult(
-        std::make_unique<ReaderOptionsActivity>(
-            renderer, mappedInput, saveReaderSettingsCallback, saveReaderSettingsContext, saveGlobalSettingsCallback,
-            saveGlobalSettingsContext, beginGlobalSettingsEditCallback, beginGlobalSettingsEditContext,
-            endGlobalSettingsEditCallback, endGlobalSettingsEditContext, stablePageNumbersAvailable,
-            dictionaryFontFamilyName, dictionaryFontPointSize, hasDictionaryFontOverride, dictionaryFontChangedForMenu,
-            this),
-        [this, before](const ActivityResult& result) {
-          settingsChanged = settingsChanged || haveReaderLayoutSettingsChanged(before);
-          pendingOrientation = SETTINGS.orientation;  // sync in case orientation changed
-          if (result.isCancelled) {
-            finishCancelled();
-            return;
-          }
-          requestUpdate();
-        });
+    startActivityForResult(std::make_unique<ReaderOptionsActivity>(
+                               renderer, mappedInput, saveReaderSettingsCallback, saveReaderSettingsContext,
+                               saveGlobalSettingsCallback, saveGlobalSettingsContext, beginGlobalSettingsEditCallback,
+                               beginGlobalSettingsEditContext, endGlobalSettingsEditCallback,
+                               endGlobalSettingsEditContext, stablePageNumbersAvailable, dictionaryFontFamilyName,
+                               dictionaryFontPointSize, hasDictionaryFontOverride, dictionaryFontChangedForMenu, this),
+                           [this, before](const ActivityResult& result) {
+                             settingsChanged = settingsChanged || haveReaderLayoutSettingsChanged(before);
+                             pendingOrientation = SETTINGS.orientation;  // sync in case orientation changed
+                             if (result.isCancelled) {
+                               finishCancelled();
+                               return;
+                             }
+                             requestUpdate();
+                           });
     return true;
   }
 

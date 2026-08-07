@@ -148,9 +148,8 @@ void ReaderOptionsActivity::rebuildSettingsList() {
   if (dictionaryFontFamilyName[0] != '\0' && !selectedFamilyIsInstalled) {
     dictionaryFont.enumStringValues.push_back(std::string(dictionaryFontFamilyName) + " (" + tr(STR_UNAVAILABLE) + ")");
   }
-  const auto fontSize = std::find_if(fontSettings.begin(), fontSettings.end(), [](const SettingInfo& setting) {
-    return setting.nameId == StrId::STR_FONT_SIZE;
-  });
+  const auto fontSize = std::find_if(fontSettings.begin(), fontSettings.end(),
+                                     [](const SettingInfo& setting) { return setting.nameId == StrId::STR_FONT_SIZE; });
   const size_t dictionaryFontIndex =
       fontSize == fontSettings.end() ? 0 : static_cast<size_t>(std::distance(fontSettings.begin(), fontSize) + 1);
   fontSettings.insert(fontSettings.begin() + dictionaryFontIndex, std::move(dictionaryFont));
@@ -370,9 +369,7 @@ void ReaderOptionsActivity::openDictionaryFontSizePicker(const SettingInfo& sett
   const size_t optionCount = setting.enumRawValues.size();
   if (optionCount == 0) return;
 
-  uint8_t currentIndex = hasDictionaryFontOverride
-                             ? enumDisplayIndexForRawValue(setting, dictionaryFontPointSize)
-                             : 0;
+  uint8_t currentIndex = hasDictionaryFontOverride ? enumDisplayIndexForRawValue(setting, dictionaryFontPointSize) : 0;
   if (currentIndex >= optionCount) currentIndex = 0;
   const SettingInfo selectedSetting = setting;
   optionPopup.show(setting.nameId, selectedSetting.enumStringValues, currentIndex, [this, selectedSetting](int index) {
@@ -716,8 +713,7 @@ void ReaderOptionsActivity::buildOptionsScreen(UiApp::ScreenType& screen) {
         }
       } else {
         const uint8_t displayValue = enumDisplayIndexForRawValue(setting, dictionaryFontPointSize);
-        values[i] =
-            settingEnumOptionLabel(setting, displayValue < settingEnumOptionCount(setting) ? displayValue : 0);
+        values[i] = settingEnumOptionLabel(setting, displayValue < settingEnumOptionCount(setting) ? displayValue : 0);
       }
     } else if (setting.type == SettingType::VALUE && setting.valuePtr != nullptr) {
       values[i] = formatSettingValue(setting);

@@ -2,8 +2,8 @@
 
 #include <BoardConfig.h>
 #include <GfxRenderer.h>
-#include <HalGPIO.h>
 #include <HalClock.h>
+#include <HalGPIO.h>
 #include <Logging.h>
 
 #include <algorithm>

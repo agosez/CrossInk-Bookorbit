@@ -109,10 +109,9 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio, const bool keepPowerLatched)
   // while awake (nothing else drives them), so the rail stays up, the ESP32 enters a real
   // deep sleep and the RTC timer keeps counting — wall-clock time survives. The cost is
   // standby current, hence the opt-in setting.
-  for (const int8_t pin : keepPowerLatched
-                              ? std::initializer_list<int8_t>{}
-                              : std::initializer_list<int8_t>{BoardConfig::ACTIVE.power.latch0,
-                                                              BoardConfig::ACTIVE.power.latch1}) {
+  for (const int8_t pin : keepPowerLatched ? std::initializer_list<int8_t>{}
+                                           : std::initializer_list<int8_t>{BoardConfig::ACTIVE.power.latch0,
+                                                                           BoardConfig::ACTIVE.power.latch1}) {
     if (pin < 0 || BoardConfig::latchConflictsWithBus(pin)) continue;
     const auto latch = static_cast<gpio_num_t>(pin);
     gpio_set_direction(latch, GPIO_MODE_OUTPUT);
