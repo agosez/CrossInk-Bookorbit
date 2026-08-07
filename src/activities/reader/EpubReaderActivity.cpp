@@ -44,6 +44,7 @@
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
 #include "GlobalActions.h"
+#include "HighlightPositionResolver.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncActivity.h"
 #include "LookedUpWordsActivity.h"
@@ -5902,8 +5903,8 @@ void EpubReaderActivity::recordAnnotationPosition(const size_t clippingIndex, co
   // make every highlight reappear as new.
   BookOrbitAnnotationRecord record;
   std::string sourceText;
-  if (!ChapterXPathResolver::findHighlightXPointers(epub, currentSpineIndex, paragraphIndex, highlightText, record.pos0,
-                                                    record.pos1, &sourceText)) {
+  if (!HighlightPositionResolver::findHighlightXPointers(epub, currentSpineIndex, paragraphIndex, highlightText,
+                                                         record.pos0, record.pos1, &sourceText)) {
     // Falling back to a paragraph-level range, which the server will resolve to nothing and
     // flag as repaired. Imprecise but visible beats a highlight that never syncs at all.
     record.pos0 = ChapterXPathResolver::findXPathForParagraph(epub, currentSpineIndex, paragraphIndex);
