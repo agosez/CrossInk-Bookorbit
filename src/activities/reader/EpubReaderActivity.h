@@ -432,7 +432,7 @@ class EpubReaderActivity final : public Activity {
 
  public:
   explicit EpubReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Epub> epub,
-                              BookReaderSettingsData readerSettings, int initialRefreshCountdown,
+                              const BookReaderSettingsData& readerSettings, int initialRefreshCountdown,
                               bool cleanImageBaseOnEntry = false)
       : Activity("EpubReader", renderer, mappedInput),
         epub(std::move(epub)),
