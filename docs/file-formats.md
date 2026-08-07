@@ -188,10 +188,10 @@ Binary layout:
   - version 3 only: reader layout signature (`uint32_t` LE; font, spacing,
     viewport, and other section-layout inputs)
   - `chapterTitle` (`char[48]`, null-terminated/truncated)
-  - version 1: selected text (`String`, truncated to `512` bytes for the
-    in-app store)
+  - version 1: selected text (`String`, truncated for the in-app store)
   - versions 2-3: selected-text length (`uint16_t` LE) followed by that many
-    UTF-8 bytes (maximum `512`)
+    UTF-8 bytes (maximum `2048`; builds before highlight sync wrote at most
+    `512` and treat a longer record as corrupt on read)
 
 CrossInk uses the stored spine/page/paragraph fields as anchors, then searches
 near that location for the stored clipping text after relayout. This is similar
@@ -248,6 +248,72 @@ Binary layout:
 - `[25-40]` `timeOfDaySeconds[4]` (`uint32_t` LE each)
 - `[41-68]` `dayOfWeekSeconds[7]` (`uint32_t` LE each)
 - `[69-72]` `estimatedTimeLeftSeconds` (`uint32_t` LE, `0` means unavailable)
+
+## `bookorbit_annotations.bin`
+
+### Version 1
+
+`bookorbit_annotations.bin` sits beside a book's clipping file in the book's cache
+directory and holds what BookOrbit needs to identify each highlight: the KOReader
+xpointer the server keys on, plus the upload watermark.
+
+The xpointers are minted when the highlight is created, not when it is synced. Building
+them streams and parses the whole chapter (`ChapterXPathResolver`), which is nearly free
+while the reader already has that chapter open but would mean parsing every affected
+chapter with 55 KB already committed to a TLS handshake if it were left to sync time.
+Minting once also keeps identity stable: the server keys annotations by
+`md5(datetime | pos0)`, and a position rebuilt under a different layout would make every
+highlight reappear as new.
+
+`pos0` and `pos1` delimit the highlighted text, `pos1` exclusive, as KOReader does.
+A paragraph-level position is not a usable substitute: a server that resolves the range
+and reads the text back finds nothing in an empty range and flags the annotation as
+repaired, which reads to the user as a failure. Offsets count codepoints in the
+whitespace-collapsed view of a single text node -- the crengine convention BookOrbit
+resolves against, where whitespace runs (Unicode spaces included) become one space --
+so a highlight starting inside inline markup gets that element's node
+(`/p[4]/em[1]/text()[1].3`) rather than the paragraph's.
+
+Minting a precise position also replaces the clipping's stored text with the matched
+span's exact source text: the clipping was built from rendered words, whose justified
+spacing around detached punctuation differs from the source, and the server rejects an
+upload whose text does not read back from its own copy.
+
+When the stored text no longer matches the chapter -- hyphenation, an entity that decoded
+differently, an edited book -- the reader falls back to a paragraph-level range and logs
+it, rather than writing an offset it cannot justify.
+
+Records join back to their `Clipping` by `timestamp` **plus** `spineIndex` and
+`paragraphIndex`. `Clipping::timestamp` is `millis()/1000` — seconds since boot, not a date —
+so two highlights made at the same offset in different sessions share it; the chapter and
+paragraph make a remaining collision mean the same highlight in practice.
+
+`identityEpoch` is the datetime the server hashes into the annotation's key, and it is a real
+UTC epoch taken from `wallclock.bin`. It is deliberately *not* derived from `timestamp`:
+seconds-since-boot dated every highlight 1970 on the server and made the upload watermark
+non-monotonic, so a highlight created early in a session looked older than one from a previous
+session and was skipped as already sent. For a highlight received *from* the server it holds
+that server's own datetime, without which the server saw a foreign key, re-offered the
+highlight on every sync, and never reported its deletion.
+
+Kept separate from the clipping format because several screens read that one: highlight
+sync can gain fields without any of them caring. A file whose magic does not match is
+discarded on read and rewritten on the next write, costing only the minted xpointers,
+which the reader re-stamps as chapters are opened. Capped at 256 records, matching
+`CLIPPING_MAX_PER_BOOK`.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `BOA1`
+- `[4-7]` `watermark` (`uint32_t`, newest highlight timestamp the server has accepted, `0` when nothing has been sent)
+- Repeated variable-length records:
+  - `[0-3]` `timestamp` (`uint32_t`, `Clipping::timestamp`, seconds since boot; part of the join key)
+  - `[4-7]` `identityEpoch` (`uint32_t`, the datetime the server keys on, real UTC epoch seconds)
+  - `[8-9]` `spineIndex` (`uint16_t`)
+  - `[10-11]` `paragraphIndex` (`uint16_t`)
+  - `[12-13]` `pos0Length` (`uint16_t`, 1-512)
+  - `[14-15]` `pos1Length` (`uint16_t`, 1-512)
+  - `[16…]` `pos0` then `pos1` (that many bytes each, KOReader xpointers, not null-terminated)
 
 ## `bookorbit_stats.bin`
 

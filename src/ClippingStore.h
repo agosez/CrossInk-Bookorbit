@@ -6,7 +6,10 @@
 #include <vector>
 
 inline constexpr size_t CLIPPING_CHAPTER_TITLE_MAX = 48;
-inline constexpr size_t CLIPPING_TEXT_MAX = 512;
+// Raised from 512 so long web-created highlights survive sync in full. Files written by
+// older builds hold at most 512 bytes per text; older firmware reading a longer record
+// treats the file as corrupt, so downgrading after saving one drops that book's clippings.
+inline constexpr size_t CLIPPING_TEXT_MAX = 2048;
 inline constexpr uint16_t CLIPPING_MAX_PER_BOOK = 256;
 inline constexpr uint16_t CLIPPING_MAX_PAGE_MATCHES = 16;
 
@@ -53,6 +56,10 @@ class ClippingStore {
                         uint16_t paragraphIndex, const std::string& text, uint32_t layoutSignature);
   bool stampMissingLayoutSignature(uint32_t layoutSignature);
   bool removeClippingAt(size_t index);
+  // Replaces one clipping's stored text (capped at CLIPPING_TEXT_MAX), rewriting the file.
+  // Used when the exact source text of a highlight becomes known after the clipping was built
+  // from rendered words, whose reconstructed spacing can differ from the source.
+  bool replaceClippingText(size_t index, const std::string& text);
   bool saveToFile();
   void clearAll();
 
@@ -63,6 +70,10 @@ class ClippingStore {
   const std::vector<Clipping>& getClippings() const { return clippings; }
   bool readClippingText(size_t index, std::string& out) const;
   bool readClippingText(const Clipping& clipping, std::string& out) const;
+  // Reads at most maxBytes of the text (trimming a cut trailing UTF-8 sequence). List rows
+  // show a one-line snippet, and reading a 2 KB text to display its first line -- once per
+  // visible row, on every scroll step -- is what made the clippings list slow to open.
+  bool readClippingTextPrefix(size_t index, size_t maxBytes, std::string& out) const;
 
   static bool hasAnyClippings();
   static bool getAllClippedBooks(std::vector<ClippedBookEntry>& out);
@@ -80,6 +91,7 @@ class ClippingStore {
   std::string storeFilePath;
   bool dirty = false;
 
+  bool readTextSpan(const Clipping& clipping, uint16_t length, std::string& out) const;
   bool readFromFile();
   bool readFromFile(const std::string& path, std::vector<Clipping>& out) const;
   bool writeToFile(const std::string* replacementText = nullptr, size_t replacementIndex = SIZE_MAX);

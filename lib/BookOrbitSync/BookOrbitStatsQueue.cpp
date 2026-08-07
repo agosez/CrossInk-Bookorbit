@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "DaysFromCivil.h"
+
 namespace {
 constexpr char QUEUE_FILENAME[] = "/bookorbit_stats.bin";
 // 4-byte header: magic + format version. Bump the version if the record layout changes
@@ -17,16 +19,6 @@ constexpr char QUEUE_FILENAME[] = "/bookorbit_stats.bin";
 constexpr char QUEUE_MAGIC[4] = {'B', 'O', 'Q', '1'};
 
 std::string queuePath(const std::string& bookCachePath) { return bookCachePath + QUEUE_FILENAME; }
-
-// Howard Hinnant's days_from_civil: days since 1970-01-01 for a Gregorian date.
-int32_t daysFromCivil(int year, unsigned month, unsigned day) {
-  year -= month <= 2;
-  const int32_t era = (year >= 0 ? year : year - 399) / 400;
-  const uint32_t yoe = static_cast<uint32_t>(year - era * 400);
-  const uint32_t doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
-  const uint32_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-  return era * 146097 + static_cast<int32_t>(doe) - 719468;
-}
 
 // The DS3231 is synced in UTC (see HalClock); only present on the X3.
 bool rtcUtcEpoch(uint32_t& outEpochSeconds) {

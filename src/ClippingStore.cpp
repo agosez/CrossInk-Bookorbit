@@ -176,6 +176,15 @@ bool ClippingStore::stampMissingLayoutSignature(const uint32_t layoutSignature) 
   return false;
 }
 
+bool ClippingStore::replaceClippingText(const size_t index, const std::string& text) {
+  if (index >= clippings.size() || text.empty()) return false;
+  if (!writeToFile(&text, index)) {
+    LOG_ERR("CLIP", "Failed to replace clipping text %u", (unsigned)index);
+    return false;
+  }
+  return true;
+}
+
 bool ClippingStore::removeClippingAt(const size_t index) {
   if (index >= clippings.size()) return false;
   Clipping clipping = std::move(clippings[index]);
@@ -207,8 +216,27 @@ bool ClippingStore::readClippingText(const size_t index, std::string& out) const
 }
 
 bool ClippingStore::readClippingText(const Clipping& clipping, std::string& out) const {
+  return readTextSpan(clipping, clipping.textLength, out);
+}
+
+bool ClippingStore::readClippingTextPrefix(const size_t index, const size_t maxBytes, std::string& out) const {
+  const Clipping* clipping = clippingAt(index);
+  if (!clipping) {
+    out.clear();
+    return false;
+  }
+  if (!readTextSpan(*clipping, static_cast<uint16_t>(std::min<size_t>(clipping->textLength, maxBytes)), out)) {
+    return false;
+  }
+  // A byte cut can land inside a UTF-8 sequence; drop the partial tail rather than render it.
+  while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xC0) == 0x80) out.pop_back();
+  if (!out.empty() && static_cast<unsigned char>(out.back()) >= 0xC0) out.pop_back();
+  return true;
+}
+
+bool ClippingStore::readTextSpan(const Clipping& clipping, const uint16_t length, std::string& out) const {
   out.clear();
-  if (clipping.textLength == 0) return true;
+  if (clipping.textLength == 0 || length == 0) return true;
   if (storeFilePath.empty()) return false;
 
   FsFile f;
@@ -220,9 +248,8 @@ bool ClippingStore::readClippingText(const Clipping& clipping, std::string& out)
     LOG_ERR("CLIP", "Failed to seek clipping text at %u: %s", clipping.textOffset, storeFilePath.c_str());
     return false;
   }
-  out.resize(clipping.textLength);
-  const int expected = static_cast<int>(clipping.textLength);
-  const bool ok = f.read(&out[0], clipping.textLength) == expected;
+  out.resize(length);
+  const bool ok = f.read(&out[0], length) == static_cast<int>(length);
   f.close();
   if (!ok) {
     out.clear();

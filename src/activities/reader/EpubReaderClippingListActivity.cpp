@@ -53,6 +53,10 @@ bool isUtf8SpaceAt(const std::string& text, const size_t index, size_t& advance)
   return false;
 }
 
+// One display line never needs more source text than this; reading and measuring beyond it
+// is pure waste, multiplied by every visible row on every scroll step.
+constexpr size_t LIST_SNIPPET_MAX_BYTES = 192;
+
 void buildOneLineSnippetText(const std::string& text, std::string& out) {
   out.clear();
   bool lastWasSpace = true;
@@ -533,7 +537,7 @@ void EpubReaderClippingListActivity::buildListScreen(UiApp::ScreenType& screen) 
   for (int i = topIndex; i < end; ++i) {
     const size_t slot = static_cast<size_t>(i - topIndex);
     uiRawText[slot].clear();
-    CLIPPINGS.readClippingText(static_cast<size_t>(i), uiRawText[slot]);
+    CLIPPINGS.readClippingTextPrefix(static_cast<size_t>(i), LIST_SNIPPET_MAX_BYTES, uiRawText[slot]);
     buildOneLineSnippetText(uiRawText[slot], uiLabels[slot]);
     const Clipping* clipping = CLIPPINGS.clippingAt(static_cast<size_t>(i));
     fui::ListItem& item = uiItems[static_cast<size_t>(i)];

@@ -9,6 +9,11 @@ on; for everything inherited from upstream, see the
 
 Based on CrossInk v1.5.0-rc-3.
 
+### Changed
+
+- A clipping saved with BookOrbit sync configured now stores the book's exact source text for the highlighted span (including the French non-breaking spaces before punctuation, kept as plain spaces). Clipping text used to be rebuilt from the rendered words, whose justified spacing could differ from the source ("mot ." for "mot.") -- visible in the clippings list and exports, and rejected by BookOrbit's text verification.
+- Saved highlights and clippings keep up to 2048 bytes of text (previously 512), so long web-created highlights survive sync in full. Downgrading to an older release after saving a longer one makes that older firmware treat the book's clippings file as corrupt and drop it.
+
 ### Fixed
 
 - Starting a BookOrbit or KOReader sync no longer crashes the device. Both ask an internet time server for the current time before syncing, and they did so from the wrong thread — harmless on earlier firmware, but the network stack CrossInk 1.5.0 builds against checks for this and aborts on the spot. It only happened when the time server's address was not already known, which is why a sync could work one minute and crash the next.
@@ -18,6 +23,18 @@ Based on CrossInk v1.5.0-rc-3.
 ### Security
 
 - BookOrbit connections no longer verify the server's certificate. The TLS transport that can complete these handshakes has no access to the root-certificate store the previous one used, so it cannot confirm that the server answering is really yours. Your credentials and reading data are still encrypted in transit; what is no longer checked is the identity at the other end, which matters on a network you do not control — a café or airport hotspot rather than your home WiFi. The same limitation applies to the OPDS catalog since CrossInk 1.5.0, and has always applied to KOReader Sync. It will be lifted once the SDK exposes a certificate store to that transport; until then, sync from a network you trust.
+
+## [Unreleased]
+
+Based on CrossInk v1.5.0-rc-3.
+
+### Added
+
+- Highlights now sync with BookOrbit, in both directions, on each BookOrbit sync of a book. Highlights made on the device appear in BookOrbit's web reader at their exact position; highlights created on the web come down and are drawn in the book; deletions propagate both ways. The sync screen reports what the exchange did ("Highlights: N sent, N added, N removed"). New highlights upload in batches of 8 per sync — this hardware bounds the payload that can share a TLS session — so a large backlog drains over a few syncs, and highlights made before this feature gain sync positions progressively as you read (one per chapter visited). A highlight's stored text is capped at 2048 bytes, so the drawn span of an extremely long web highlight ends where that cap cuts its text.
+
+### Fixed
+
+- Saved highlights are drawn again after a font or layout change in real-world text. The reader re-finds a highlight by matching its text word-by-word against the page, but the layout splits punctuation and hyphens into words of their own ("toilettes", ".") and hyphenation splits words at line breaks ("Bi-", "zarre"), so any highlight containing punctuation — in French, nearly all of them — silently stopped being drawn. A character-level match that ignores whitespace and hyphens on both sides now takes over when the word-by-word one fails, and it also draws highlights that span a page turn on both of their pages.
 
 ## [v1.4.1+bookorbit.3] - 2026-08-02
 

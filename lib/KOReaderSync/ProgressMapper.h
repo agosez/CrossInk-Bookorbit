@@ -51,6 +51,21 @@ enum class PositionCoordinateSpace : uint8_t {
 class ProgressMapper {
  public:
   /**
+   * Read the chapter and paragraph an xpointer names, without opening the book.
+   *
+   * toCrossPoint() resolves a position exactly, but to do so it streams the whole chapter and
+   * walks the xpointer's ancestry -- and that walk fails on the forms crengine emits for a
+   * single child, where the index is omitted (`/section/`, `/b/`). It also computes a progress
+   * fraction, which a caller that only wants to know *where* a highlight lives does not need.
+   *
+   * The spine index is exact: it comes straight from DocFragment[N]. The paragraph index is the
+   * sibling index of the last `p[N]` step, which equals the chapter's running paragraph count
+   * only when every paragraph shares one container -- so treat it as a hint, not a position.
+   *
+   * @return false when the xpointer names no DocFragment, leaving both outputs untouched
+   */
+  static bool parseXPointerLocation(const std::string& xpath, int& outSpineIndex, uint16_t& outParagraphIndex);
+  /**
    * Convert CrossPoint position to KOReader format.
    *
    * @param epub The EPUB book

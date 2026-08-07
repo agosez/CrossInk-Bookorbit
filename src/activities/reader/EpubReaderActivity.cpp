@@ -26,10 +26,12 @@
 #include "../settings/BookOrbitSettingsActivity.h"
 #include "../settings/DictionarySelectActivity.h"
 #include "../settings/KOReaderSettingsActivity.h"
+#include "BookOrbitAnnotationStore.h"
 #include "BookOrbitCredentialStore.h"
 #include "BookOrbitStatsQueue.h"
 #include "BookOrbitSyncActivity.h"
 #include "BookStatsActivity.h"
+#include "ChapterXPathResolver.h"
 #include "ClipSelectionActivity.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
@@ -570,6 +572,114 @@ bool findClippingTextOnPage(const Page& page, const std::string& clippingText, C
   return found;
 }
 
+// Byte length of a codepoint the loose matcher ignores -- whitespace in all its forms, plus
+// hyphens (ASCII, soft U+00AD, U+2010, non-breaking U+2011) -- or 0 for a codepoint that counts.
+size_t clipLooseSkipLen(const char* cursor) {
+  const unsigned char c = static_cast<unsigned char>(*cursor);
+  if (c == '-') return 1;
+  if (std::isspace(c)) return 1;
+  size_t advance = 0;
+  if (isUtf8SpaceAt(cursor, advance)) return advance;
+  const unsigned char c1 = static_cast<unsigned char>(cursor[1]);
+  if (c == 0xC2 && c1 == 0xAD) return 2;
+  if (c == 0xE2 && c1 == 0x80) {
+    const unsigned char c2 = static_cast<unsigned char>(cursor[2]);
+    if (c2 == 0x90 || c2 == 0x91) return 3;
+  }
+  return 0;
+}
+
+/**
+ * Codepoint-level fallback for findClippingTextOnPage.
+ *
+ * The strict matcher requires every page word to equal a whitespace-delimited token of the
+ * stored text. But the layout splits punctuation and hyphens into words of their own
+ * ("toilettes", "."), and hyphenation splits words across lines ("Bi-", "zarre") -- so any text
+ * containing punctuation or a hyphenated line break can never match, which in French is nearly
+ * every sentence. Comparing raw bytes with whitespace and hyphens dropped from both sides makes
+ * those equal again ("làdedans" == "là"+"-"+"dedans", "Bizarre" == "Bi-"+"zarre"), and byte
+ * search stays exact on UTF-8 since both sides are normalized identically. The match maps back
+ * to the words that contributed its first and last byte; a text that starts or ends mid-word
+ * (web selections can) highlights the whole containing word.
+ */
+bool findClippingTextOnPageLoose(const Page& page, const std::string& clippingText, ClippingPageMatch& match) {
+  std::string needle;
+  needle.reserve(clippingText.size());
+  for (const char* cursor = clippingText.c_str(); *cursor != '\0';) {
+    const size_t skip = clipLooseSkipLen(cursor);
+    if (skip > 0) {
+      cursor += skip;
+      continue;
+    }
+    needle.push_back(*cursor++);
+  }
+  if (needle.empty()) return false;
+
+  // Transient and bounded: one page of text (~1KB) plus one word index per kept byte, built
+  // only when the strict matcher has already failed, freed before this returns.
+  std::string haystack;
+  std::vector<uint16_t> wordOfByte;
+  haystack.reserve(1024);
+  wordOfByte.reserve(1024);
+  forEachVisiblePageWord(page, [&](const uint16_t wordIndex, const PageLine&, const TextBlock& block, const size_t i) {
+    const char* word = block.wordText(static_cast<uint16_t>(i));
+    for (const char* cursor = word + (hasEmSpacePrefix(word) ? 3 : 0); *cursor != '\0';) {
+      const size_t skip = clipLooseSkipLen(cursor);
+      if (skip > 0) {
+        cursor += skip;
+        continue;
+      }
+      haystack.push_back(*cursor++);
+      wordOfByte.push_back(wordIndex);
+    }
+    return true;
+  });
+
+  if (haystack.empty()) return false;
+  const size_t position = haystack.find(needle);
+  if (position != std::string::npos) {
+    match.startWord = wordOfByte[position];
+    match.endWord = wordOfByte[position + needle.size() - 1];
+    return true;
+  }
+
+  // A clipping can span a page turn, in which case no single page contains the whole text.
+  // Accept overlaps anchored at both a page edge and a needle edge: the head of the highlight
+  // ending exactly at the page's last byte, its tail starting at the first, or a middle page
+  // contained whole. Each candidate must clear a byte floor AND a word floor -- the strict
+  // matcher's minPartialMatch equivalent. Bytes alone proved far too loose: six normalized
+  // bytes is two short French words ("dans le" -> "dansle"), and any page opening with the
+  // same two words the highlight ends with grew a spurious fragment.
+  constexpr size_t MIN_SPAN_OVERLAP_BYTES = 12;
+  constexpr uint16_t MIN_SPAN_OVERLAP_WORDS = 3;
+  const auto spansEnoughWords = [&](const uint16_t firstWord, const uint16_t lastWord) {
+    return lastWord >= firstWord && static_cast<uint16_t>(lastWord - firstWord + 1) >= MIN_SPAN_OVERLAP_WORDS;
+  };
+
+  if (needle.size() > haystack.size() && haystack.size() >= MIN_SPAN_OVERLAP_BYTES &&
+      spansEnoughWords(wordOfByte.front(), wordOfByte.back()) && needle.find(haystack) != std::string::npos) {
+    match.startWord = wordOfByte.front();
+    match.endWord = wordOfByte.back();
+    return true;
+  }
+  const size_t maxOverlap = std::min(needle.size() - 1, haystack.size());
+  for (size_t overlap = maxOverlap; overlap >= MIN_SPAN_OVERLAP_BYTES; overlap--) {
+    if (memcmp(haystack.data() + haystack.size() - overlap, needle.data(), overlap) == 0 &&
+        spansEnoughWords(wordOfByte[haystack.size() - overlap], wordOfByte.back())) {
+      match.startWord = wordOfByte[haystack.size() - overlap];
+      match.endWord = wordOfByte.back();
+      return true;
+    }
+    if (memcmp(haystack.data(), needle.data() + needle.size() - overlap, overlap) == 0 &&
+        spansEnoughWords(wordOfByte.front(), wordOfByte[overlap - 1])) {
+      match.startWord = wordOfByte.front();
+      match.endWord = wordOfByte[overlap - 1];
+      return true;
+    }
+  }
+  return false;
+}
+
 uint16_t countVisiblePageWords(const Page& page) {
   uint16_t count = 0;
   forEachVisiblePageWord(page, [&](const uint16_t, const PageLine&, const TextBlock&, const size_t) {
@@ -658,7 +768,8 @@ bool pageContainsClippingText(Section& section, const std::string& clippingText,
   if (!loadedPage) return false;
 
   ClippingPageMatch match;
-  return findClippingTextOnPage(*loadedPage, clippingText, match);
+  if (findClippingTextOnPage(*loadedPage, clippingText, match)) return true;
+  return findClippingTextOnPageLoose(*loadedPage, clippingText, match);
 }
 
 bool findClippingPageNear(Section& section, const std::string& clippingText, const uint16_t center,
@@ -3996,6 +4107,7 @@ void EpubReaderActivity::startClipSelection() {
                                   chapterTitle.c_str(), clip.paragraphIndex, clip.text, clippingLayoutSignature);
         bool exported = false;
         if (addResult == ClippingStore::AddResult::Added) {
+          recordAnnotationPosition(clippingIndex, clip.paragraphIndex, clip.text);
           exported = ClippingsManager::saveClipping(bookTitle, author, chapterTitle,
                                                     static_cast<int>(clip.sectionPage) + 1, clip.text);
           if (!exported && !CLIPPINGS.removeClippingAt(clippingIndex)) {
@@ -5436,6 +5548,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     pageShownAtMs = activeFootnotePreview ? 0UL : millis();
   }
   if (!activeFootnotePreview) {
+    // The page is already on the panel, so the chapter parse this may do costs nothing visible.
+    if (currentSpineIndex != annotationBackfillSpine) {
+      backfillAnnotationPositions();
+    }
     const int totalPages = section->estimatedTotalPages();
     // render() also runs on menu/bookmark/screenshot re-renders. Avoid repeating
     // the same progress.bin write unless the rendered position or estimated total changed.
@@ -5734,6 +5850,95 @@ bool EpubReaderActivity::queueProgressSave(const int spineIndex, const int curre
     return true;
   }
   return saveProgress(spineIndex, currentPage, pageCount);
+}
+
+void EpubReaderActivity::backfillAnnotationPositions() {
+  // Once per chapter per session, whatever the outcome: a chapter with nothing to do must not
+  // be re-examined on every page turn.
+  annotationBackfillSpine = currentSpineIndex;
+  if (!BOOKORBIT_STORE.hasCredentials() || !epub || !CLIPPINGS.hasClippings()) return;
+
+  std::vector<BookOrbitAnnotationRecord> records;
+  BookOrbitAnnotationStore::readAll(epub->getCachePath(), records);
+
+  // One highlight per visit. Minting a position parses the whole chapter, and this runs on the
+  // task that also serves input: two or three in a row would freeze the reader for seconds.
+  // Reading on converges the rest, chapter by chapter.
+  size_t pending = 0;
+  size_t target = SIZE_MAX;
+  for (size_t i = 0; i < CLIPPINGS.clippingCount(); i++) {
+    const Clipping* clipping = CLIPPINGS.clippingAt(i);
+    if (!clipping || clipping->spineIndex != currentSpineIndex || clipping->timestamp == 0) continue;
+    if (clipping->paragraphIndex == UINT16_MAX) continue;
+    const bool stamped = std::any_of(records.begin(), records.end(), [&](const BookOrbitAnnotationRecord& record) {
+      return record.timestamp == clipping->timestamp;
+    });
+    if (stamped) continue;
+    pending++;
+    if (target == SIZE_MAX) target = i;
+  }
+  if (target == SIZE_MAX) return;
+
+  std::string text;
+  if (!CLIPPINGS.readClippingText(target, text) || text.empty()) return;
+  const Clipping* clipping = CLIPPINGS.clippingAt(target);
+  if (!clipping) return;
+
+  LOG_INF("BOA", "Backfilling a highlight position in spine %d (%u pending here)", currentSpineIndex,
+          (unsigned)pending);
+  recordAnnotationPosition(target, clipping->paragraphIndex, text);
+}
+
+void EpubReaderActivity::recordAnnotationPosition(const size_t clippingIndex, const uint16_t paragraphIndex,
+                                                  const std::string& highlightText) {
+  if (!BOOKORBIT_STORE.hasCredentials()) return;  // nothing will ever sync these
+  if (paragraphIndex == UINT16_MAX || !epub) return;
+
+  const Clipping* clipping = CLIPPINGS.clippingAt(clippingIndex);
+  if (!clipping || clipping->timestamp == 0) return;
+
+  // Positions are minted here, while the chapter is open, and never recomputed: the server
+  // keys annotations by a hash of pos0, so a position rebuilt under a different layout would
+  // make every highlight reappear as new.
+  BookOrbitAnnotationRecord record;
+  std::string sourceText;
+  if (!ChapterXPathResolver::findHighlightXPointers(epub, currentSpineIndex, paragraphIndex, highlightText, record.pos0,
+                                                    record.pos1, &sourceText)) {
+    // Falling back to a paragraph-level range, which the server will resolve to nothing and
+    // flag as repaired. Imprecise but visible beats a highlight that never syncs at all.
+    record.pos0 = ChapterXPathResolver::findXPathForParagraph(epub, currentSpineIndex, paragraphIndex);
+    record.pos1 = record.pos0;
+    LOG_ERR("BOA", "No precise position for highlight in spine %d paragraph %u; falling back to the paragraph",
+            currentSpineIndex, paragraphIndex);
+  }
+  if (record.pos0.empty()) {
+    LOG_ERR("BOA", "No xpointer for highlight in spine %d paragraph %u; it will not sync", currentSpineIndex,
+            paragraphIndex);
+    return;
+  }
+
+  // The clipping's text was rebuilt from rendered words, whose geometric joins misplace spaces
+  // around detached punctuation ("securisee ." for "securisee."). The server verifies an upload
+  // by reading its own copy back and comparing texts, so what we store -- and later send --
+  // must be the source's. The reader's own clippings list and exports read better for it too.
+  if (!sourceText.empty() && sourceText != highlightText) {
+    CLIPPINGS.replaceClippingText(clippingIndex, sourceText);
+  }
+
+  record.timestamp = clipping->timestamp;
+  // Not clipping->timestamp: that field is millis()/1000, seconds since boot, not a date. Using
+  // it dated every highlight 1970 on the server, and made the upload watermark non-monotonic --
+  // a highlight created early in a session looked older than one from a previous session and was
+  // skipped as already sent. WallClock gives real time, corrected on devices with no clock chip.
+  if (!WallClock::now(record.identityEpoch)) {
+    LOG_ERR("BOA", "No plausible clock yet; this highlight syncs after the next time sync");
+    return;
+  }
+  record.spineIndex = static_cast<uint16_t>(currentSpineIndex);
+  record.paragraphIndex = paragraphIndex;
+  if (BookOrbitAnnotationStore::put(epub->getCachePath(), record)) {
+    LOG_DBG("BOA", "Stored highlight position %s", record.pos0.c_str());
+  }
 }
 
 bool EpubReaderActivity::flushQueuedProgress() {
@@ -6144,7 +6349,18 @@ void EpubReaderActivity::drawClippingHighlights(const Page& page, const int font
     if (!matchedStoredRange && shouldSearchText) {
       clippingText.clear();
       if (CLIPPINGS.readClippingText(clipping, clippingText)) {
-        matchedText = findClippingTextOnPage(page, clippingText, match);
+        // The strict word-token matcher only runs when the stored range still anchors the
+        // search to known pages: its partial-run rule accepts any three consecutive tokens
+        // that reach a page edge, which is sound near the clipping's own pages and disastrous
+        // swept across a whole chapter -- dialogue-transcript books repeat three-token runs
+        // ("ZEV :", "CARL :") everywhere. Un-anchored sweeps use only the codepoint matcher,
+        // whose partial overlaps must coincide with both a page edge and a text edge.
+        if (storedLayoutMatches) {
+          matchedText = findClippingTextOnPage(page, clippingText, match);
+        }
+        if (!matchedText) {
+          matchedText = findClippingTextOnPageLoose(page, clippingText, match);
+        }
       }
     }
     if (matchedStoredRange || matchedText) {

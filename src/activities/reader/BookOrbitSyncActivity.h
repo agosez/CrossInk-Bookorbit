@@ -4,7 +4,9 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
+#include "BookOrbitAnnotations.h"
 #include "BookOrbitSyncClient.h"
 #include "ProgressMapper.h"
 #include "activities/Activity.h"
@@ -93,6 +95,30 @@ class BookOrbitSyncActivity final : public Activity {
   void performSync();
   void performUpload();
   void uploadQueuedStats();
+
+  // Highlights are prepared before the TLS session and sent inside it, never both at once:
+  // the resident clipping store is ~20KB, a batch ~6KB, and the client needs 55KB free to
+  // handshake at all. One batch per sync; the watermark makes the rest follow on later syncs.
+  void prepareAnnotationBatch();
+  void uploadAnnotationBatch();
+  // Runs after the session closes and the epub is loaded: writing clippings needs the heap the
+  // handshake was using, and placing an incoming annotation needs the spine to parse its
+  // xpointer against. Acknowledges what landed on its own short connection.
+  void applyIncomingAnnotations();
+  std::vector<BookOrbitIncomingAnnotation> incomingAnnotations;
+  // Counted so the screen can say what the exchange did. Without it the step is invisible: the
+  // only way to know whether highlights synced was to read the serial log.
+  uint16_t annotationsSent = 0;
+  uint16_t annotationsAdded = 0;
+  uint16_t annotationsRemoved = 0;
+  std::vector<BookOrbitAnnotation> pendingAnnotations;
+  uint32_t pendingAnnotationWatermark = 0;
+  // Fixed-width rows rather than a container of strings, so the whole set is one allocation.
+  std::vector<BookOrbitAnnotationKey> pendingAnnotationKeys;
+  bool pendingKeysComplete = false;
+  // Above this, the key set and its JSON stop fitting beside a TLS session, so it is not sent
+  // and the server is told the set is incomplete instead of being left to infer deletions.
+  static constexpr size_t MAX_KEYS_PER_SYNC = 64;
   bool consumeInitialConfirmRelease();
   void ensureEpubLoaded();
   void saveProgressAndReturn(const CrossPointPosition& position);

@@ -1002,6 +1002,20 @@ CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epu
   return result;
 }
 
+bool ProgressMapper::parseXPointerLocation(const std::string& xpath, int& outSpineIndex, uint16_t& outParagraphIndex) {
+  const int docFrag = parseIndex(xpath, "/body/DocFragment[");
+  if (docFrag < 1) return false;
+
+  outSpineIndex = docFrag - 1;
+  // The last p[N] in the path, or li[N] for a list. Absent for a position that sits directly in
+  // a chapter's body, which stays a valid location with no paragraph hint.
+  const int paragraph = parseIndex(xpath, "/p[", true);
+  const int listItem = (paragraph > 0) ? -1 : parseIndex(xpath, "/li[", true);
+  const int hint = paragraph > 0 ? paragraph : listItem;
+  outParagraphIndex = (hint > 0 && hint <= UINT16_MAX) ? static_cast<uint16_t>(hint) : UINT16_MAX;
+  return true;
+}
+
 std::string ProgressMapper::generateXPath(const std::shared_ptr<Epub>& epub, int spineIndex, float intra) {
   const std::string base = "/body/DocFragment[" + std::to_string(spineIndex + 1) + "]/body";
   if (intra <= 0.0f) return base;
