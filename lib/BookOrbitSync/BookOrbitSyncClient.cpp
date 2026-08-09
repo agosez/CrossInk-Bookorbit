@@ -818,6 +818,232 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::ackAnnotations(const std::string
   return SERVER_ERROR;
 }
 
+BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeBookmarks(
+    const std::string& documentHash, const std::string& deviceModel, const BookOrbitAnnotationKeys& keys,
+    const BookOrbitBookmark* changes, const size_t changeCount, bool& outUnmatched,
+    std::vector<BookOrbitIncomingBookmark>* outIncoming, bool* outMorePending) {
+  lastHttpCode = 0;
+  lastTransportError = 0;
+  outUnmatched = false;
+  if (!BOOKORBIT_STORE.hasCredentials()) {
+    LOG_DBG("BookOrbit", "No credentials configured");
+    return NO_CREDENTIALS;
+  }
+
+  const std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/bookmarks/exchange";
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  LOG_DBG("BookOrbit", "Exchanging %u bookmarks, %u keys (heap: %u)", (unsigned)changeCount, (unsigned)keys.count,
+          (unsigned)freeHeap);
+  if (freeHeap < MIN_HEAP_FOR_TLS) {
+    LOG_ERR("BookOrbit", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+    return LOW_MEMORY;
+  }
+
+  std::string body;
+  {
+    JsonDocument doc;
+    doc["deviceId"] = DEVICE_ID;
+    doc["deviceModel"] = deviceModel;
+    doc["pluginVersion"] = "crossink-bo-1";
+
+    JsonArray books = doc["books"].to<JsonArray>();
+    JsonObject book = books.add<JsonObject>();
+    book["hash"] = documentHash;
+    book["keysComplete"] = keys.complete;
+    JsonArray jsonKeys = book["keys"].to<JsonArray>();
+    for (size_t i = 0; keys.rows && i < keys.count; i++) {
+      JsonObject key = jsonKeys.add<JsonObject>();
+      key["k"] = keys.rows[i].k;
+      key["dt"] = keys.rows[i].dt;
+    }
+
+    JsonArray jsonChanges = book["changes"].to<JsonArray>();
+    for (size_t i = 0; changes && i < changeCount; i++) {
+      const BookOrbitBookmark& bookmark = changes[i];
+      JsonObject entry = jsonChanges.add<JsonObject>();
+      entry["datetime"] = bookmark.datetime;
+      entry["pos"] = bookmark.pos;
+      if (!bookmark.chapter.empty()) entry["chapter"] = bookmark.chapter;
+      if (bookmark.pageno > 0) entry["pageno"] = bookmark.pageno;
+    }
+    serializeJson(doc, body);
+  }
+
+#ifdef SIMULATOR
+  HTTPClient http;
+  std::unique_ptr<WiFiClientSecure> secureClient;
+  WiFiClient plainClient;
+
+  if (isHttpsUrl(url)) {
+    secureClient.reset(new WiFiClientSecure);
+    secureClient->setInsecure();
+    http.begin(*secureClient, url.c_str());
+  } else {
+    http.begin(plainClient, url.c_str());
+  }
+  addAuthHeaders(http);
+  http.addHeader("Content-Type", "application/json");
+
+  const int httpCode = http.POST(body.c_str());
+  std::string response = httpCode > 0 ? http.getString().c_str() : "";
+  http.end();
+#else
+  LOG_DBG("BookOrbit", "POST body bytes=%u", static_cast<unsigned>(body.length()));
+  std::string response;
+  const int httpCode = sendBookOrbitRequest("POST", url, &body, response);
+#endif
+  lastHttpCode = httpCode > 0 ? httpCode : 0;
+  lastTransportError = httpCode < 0 ? httpCode : 0;
+  body.clear();
+  body.shrink_to_fit();
+  LOG_DBG("BookOrbit", "Bookmark exchange response: %d", httpCode);
+
+  if (httpCode < 0) return NETWORK_ERROR;
+  if (httpCode == 401) return AUTH_FAILED;
+  if (httpCode < 200 || httpCode >= 300) return SERVER_ERROR;
+
+  JsonDocument filter;
+  filter["unmatched"] = true;
+  filter["results"][0]["more"] = true;
+  filter["results"][0]["skippedNoPosition"] = true;
+  JsonObject addFilter = filter["results"][0]["toApply"]["add"].add<JsonObject>();
+  addFilter["serverId"] = true;
+  addFilter["pos"] = true;
+  addFilter["title"] = true;
+  addFilter["pageno"] = true;
+  JsonObject deleteFilter = filter["results"][0]["toApply"]["delete"].add<JsonObject>();
+  deleteFilter["serverId"] = true;
+  deleteFilter["key"] = true;
+
+  JsonDocument doc;
+  if (deserializeJson(doc, response, DeserializationOption::Filter(filter)) != DeserializationError::Ok) {
+    LOG_ERR("BookOrbit", "Failed to parse bookmark exchange response");
+    return JSON_ERROR;
+  }
+  for (JsonVariantConst hash : doc["unmatched"].as<JsonArrayConst>()) {
+    if (documentHash == hash.as<const char*>()) {
+      LOG_INF("BookOrbit", "Server does not know this document; bookmarks not exchanged");
+      outUnmatched = true;
+      return OK;
+    }
+  }
+  if (outMorePending) {
+    *outMorePending = (doc["results"][0]["more"] | false) || (doc["results"][0]["skippedNoPosition"] | 0) > 0;
+  }
+  if (!outIncoming) return OK;
+
+  JsonObjectConst toApply = doc["results"][0]["toApply"].as<JsonObjectConst>();
+  const auto collect = [&](const char* field, const bool deleted) {
+    for (JsonObjectConst entry : toApply[field].as<JsonArrayConst>()) {
+      if (outIncoming->size() >= BOOKORBIT_BOOKMARK_BATCH) {
+        LOG_INF("BookOrbit", "More server-side bookmark changes remain; they arrive next sync");
+        return;
+      }
+      const uint32_t serverId = entry["serverId"] | 0U;
+      // Later pull rounds repeat entries not yet acknowledged.
+      const bool alreadyCollected =
+          std::any_of(outIncoming->begin(), outIncoming->end(),
+                      [&](const BookOrbitIncomingBookmark& seen) { return seen.serverId == serverId; });
+      if (alreadyCollected) continue;
+      const char* pos = entry["pos"] | "";
+      const char* key = entry["key"] | "";
+      if (serverId == 0 || (deleted ? !*key : !*pos)) continue;
+
+      BookOrbitIncomingBookmark incoming;
+      incoming.serverId = serverId;
+      incoming.key = key;
+      incoming.pos = pos;
+      incoming.title = entry["title"] | "";
+      incoming.pageno = entry["pageno"] | 0;
+      incoming.deleted = deleted;
+      outIncoming->push_back(std::move(incoming));
+    }
+  };
+  collect("add", false);
+  collect("delete", true);
+  if (!outIncoming->empty()) {
+    LOG_INF("BookOrbit", "Server sent %u bookmark change(s)", (unsigned)outIncoming->size());
+  }
+  return OK;
+}
+
+BookOrbitSyncClient::Error BookOrbitSyncClient::ackBookmarks(const std::string& documentHash,
+                                                             const std::string& deviceModel,
+                                                             const std::vector<BookOrbitBookmarkAck>& applied,
+                                                             const std::vector<uint32_t>& deletedServerIds) {
+  lastHttpCode = 0;
+  lastTransportError = 0;
+  if (!BOOKORBIT_STORE.hasCredentials()) return NO_CREDENTIALS;
+  if (applied.empty() && deletedServerIds.empty()) return OK;
+
+  const std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/bookmarks/exchange-ack";
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  if (freeHeap < MIN_HEAP_FOR_TLS) {
+    LOG_ERR("BookOrbit", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+    return LOW_MEMORY;
+  }
+
+  std::string body;
+  {
+    JsonDocument doc;
+    doc["deviceId"] = DEVICE_ID;
+    doc["deviceModel"] = deviceModel;
+    doc["pluginVersion"] = "crossink-bo-1";
+    JsonArray books = doc["books"].to<JsonArray>();
+    JsonObject book = books.add<JsonObject>();
+    book["hash"] = documentHash;
+    JsonArray appliedArray = book["applied"].to<JsonArray>();
+    for (const BookOrbitBookmarkAck& ack : applied) {
+      JsonObject entry = appliedArray.add<JsonObject>();
+      entry["serverId"] = ack.serverId;
+      entry["status"] = ack.failed ? "failed" : "applied";
+      // The local identity this device minted; it is what links the server's bookmark here.
+      if (!ack.failed && ack.key[0] != '\0') {
+        entry["key"] = ack.key;
+        entry["datetime"] = ack.datetime;
+        entry["pos"] = ack.pos;
+      }
+    }
+    JsonArray deletedArray = book["deleted"].to<JsonArray>();
+    for (const uint32_t serverId : deletedServerIds) {
+      JsonObject entry = deletedArray.add<JsonObject>();
+      entry["serverId"] = serverId;
+      entry["status"] = "applied";
+    }
+    serializeJson(doc, body);
+  }
+
+#ifdef SIMULATOR
+  HTTPClient http;
+  std::unique_ptr<WiFiClientSecure> secureClient;
+  WiFiClient plainClient;
+
+  if (isHttpsUrl(url)) {
+    secureClient.reset(new WiFiClientSecure);
+    secureClient->setInsecure();
+    http.begin(*secureClient, url.c_str());
+  } else {
+    http.begin(plainClient, url.c_str());
+  }
+  addAuthHeaders(http);
+  http.addHeader("Content-Type", "application/json");
+  const int httpCode = http.POST(body.c_str());
+  http.end();
+#else
+  std::string response;
+  const int httpCode = sendBookOrbitRequest("POST", url, &body, response);
+#endif
+  lastHttpCode = httpCode > 0 ? httpCode : 0;
+  lastTransportError = httpCode < 0 ? httpCode : 0;
+  LOG_INF("BookOrbit", "Bookmark ack response: %d (%u applied, %u deleted)", httpCode, (unsigned)applied.size(),
+          (unsigned)deletedServerIds.size());
+
+  if (httpCode < 0) return NETWORK_ERROR;
+  if (httpCode == 401) return AUTH_FAILED;
+  if (httpCode >= 200 && httpCode < 300) return OK;
+  return SERVER_ERROR;
+}
+
 std::string BookOrbitSyncClient::errorString(Error error) {
   switch (error) {
     case OK:

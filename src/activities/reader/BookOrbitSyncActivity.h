@@ -106,6 +106,21 @@ class BookOrbitSyncActivity final : public Activity {
   // xpointer against. Acknowledges what landed on its own short connection.
   void applyIncomingAnnotations();
   std::vector<BookOrbitIncomingAnnotation> incomingAnnotations;
+
+  // Bookmarks follow the same three phases on the same session. Their identity convention is
+  // inverted (see BookOrbitBookmarks.h): applying a web bookmark MINTS a local identity and
+  // reports it in the acknowledgment.
+  void prepareBookmarkBatch();
+  void uploadBookmarkBatch();
+  void applyIncomingBookmarks();
+  std::vector<BookOrbitBookmark> pendingBookmarks;
+  uint32_t pendingBookmarkWatermark = 0;
+  std::vector<BookOrbitAnnotationKey> pendingBookmarkKeys;
+  bool pendingBookmarkKeysComplete = false;
+  std::vector<BookOrbitIncomingBookmark> incomingBookmarks;
+  uint16_t bookmarksSent = 0;
+  uint16_t bookmarksAdded = 0;
+  uint16_t bookmarksRemoved = 0;
   // Counted so the screen can say what the exchange did. Without it the step is invisible: the
   // only way to know whether highlights synced was to read the serial log.
   uint16_t annotationsSent = 0;

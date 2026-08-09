@@ -315,6 +315,65 @@ Binary layout (all little-endian):
   - `[14-15]` `pos1Length` (`uint16_t`, 1-512)
   - `[16…]` `pos0` then `pos1` (that many bytes each, KOReader xpointers, not null-terminated)
 
+## `bookorbit_bookmarks.bin`
+
+### Version 1
+
+`bookorbit_bookmarks.bin` sits beside a book's bookmark file in the book's cache directory
+and holds what BookOrbit needs to identify each bookmark: the KOReader xpointer the server
+keys on (`md5(datetime | pos)`), plus the upload watermark. Positions are minted when the
+bookmark is created, from the page's first visible codepoint (the layout-independent
+coordinate the section cache stores per page), and never recomputed.
+
+Records join back to their `Bookmark` by `timestamp` plus `spineIndex`; `timestamp` is a
+real UTC epoch, stamped by `BookmarkStore::addBookmark` from WallClock (bookmarks from
+older builds carry 0 and gain a timestamp through the reader's backfill). `identityEpoch`
+is the datetime the server keys on: equal to `timestamp` for a bookmark made on the
+device, and the identity this device MINTED at apply time for one received from the
+server -- bookmarks invert the annotation convention, the device owns the identity and
+reports it in the exchange acknowledgment.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `BOB1`
+- `[4-7]` `watermark` (`uint32_t`, newest identityEpoch the server has accepted)
+- Repeated variable-length records:
+  - `[0-3]` `timestamp` (`uint32_t`, the bookmark's creation epoch; part of the join key)
+  - `[4-7]` `identityEpoch` (`uint32_t`)
+  - `[8-9]` `spineIndex` (`uint16_t`)
+  - `[10-11]` `posLength` (`uint16_t`, 1-512)
+  - `[12…]` `pos` (`posLength` bytes, KOReader xpointer, not null-terminated)
+
+## `bookorbit_bookmarks.bin`
+
+### Version 1
+
+Sits beside a book's cache like `bookorbit_annotations.bin` and plays the same role for
+bookmarks: the KOReader xpointer the server keys each bookmark by, plus the upload watermark.
+Positions are minted when the bookmark is created (the reader has the section and its page
+offsets open) from the bookmarked page's first visible codepoint, and never recomputed.
+
+Records join back to their `Bookmark` by `timestamp` plus `spineIndex`. Bookmark timestamps
+are real UTC epochs stamped by `BookmarkStore::addBookmark` from `wallclock.bin`; bookmarks
+from before that stamping carry 0, are invisible to sync, and gain a timestamp through the
+reader's backfill (one per chapter visit).
+
+`identityEpoch` follows the INVERSE of the annotation convention for server-created entries:
+the device mints a local identity when it applies a web bookmark and reports
+`{key, datetime, pos}` in the acknowledgment -- the server has nothing else to link its copy
+to. For bookmarks made on the device the two fields are equal.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `BOB1`
+- `[4-7]` `watermark` (`uint32_t`, newest identityEpoch the server has accepted)
+- Repeated variable-length records:
+  - `[0-3]` `timestamp` (`uint32_t`, the bookmark's creation epoch; part of the join key)
+  - `[4-7]` `identityEpoch` (`uint32_t`, the datetime the server keys on)
+  - `[8-9]` `spineIndex` (`uint16_t`)
+  - `[10-11]` `posLength` (`uint16_t`, 1-512)
+  - `[12…]` `pos` (`posLength` bytes, KOReader xpointer, not null-terminated)
+
 ## `bookorbit_stats.bin`
 
 ### Version 1

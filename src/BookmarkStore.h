@@ -45,6 +45,9 @@ class BookmarkStore {
                         uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr);
   void removeBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   bool removeBookmarkAt(size_t index);
+  // Assigns a creation timestamp to a bookmark that predates timestamp stamping (field was
+  // written as 0). BookOrbit sync joins its position records through this field.
+  bool stampMissingTimestamp(size_t index, uint32_t timestamp);
   bool hasBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   const std::vector<Bookmark>& getBookmarks() const { return bookmarks; }
 

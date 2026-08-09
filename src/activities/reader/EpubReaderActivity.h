@@ -340,10 +340,19 @@ class EpubReaderActivity final : public Activity {
   // free while this activity already has the chapter open (see BookOrbitAnnotationStore).
   void recordAnnotationPosition(size_t clippingIndex, uint16_t paragraphIndex, const std::string& highlightText);
 
+  // Mints the BookOrbit position for a bookmark just added, from the current page's visible
+  // text offset (see BookOrbitBookmarkStore).
+  void recordBookmarkPosition(const Bookmark& bookmark);
+
   // Stamps a position onto one highlight made before this feature existed, or before a book was
   // moved. Runs once per chapter per session, after the page is on screen.
   void backfillAnnotationPositions();
   int annotationBackfillSpine = -1;
+
+  // Same pattern for bookmarks: stamps legacy ones (timestamp 0) and mints missing positions,
+  // one per chapter visit.
+  void backfillBookmarkPositions();
+  int bookmarkBackfillSpine = -1;
   void cacheCurrentSectionPosition();
   void pauseReadingPaceTimer(const char* reason = "unknown");
   void resumeReadingPaceTimer(const char* reason = "unknown");

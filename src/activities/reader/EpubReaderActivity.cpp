@@ -27,6 +27,7 @@
 #include "../settings/DictionarySelectActivity.h"
 #include "../settings/KOReaderSettingsActivity.h"
 #include "BookOrbitAnnotationStore.h"
+#include "BookOrbitBookmarkStore.h"
 #include "BookOrbitCredentialStore.h"
 #include "BookOrbitStatsQueue.h"
 #include "BookOrbitSyncActivity.h"
@@ -3716,6 +3717,9 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         }
         const auto addResult =
             BOOKMARKS.addBookmark(spine, progress, bookmarkPageCount, chapterTitle, paragraphIndex, snippet);
+        if (addResult == BookmarkStore::AddResult::Added) {
+          recordBookmarkPosition(BOOKMARKS.getBookmarks().back());
+        }
         bookmarkFeedbackType = (addResult == BookmarkStore::AddResult::Added) ? BookmarkFeedbackType::Added
                                                                               : BookmarkFeedbackType::LimitReached;
       }
@@ -5553,6 +5557,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     if (currentSpineIndex != annotationBackfillSpine) {
       backfillAnnotationPositions();
     }
+    if (currentSpineIndex != bookmarkBackfillSpine) {
+      backfillBookmarkPositions();
+    }
     const int totalPages = section->estimatedTotalPages();
     // render() also runs on menu/bookmark/screenshot re-renders. Avoid repeating
     // the same progress.bin write unless the rendered position or estimated total changed.
@@ -5853,6 +5860,35 @@ bool EpubReaderActivity::queueProgressSave(const int spineIndex, const int curre
   return saveProgress(spineIndex, currentPage, pageCount);
 }
 
+void EpubReaderActivity::backfillBookmarkPositions() {
+  bookmarkBackfillSpine = currentSpineIndex;
+  if (!BOOKORBIT_STORE.hasCredentials() || !epub) return;
+
+  std::vector<BookOrbitBookmarkRecord> records;
+  BookOrbitBookmarkStore::readAll(epub->getCachePath(), records);
+
+  // One mint per visit: building a position streams the chapter, on the task that also serves
+  // input. Reading on converges the rest, chapter by chapter.
+  const auto& bookmarks = BOOKMARKS.getBookmarks();
+  for (size_t i = 0; i < bookmarks.size(); i++) {
+    if (bookmarks[i].spineIndex != static_cast<uint16_t>(currentSpineIndex)) continue;
+
+    if (bookmarks[i].timestamp == 0) {
+      uint32_t now = 0;
+      if (!WallClock::now(now) || !BOOKMARKS.stampMissingTimestamp(i, now)) continue;
+    }
+    const Bookmark& bookmark = bookmarks[i];
+    const bool stamped = std::any_of(records.begin(), records.end(), [&](const BookOrbitBookmarkRecord& record) {
+      return record.timestamp == bookmark.timestamp && record.spineIndex == bookmark.spineIndex;
+    });
+    if (stamped) continue;
+
+    LOG_INF("BOB", "Backfilling a bookmark position in spine %d", currentSpineIndex);
+    recordBookmarkPosition(bookmark);
+    break;
+  }
+}
+
 void EpubReaderActivity::backfillAnnotationPositions() {
   // Once per chapter per session, whatever the outcome: a chapter with nothing to do must not
   // be re-examined on every page turn.
@@ -5888,6 +5924,41 @@ void EpubReaderActivity::backfillAnnotationPositions() {
   LOG_INF("BOA", "Backfilling a highlight position in spine %d (%u pending here)", currentSpineIndex,
           (unsigned)pending);
   recordAnnotationPosition(target, clipping->paragraphIndex, text);
+}
+
+void EpubReaderActivity::recordBookmarkPosition(const Bookmark& bookmark) {
+  if (!BOOKORBIT_STORE.hasCredentials() || !epub || !section) return;
+  if (bookmark.timestamp == 0) return;  // no plausible clock yet; the backfill retries later
+
+  if (bookmark.spineIndex != static_cast<uint16_t>(currentSpineIndex)) return;
+
+  // The bookmarked page's first visible codepoint, the layout-independent coordinate the
+  // section cache stores per page. Minted while the section is open and never recomputed: the
+  // server keys the bookmark by a hash of this string. progress was page/pageCount when the
+  // bookmark was made, so the rounding recovers the page exactly under the same layout.
+  const int page = section->pageCount > 0
+                       ? std::min(section->pageCount - 1,
+                                  static_cast<int>(bookmark.progress * static_cast<float>(section->pageCount) + 0.5f))
+                       : 0;
+  const auto offset = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(page));
+  std::string pos;
+  if (offset) {
+    pos = ChapterXPathResolver::findXPathForVisibleTextOffset(epub, currentSpineIndex, *offset);
+  }
+  if (pos.empty() && bookmark.paragraphIndex != UINT16_MAX) {
+    pos = ChapterXPathResolver::findXPathForParagraph(epub, currentSpineIndex, bookmark.paragraphIndex);
+  }
+  if (pos.empty()) {
+    LOG_ERR("BOB", "No position for bookmark in spine %d; it will not sync", currentSpineIndex);
+    return;
+  }
+
+  BookOrbitBookmarkRecord record;
+  record.timestamp = bookmark.timestamp;
+  record.identityEpoch = bookmark.timestamp;  // made here, so identity and join key coincide
+  record.spineIndex = static_cast<uint16_t>(currentSpineIndex);
+  record.pos = std::move(pos);
+  BookOrbitBookmarkStore::put(epub->getCachePath(), record);
 }
 
 void EpubReaderActivity::recordAnnotationPosition(const size_t clippingIndex, const uint16_t paragraphIndex,

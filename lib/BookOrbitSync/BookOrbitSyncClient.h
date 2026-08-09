@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "BookOrbitAnnotations.h"
+#include "BookOrbitBookmarks.h"
 #include "BookOrbitStatsQueue.h"
 #include "KOReaderSyncClient.h"
 
@@ -148,6 +149,26 @@ class BookOrbitSyncClient {
   static Error ackAnnotations(const std::string& documentHash, const std::string& deviceModel,
                               const std::vector<BookOrbitAckEntry>& applied,
                               const std::vector<BookOrbitAckEntry>& deleted);
+
+  /**
+   * Two-way bookmark exchange (POST /plugin/bookmarks/exchange). Same envelope and key
+   * semantics as exchangeAnnotations; entries are position-only. Never skipped when there is
+   * nothing to send -- this request is what brings the server's bookmark changes down.
+   */
+  static Error exchangeBookmarks(const std::string& documentHash, const std::string& deviceModel,
+                                 const BookOrbitAnnotationKeys& keys, const BookOrbitBookmark* changes,
+                                 size_t changeCount, bool& outUnmatched,
+                                 std::vector<BookOrbitIncomingBookmark>* outIncoming = nullptr,
+                                 bool* outMorePending = nullptr);
+
+  /**
+   * Acknowledge applied bookmark changes (POST /plugin/bookmarks/exchange-ack). An applied
+   * add carries the LOCAL identity this device minted for it ({key, datetime, pos}) -- the
+   * server has nothing else to link its copy to. Deletions acknowledge by serverId alone.
+   */
+  static Error ackBookmarks(const std::string& documentHash, const std::string& deviceModel,
+                            const std::vector<BookOrbitBookmarkAck>& applied,
+                            const std::vector<uint32_t>& deletedServerIds);
 
   /**
    * Get human-readable error message for the last error.

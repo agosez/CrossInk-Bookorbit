@@ -3,6 +3,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Serialization.h>
+#include <WallClock.h>
 #include <uzlib.h>
 
 #include <algorithm>
@@ -342,7 +343,12 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
   Bookmark bm{};
   bm.spineIndex = spineIndex;
   bm.progress = progress;
-  bm.timestamp = 0;  // ESP32-C3 has no battery-backed RTC; reserved for future use
+  // Real UTC epoch when the clock is plausible (WallClock corrects RTC-less devices), 0
+  // otherwise. BookOrbit sync keys a bookmark's identity on its creation datetime and joins
+  // its position record back through this field; the on-disk format always had it.
+  if (!WallClock::now(bm.timestamp)) {
+    bm.timestamp = 0;
+  }
   snprintf(bm.chapterTitle, sizeof(bm.chapterTitle), "%s", chapterTitle ? chapterTitle : "");
   bm.paragraphIndex = paragraphIndex;
   snprintf(bm.snippet, sizeof(bm.snippet), "%s", snippet ? snippet : "");
@@ -367,6 +373,14 @@ void BookmarkStore::removeBookmarkForPage(uint16_t spineIndex, float pageProgres
   bookmarks.erase(it);
   dirty = true;
   saveToFile();
+}
+
+bool BookmarkStore::stampMissingTimestamp(const size_t index, const uint32_t timestamp) {
+  if (index >= bookmarks.size() || timestamp == 0 || bookmarks[index].timestamp != 0) return false;
+  bookmarks[index].timestamp = timestamp;
+  dirty = true;
+  saveToFile();
+  return true;
 }
 
 bool BookmarkStore::removeBookmarkAt(size_t index) {

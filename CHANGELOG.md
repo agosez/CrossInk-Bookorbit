@@ -30,6 +30,7 @@ Based on CrossInk v1.5.0-rc-3.
 
 ### Added
 
+- Bookmarks now sync with BookOrbit too, alongside highlights, on each BookOrbit sync of a book: bookmarks placed on the device appear in the web reader, bookmarks created on the web land in the book (at the right page when that chapter's cache exists, at the chapter start otherwise, refined on jump), and deletions propagate both ways. Bookmarks placed before this release gain sync identities progressively as you read. The sync screen reports the exchange ("Bookmarks: N sent, N added, N removed").
 - Highlights now sync with BookOrbit, in both directions, on each BookOrbit sync of a book. Highlights made on the device appear in BookOrbit's web reader at their exact position; highlights created on the web come down and are drawn in the book; deletions propagate both ways. The sync screen reports what the exchange did ("Highlights: N sent, N added, N removed"). New highlights upload in batches of 8 per sync — this hardware bounds the payload that can share a TLS session — so a large backlog drains over a few syncs, and highlights made before this feature gain sync positions progressively as you read (one per chapter visited). A highlight's stored text is capped at 2048 bytes, so the drawn span of an extremely long web highlight ends where that cap cuts its text.
 
 ### Fixed
