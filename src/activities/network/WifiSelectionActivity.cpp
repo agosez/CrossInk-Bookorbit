@@ -28,6 +28,10 @@ namespace {
 
 constexpr fui::ActionId ACTION_ROW = 1;
 
+// Bringing the WiFi driver up allocates tens of KB of internal RAM in one burst
+constexpr uint32_t MIN_FREE_HEAP_TO_START_WIFI = 60U * 1024U;
+constexpr uint32_t MIN_MAX_ALLOC_TO_START_WIFI = 24U * 1024U;
+
 #ifndef SIMULATOR
 uint8_t sLastStaDisconnectReason = 0;
 bool sConnectionAttemptLoggingActive = false;
@@ -225,6 +229,7 @@ void WifiSelectionActivity::onEnter() {
   lastConnectionStatusLogTime = 0;
   lastLoggedWifiStatus = -1;
   manualNetworkListRequested = false;
+  lowMemoryAbort = false;
   autoAttemptedSsids.clear();
   const size_t savedCredentialCount = WIFI_STORE.getCredentialCount();
   autoAttemptedSsids.reserve(savedCredentialCount);
@@ -241,6 +246,23 @@ void WifiSelectionActivity::onEnter() {
 
   // Trigger first update to show scanning message
   requestUpdate();
+
+  // Both auto-connect and scanning below bring the WiFi driver up; on a starved
+  // heap that panics inside the SDK (see MIN_FREE_HEAP_TO_START_WIFI). Fail as a
+  // normal connection error the parent activity already knows how to handle.
+  if (WiFi.getMode() == WIFI_OFF) {
+    const uint32_t freeHeap = ESP.getFreeHeap();
+    const uint32_t maxAlloc = ESP.getMaxAllocHeap();
+    if (freeHeap < MIN_FREE_HEAP_TO_START_WIFI || maxAlloc < MIN_MAX_ALLOC_TO_START_WIFI) {
+      LOG_ERR("WIFI", "Refusing to start WiFi on low memory: free=%u maxAlloc=%u (need %u/%u)", freeHeap, maxAlloc,
+              MIN_FREE_HEAP_TO_START_WIFI, MIN_MAX_ALLOC_TO_START_WIFI);
+      lowMemoryAbort = true;
+      connectionError = tr(STR_MEMORY_ERROR);
+      state = WifiSelectionState::CONNECTION_FAILED;
+      requestUpdate();
+      return;
+    }
+  }
 
   // Attempt to auto-connect to known networks. Try the last successful
   // network first for speed, then scan and try any visible saved networks by
@@ -981,6 +1003,12 @@ void WifiSelectionActivity::loop() {
   if (state == WifiSelectionState::CONNECTION_FAILED) {
     if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
         mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      // The network list would start a scan, which brings the driver up -- the
+      // very thing the low-memory guard refused. Leave the activity instead.
+      if (lowMemoryAbort) {
+        onComplete(false);
+        return;
+      }
       // If we were auto-connecting or using a saved credential, offer to forget
       // the network
       if (autoConnecting || usedSavedPassword) {

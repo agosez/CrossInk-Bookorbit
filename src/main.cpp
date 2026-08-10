@@ -582,9 +582,20 @@ bool handleGlobalPowerButtonAction(const CrossPointSettings::SHORT_PWRBTN action
       if (activityManager.canSnapshotForSleepOverlay()) {
         return false;
       }
+      // Also covers the reader's children (clip selection, dictionary...): the
+      // reader beneath them still holds its epub and section, so pushing a sync
+      // on top would bring WiFi up with far too little heap. The reader runs
+      // this shortcut itself, with its release choreography, when it is current.
+      if (activityManager.isReaderActivity()) {
+        return false;
+      }
       return startGlobalSyncProgress();
     case CrossPointSettings::SHORT_PWRBTN::BOOKORBIT_SYNC:
       if (activityManager.canSnapshotForSleepOverlay()) {
+        return false;
+      }
+      // Same reader-children guard as SYNC_PROGRESS above.
+      if (activityManager.isReaderActivity()) {
         return false;
       }
       return startGlobalBookOrbitSync();

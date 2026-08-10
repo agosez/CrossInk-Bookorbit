@@ -69,6 +69,11 @@ class WifiSelectionActivity final : public Activity {
   std::string connectedIP;
   std::string connectionError;
 
+  // Set when entry was refused because the heap is too low to start the WiFi
+  // driver safely; the failure screen then exits the activity instead of
+  // offering the network list (whose scan would start the driver anyway).
+  bool lowMemoryAbort = false;
+
   // Password to potentially save (from keyboard or saved credentials)
   std::string enteredPassword;
 
