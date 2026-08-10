@@ -19,7 +19,7 @@
 class BookOrbitCatalogBrowserActivity final : public Activity {
  public:
   enum class BrowserState { CHECK_WIFI, WIFI_SELECTION, LOADING, BROWSING, DOWNLOADING, ERROR, SEARCH_INPUT };
-  enum class EntryType { SECTION, FACET_SECTION, FACET, LOCAL_SECTION, LOCAL_BOOK, SEARCH, BOOK, PREV_PAGE, NEXT_PAGE };
+  enum class EntryType { SECTION, FACET_SECTION, FACET, LOCAL_SECTION, LOCAL_BOOK, SEARCH, BOOK };
   // Which listing the BROWSING state currently shows; drives Back navigation.
   enum class NavLevel { Root, FacetList, Books };
 
@@ -74,10 +74,13 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   void launchWifiSelection();
   void onWifiSelectionComplete(bool connected);
   void showLoadingBeforeFetch();
-  void loadRoot();
+  bool loadRoot(bool allowNetwork = true);
   void loadLocalBooks(const std::string& kind);
-  void loadFacetEntries(const std::string& sectionId, const std::string& title, int page);
-  void loadBooks(const BookOrbitBookQuery& query, const std::string& title, int page, bool fromFacet);
+  bool loadFacetEntries(const std::string& sectionId, const std::string& title, int page, bool append = false,
+                        bool allowNetwork = true);
+  bool loadBooks(const BookOrbitBookQuery& query, const std::string& title, int page, bool fromFacet,
+                 bool append = false, bool allowNetwork = true);
+  bool appendNextPageForCurrentList(size_t previousCount);
   void launchSearch();
   void performSearch(const std::string& query);
   void downloadBook(int64_t bookId, const std::string& title);
