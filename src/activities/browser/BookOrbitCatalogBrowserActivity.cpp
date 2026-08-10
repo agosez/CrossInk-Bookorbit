@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cstring>
 
+#include "./BookOrbitCatalogListCache.h"
 #include "BookOrbitCredentialStore.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
@@ -21,6 +22,7 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/reader/BookReadingStats.h"
 #include "activities/util/KeyboardEntryActivity.h"
+#include "components/CompactHeader.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
@@ -76,6 +78,7 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   consumeConfirm = false;
   errorMessage.clear();
   statusMessage = tr(STR_CHECKING_WIFI);
+  BookOrbitCatalogListCache::clear();
 
   if (!BOOKORBIT_STORE.hasCredentials()) {
     state = BrowserState::ERROR;
@@ -120,8 +123,10 @@ void BookOrbitCatalogBrowserActivity::onWifiSelectionComplete(const bool connect
     return;
   }
   sdFontSystem.releaseForNetwork(renderer);
-  showLoadingBeforeFetch();
-  loadRoot();
+  if (!loadRoot(/*allowNetwork=*/false)) {
+    showLoadingBeforeFetch();
+    loadRoot();
+  }
 }
 
 void BookOrbitCatalogBrowserActivity::showLoadingBeforeFetch() {
@@ -133,15 +138,22 @@ void BookOrbitCatalogBrowserActivity::showLoadingBeforeFetch() {
   }
 }
 
-void BookOrbitCatalogBrowserActivity::loadRoot() {
+bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   navLevel = NavLevel::Root;
   std::vector<BookOrbitCatalogSection> sections;
-  if (!BookOrbitCatalogClient::fetchRootSections(sections)) {
+  const bool cacheHit = BookOrbitCatalogListCache::loadRootSections(sections);
+  if (!cacheHit && !allowNetwork) {
+    return false;
+  }
+  if (!cacheHit && !BookOrbitCatalogClient::fetchRootSections(sections)) {
     state = BrowserState::ERROR;
     errorMessage = BookOrbitCatalogClient::lastFetchBadResponse ? tr(STR_BOOKORBIT_CATALOG_BAD_RESPONSE)
                                                                 : tr(STR_BOOKORBIT_CATALOG_ERROR);
     requestUpdate();
-    return;
+    return false;
+  }
+  if (!cacheHit) {
+    BookOrbitCatalogListCache::saveRootSections(sections);
   }
 
   entries.clear();
@@ -173,10 +185,12 @@ void BookOrbitCatalogBrowserActivity::loadRoot() {
   state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
   requestUpdate();
+  return true;
 }
 
 void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
   entries.clear();
+  listTitle = (kind == "in-progress") ? tr(STR_BOOKORBIT_IN_PROGRESS) : tr(STR_BOOKORBIT_ON_DEVICE);
 
   if (kind == "in-progress") {
     // Books with local reading progress: the recent-books list minus finished ones.
@@ -191,6 +205,11 @@ void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
       entry.path = book.path;
       entries.push_back(std::move(entry));
     }
+    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+      if (FsHelpers::naturalLess(a.title, b.title)) return true;
+      if (FsHelpers::naturalLess(b.title, a.title)) return false;
+      return FsHelpers::naturalLess(a.subtitle, b.subtitle);
+    });
   } else {
     // Every EPUB in the download location and the /Read folder, offline.
     const auto scanDir = [this](const char* dirPath) {
@@ -213,7 +232,11 @@ void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
     };
     scanDir("/");
     scanDir(READ_FOLDER_PREFIX);
-    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.title < b.title; });
+    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+      if (FsHelpers::naturalLess(a.title, b.title)) return true;
+      if (FsHelpers::naturalLess(b.title, a.title)) return false;
+      return FsHelpers::naturalLess(a.subtitle, b.subtitle);
+    });
   }
 
   // Local listings behave like a book list one level below the root.
@@ -225,15 +248,22 @@ void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
   requestUpdate();
 }
 
-void BookOrbitCatalogBrowserActivity::loadFacetEntries(const std::string& sectionId, const std::string& title,
-                                                       const int page) {
+bool BookOrbitCatalogBrowserActivity::loadFacetEntries(const std::string& sectionId, const std::string& title,
+                                                       const int page, const bool append, const bool allowNetwork) {
   BookOrbitFacetPage result;
-  if (!BookOrbitCatalogClient::fetchSectionEntries(sectionId, page, result)) {
+  const bool cacheHit = BookOrbitCatalogListCache::loadFacetPage(sectionId, page, result);
+  if (!cacheHit && !allowNetwork) {
+    return false;
+  }
+  if (!cacheHit && !BookOrbitCatalogClient::fetchSectionEntries(sectionId, page, result)) {
     state = BrowserState::ERROR;
     errorMessage = BookOrbitCatalogClient::lastFetchBadResponse ? tr(STR_BOOKORBIT_CATALOG_BAD_RESPONSE)
                                                                 : tr(STR_BOOKORBIT_CATALOG_ERROR);
     requestUpdate();
-    return;
+    return false;
+  }
+  if (!cacheHit) {
+    BookOrbitCatalogListCache::saveFacetPage(sectionId, page, result);
   }
 
   // Commit the navigation context only on success, so a failed page fetch leaves
@@ -244,13 +274,11 @@ void BookOrbitCatalogBrowserActivity::loadFacetEntries(const std::string& sectio
   facetPage = page;
   facetHasNext = result.hasNext;
 
-  entries.clear();
-  if (page > 1) {
-    Entry prev;
-    prev.type = EntryType::PREV_PAGE;
-    prev.title = tr(STR_PREV_PAGE);
-    entries.push_back(std::move(prev));
+  if (!append) {
+    entries.clear();
   }
+  std::sort(result.entries.begin(), result.entries.end(),
+            [](const auto& a, const auto& b) { return FsHelpers::naturalLess(a.title, b.title); });
   for (auto& facet : result.entries) {
     Entry entry;
     entry.type = EntryType::FACET;
@@ -262,28 +290,32 @@ void BookOrbitCatalogBrowserActivity::loadFacetEntries(const std::string& sectio
     entry.seriesId = facet.seriesId;
     entries.push_back(std::move(entry));
   }
-  if (facetHasNext) {
-    Entry next;
-    next.type = EntryType::NEXT_PAGE;
-    next.title = tr(STR_NEXT_PAGE);
-    entries.push_back(std::move(next));
+  if (!append) {
+    selectorIndex = 0;
   }
-
-  selectorIndex = 0;
   state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
   requestUpdate();
+  return true;
 }
 
-void BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query, const std::string& title,
-                                                const int page, const bool fromFacet) {
+bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query, const std::string& title,
+                                                const int page, const bool fromFacet, const bool append,
+                                                const bool allowNetwork) {
   BookOrbitBookPage result;
-  if (!BookOrbitCatalogClient::fetchBooks(query, page, result)) {
+  const bool cacheHit = BookOrbitCatalogListCache::loadBooksPage(query, page, result);
+  if (!cacheHit && !allowNetwork) {
+    return false;
+  }
+  if (!cacheHit && !BookOrbitCatalogClient::fetchBooks(query, page, result)) {
     state = BrowserState::ERROR;
     errorMessage = BookOrbitCatalogClient::lastFetchBadResponse ? tr(STR_BOOKORBIT_CATALOG_BAD_RESPONSE)
                                                                 : tr(STR_BOOKORBIT_CATALOG_ERROR);
     requestUpdate();
-    return;
+    return false;
+  }
+  if (!cacheHit) {
+    BookOrbitCatalogListCache::saveBooksPage(query, page, result);
   }
 
   // Commit the navigation context only on success (see loadFacetEntries).
@@ -296,13 +328,14 @@ void BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
   listTotal = result.total;
   listPageSize = result.pageSize > 0 ? result.pageSize : BookOrbitCatalogClient::PAGE_SIZE;
 
-  entries.clear();
-  if (page > 1) {
-    Entry prev;
-    prev.type = EntryType::PREV_PAGE;
-    prev.title = tr(STR_PREV_PAGE);
-    entries.push_back(std::move(prev));
+  if (!append) {
+    entries.clear();
   }
+  std::sort(result.books.begin(), result.books.end(), [](const auto& a, const auto& b) {
+    if (FsHelpers::naturalLess(a.title, b.title)) return true;
+    if (FsHelpers::naturalLess(b.title, a.title)) return false;
+    return FsHelpers::naturalLess(a.author, b.author);
+  });
   for (auto& book : result.books) {
     Entry entry;
     entry.type = EntryType::BOOK;
@@ -312,18 +345,44 @@ void BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
     entry.onDevice = bookOnDevice(book.title, book.author);
     entries.push_back(std::move(entry));
   }
-  const bool hasNext = static_cast<long>(page) * listPageSize < listTotal;
-  if (hasNext) {
-    Entry next;
-    next.type = EntryType::NEXT_PAGE;
-    next.title = tr(STR_NEXT_PAGE);
-    entries.push_back(std::move(next));
+  if (!append) {
+    selectorIndex = 0;
   }
-
-  selectorIndex = 0;
   state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
   requestUpdate();
+  return true;
+}
+
+bool BookOrbitCatalogBrowserActivity::appendNextPageForCurrentList(const size_t previousCount) {
+  if (navLevel == NavLevel::FacetList && facetHasNext) {
+    if (!loadFacetEntries(facetSectionId, facetTitle, facetPage + 1, true, /*allowNetwork=*/false)) {
+      showLoadingBeforeFetch();
+      loadFacetEntries(facetSectionId, facetTitle, facetPage + 1, true);
+    }
+    if (state == BrowserState::BROWSING && entries.size() > previousCount) {
+      selectorIndex = static_cast<int>(previousCount);
+      requestUpdate();
+      return true;
+    }
+    return false;
+  }
+
+  const bool booksHasNext = static_cast<long>(listPage) * listPageSize < listTotal;
+  if (navLevel == NavLevel::Books && booksHasNext) {
+    if (!loadBooks(listQuery, listTitle, listPage + 1, booksFromFacet, true, /*allowNetwork=*/false)) {
+      showLoadingBeforeFetch();
+      loadBooks(listQuery, listTitle, listPage + 1, booksFromFacet, true);
+    }
+    if (state == BrowserState::BROWSING && entries.size() > previousCount) {
+      selectorIndex = static_cast<int>(previousCount);
+      requestUpdate();
+      return true;
+    }
+    return false;
+  }
+
+  return false;
 }
 
 void BookOrbitCatalogBrowserActivity::launchSearch() {
@@ -348,11 +407,13 @@ void BookOrbitCatalogBrowserActivity::performSearch(const std::string& query) {
     requestUpdate();
     return;
   }
-  showLoadingBeforeFetch();
   BookOrbitBookQuery bookQuery;
   bookQuery.sort = "title";
   bookQuery.query = query;
-  loadBooks(bookQuery, query, 1, /*fromFacet=*/false);
+  if (!loadBooks(bookQuery, query, 1, /*fromFacet=*/false, /*append=*/false, /*allowNetwork=*/false)) {
+    showLoadingBeforeFetch();
+    loadBooks(bookQuery, query, 1, /*fromFacet=*/false);
+  }
 }
 
 void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const std::string& title) {
@@ -440,14 +501,18 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
     clearBookCache(filename);
     // The listing was freed for download headroom; rebuild it from the stored
     // context so the user returns to the same page.
-    showLoadingBeforeFetch();
-    loadBooks(listQuery, listTitle, listPage, booksFromFacet);
+    if (!loadBooks(listQuery, listTitle, listPage, booksFromFacet, /*append=*/false, /*allowNetwork=*/false)) {
+      showLoadingBeforeFetch();
+      loadBooks(listQuery, listTitle, listPage, booksFromFacet);
+    }
     return;
   } else if (result == HttpDownloader::ABORTED) {
     LOG_DBG("BookOrbit", "Download cancelled");
     mappedInput.suppressNextBackRelease();
-    showLoadingBeforeFetch();
-    loadBooks(listQuery, listTitle, listPage, booksFromFacet);
+    if (!loadBooks(listQuery, listTitle, listPage, booksFromFacet, /*append=*/false, /*allowNetwork=*/false)) {
+      showLoadingBeforeFetch();
+      loadBooks(listQuery, listTitle, listPage, booksFromFacet);
+    }
     return;
   } else {
     state = BrowserState::ERROR;
@@ -490,11 +555,17 @@ void BookOrbitCatalogBrowserActivity::loop() {
         onGoHome();
       } else if (entries.empty()) {
         // The listing was freed for a download that then failed; rebuild it.
-        showLoadingBeforeFetch();
         if (navLevel == NavLevel::FacetList) {
-          loadFacetEntries(facetSectionId, facetTitle, facetPage);
+          if (!loadFacetEntries(facetSectionId, facetTitle, facetPage, /*append=*/false, /*allowNetwork=*/false)) {
+            showLoadingBeforeFetch();
+            loadFacetEntries(facetSectionId, facetTitle, facetPage);
+          }
         } else {
-          loadBooks(listQuery, listTitle, listPage, booksFromFacet);
+          if (!loadBooks(listQuery, listTitle, listPage, booksFromFacet, /*append=*/false,
+                         /*allowNetwork=*/false)) {
+            showLoadingBeforeFetch();
+            loadBooks(listQuery, listTitle, listPage, booksFromFacet);
+          }
         }
       } else {
         state = BrowserState::BROWSING;
@@ -519,17 +590,21 @@ void BookOrbitCatalogBrowserActivity::loop() {
         const auto& entry = entries[selectorIndex];
         switch (entry.type) {
           case EntryType::SECTION: {
-            showLoadingBeforeFetch();
             BookOrbitBookQuery query;
             query.sort = entry.sectionId == "continue-reading" ? "recently_read"
                          : entry.sectionId == "all-books"      ? "title"
                                                                : "recently_added";
-            loadBooks(query, entry.title, 1, /*fromFacet=*/false);
+            if (!loadBooks(query, entry.title, 1, /*fromFacet=*/false, /*append=*/false, /*allowNetwork=*/false)) {
+              showLoadingBeforeFetch();
+              loadBooks(query, entry.title, 1, /*fromFacet=*/false);
+            }
             break;
           }
           case EntryType::FACET_SECTION:
-            showLoadingBeforeFetch();
-            loadFacetEntries(entry.sectionId, entry.title, 1);
+            if (!loadFacetEntries(entry.sectionId, entry.title, 1, /*append=*/false, /*allowNetwork=*/false)) {
+              showLoadingBeforeFetch();
+              loadFacetEntries(entry.sectionId, entry.title, 1);
+            }
             break;
           case EntryType::LOCAL_SECTION:
             loadLocalBooks(entry.sectionId);
@@ -538,7 +613,6 @@ void BookOrbitCatalogBrowserActivity::loop() {
             activityManager.goToReader(entry.path);
             break;
           case EntryType::FACET: {
-            showLoadingBeforeFetch();
             // Mirror BookOrbit's own plugin: author filters by the entry id; series
             // prefers the numeric seriesId and sorts by series order.
             BookOrbitBookQuery query;
@@ -552,7 +626,10 @@ void BookOrbitCatalogBrowserActivity::loop() {
             } else {
               query.author = entry.sectionId;
             }
-            loadBooks(query, entry.title, 1, /*fromFacet=*/true);
+            if (!loadBooks(query, entry.title, 1, /*fromFacet=*/true, /*append=*/false, /*allowNetwork=*/false)) {
+              showLoadingBeforeFetch();
+              loadBooks(query, entry.title, 1, /*fromFacet=*/true);
+            }
             break;
           }
           case EntryType::SEARCH:
@@ -561,39 +638,30 @@ void BookOrbitCatalogBrowserActivity::loop() {
           case EntryType::BOOK:
             downloadBook(entry.bookId, entry.title);
             break;
-          case EntryType::PREV_PAGE:
-            showLoadingBeforeFetch();
-            if (navLevel == NavLevel::FacetList) {
-              loadFacetEntries(facetSectionId, facetTitle, facetPage - 1);
-            } else {
-              loadBooks(listQuery, listTitle, listPage - 1, booksFromFacet);
-            }
-            break;
-          case EntryType::NEXT_PAGE:
-            showLoadingBeforeFetch();
-            if (navLevel == NavLevel::FacetList) {
-              loadFacetEntries(facetSectionId, facetTitle, facetPage + 1);
-            } else {
-              loadBooks(listQuery, listTitle, listPage + 1, booksFromFacet);
-            }
-            break;
         }
       }
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       if (navLevel == NavLevel::Root) {
         onGoHome();
       } else if (navLevel == NavLevel::Books && booksFromFacet) {
-        showLoadingBeforeFetch();
-        loadFacetEntries(facetSectionId, facetTitle, facetPage);
+        if (!loadFacetEntries(facetSectionId, facetTitle, facetPage, /*append=*/false, /*allowNetwork=*/false)) {
+          showLoadingBeforeFetch();
+          loadFacetEntries(facetSectionId, facetTitle, facetPage);
+        }
       } else {
-        showLoadingBeforeFetch();
-        loadRoot();
+        if (!loadRoot(/*allowNetwork=*/false)) {
+          showLoadingBeforeFetch();
+          loadRoot();
+        }
       }
     }
 
     if (!entries.empty()) {
       const auto entryCount = entries.size();
       buttonNavigator.onNextRelease([this, entryCount] {
+        if (selectorIndex + 1 >= static_cast<int>(entryCount) && appendNextPageForCurrentList(entryCount)) {
+          return;
+        }
         selectorIndex = ButtonNavigator::nextIndex(selectorIndex, entryCount);
         requestUpdate();
       });
@@ -602,6 +670,9 @@ void BookOrbitCatalogBrowserActivity::loop() {
         requestUpdate();
       });
       buttonNavigator.onNextContinuous([this, entryCount] {
+        if (selectorIndex + PAGE_ITEMS >= static_cast<int>(entryCount) && appendNextPageForCurrentList(entryCount)) {
+          return;
+        }
         selectorIndex = ButtonNavigator::nextPageIndex(selectorIndex, entryCount, PAGE_ITEMS);
         requestUpdate();
       });
@@ -615,10 +686,18 @@ void BookOrbitCatalogBrowserActivity::loop() {
 
 void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
   renderer.clearScreen();
+
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
+  const auto& metrics = UITheme::getInstance().getMetrics();
 
-  renderer.drawCenteredText(UI_12_FONT_ID, 15, tr(STR_BOOKORBIT_CATALOG), true, EpdFontFamily::BOLD);
+  std::string headerTitle = tr(STR_BOOKORBIT_CATALOG);
+  if (navLevel == NavLevel::FacetList && !facetTitle.empty()) {
+    headerTitle = facetTitle;
+  } else if (navLevel == NavLevel::Books && !listTitle.empty()) {
+    headerTitle = listTitle;
+  }
+  CompactHeader::drawTitle(renderer, headerTitle.c_str());
 
   if (state == BrowserState::CHECK_WIFI || state == BrowserState::LOADING) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, statusMessage.c_str());
@@ -668,25 +747,16 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
   if (entries.empty()) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_NO_ENTRIES));
   } else {
-    const auto entryCount = entries.size();
-    const auto pageStartIndex = selectorIndex / PAGE_ITEMS * PAGE_ITEMS;
-    renderer.fillRect(0, 60 + (selectorIndex % PAGE_ITEMS) * 30 - 2, pageWidth - 1, 30);
+    const auto entryCount = static_cast<int>(entries.size());
 
-    for (size_t i = pageStartIndex; i < entryCount && i < static_cast<size_t>(pageStartIndex + PAGE_ITEMS); i++) {
-      const auto& entry = entries[i];
-      const bool isBookRow = entry.type == EntryType::BOOK || entry.type == EntryType::LOCAL_BOOK;
-      std::string displayText = isBookRow ? entry.title : "> " + entry.title;
-      if (isBookRow && !entry.subtitle.empty()) displayText += " - " + entry.subtitle;
-      // Keep the right edge clear for the on-device marker on catalog rows.
-      const int textWidth = entry.onDevice ? pageWidth - 60 : pageWidth - 40;
-      auto item = renderer.truncatedText(UI_10_FONT_ID, displayText.c_str(), textWidth);
-      const int rowY = 60 + (i % PAGE_ITEMS) * 30;
-      const bool inverted = i != static_cast<size_t>(selectorIndex);
-      renderer.drawText(UI_10_FONT_ID, 20, rowY, item.c_str(), inverted);
-      if (entry.onDevice) {
-        renderer.drawText(UI_10_FONT_ID, pageWidth - 32, rowY, ON_DEVICE_MARKER, inverted);
-      }
-    }
+    const int contentTop = CompactHeader::contentTop(metrics);
+    const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight;
+    GUI.drawList(
+        renderer, Rect{0, contentTop, pageWidth, contentHeight}, entryCount, selectorIndex,
+        [this](int i) { return entries[i].title; },
+        nullptr,  // subtitle
+        nullptr,  // rowIcon
+        [this](int i) { return entries[i].onDevice ? ON_DEVICE_MARKER : ""; });
   }
   renderer.displayBuffer();
 }
