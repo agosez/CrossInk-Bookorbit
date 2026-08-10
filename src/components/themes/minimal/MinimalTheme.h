@@ -55,7 +55,7 @@ class MinimalTheme : public LyraTheme {
                 const std::function<UIIcon(int index)>& rowIcon, const std::function<std::string(int index)>& rowValue,
                 bool highlightValue, const std::function<bool(int index)>& rowDimmed = nullptr,
                 const std::function<bool(int index)>& isHeader = nullptr, int rowHeightScale = 1,
-                bool showSelection = true) const override;
+                bool showSelection = true, int totalItemCount = -1) const override;
   void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3, const char* btn4,
                        bool allowInvertedText = false) const override;
   void drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,

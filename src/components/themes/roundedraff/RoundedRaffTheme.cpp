@@ -282,7 +282,7 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
                                 const std::function<std::string(int index)>& rowValue, bool highlightValue,
                                 const std::function<bool(int index)>& rowDimmed,
                                 const std::function<bool(int index)>& isHeader, const int rowHeightScale,
-                                const bool showSelection) const {
+                                const bool showSelection, const int totalItemCount) const {
   (void)rowIcon;
   (void)highlightValue;
   (void)rowDimmed;
@@ -398,7 +398,7 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
     }
   }
 
-  drawScrollBar(renderer, rect, itemCount, pageStartIndex, pageItems);
+  drawScrollBar(renderer, rect, std::max(itemCount, totalItemCount), pageStartIndex, pageItems);
 }
 
 void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,

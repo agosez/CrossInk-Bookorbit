@@ -11,6 +11,7 @@ Based on CrossInk v1.5.0.
 
 ### Changed
 
+- The BookOrbit catalog browser now draws its lists with the active theme (contextual title in the header, author under each book title, on-device marker right-aligned), and scrolling past the bottom of a listing loads the next page in place of the previous "Previous page"/"Next page" entries. Listings already fetched during the session are kept on the SD card, so navigating back up re-opens them instantly instead of asking the server again (contributed by CaptainFrito).
 - A clipping saved with BookOrbit sync configured now stores the book's exact source text for the highlighted span (including the French non-breaking spaces before punctuation, kept as plain spaces). Clipping text used to be rebuilt from the rendered words, whose justified spacing could differ from the source ("mot ." for "mot.") -- visible in the clippings list and exports, and rejected by BookOrbit's text verification.
 - Saved highlights and clippings keep up to 2048 bytes of text (previously 512), so long web-created highlights survive sync in full. Downgrading to an older release after saving a longer one makes that older firmware treat the book's clippings file as corrupt and drop it.
 

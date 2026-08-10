@@ -114,7 +114,7 @@ class RoundedRaffTheme : public BaseTheme {
                 const std::function<std::string(int index)>& rowValue = nullptr, bool highlightValue = false,
                 const std::function<bool(int index)>& rowDimmed = nullptr,
                 const std::function<bool(int index)>& isHeader = nullptr, int rowHeightScale = 1,
-                bool showSelection = true) const override;
+                bool showSelection = true, int totalItemCount = -1) const override;
   void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3, const char* btn4,
                        bool allowInvertedText = false) const override;
   bool homeMenuShowsContinueReading() const { return true; }

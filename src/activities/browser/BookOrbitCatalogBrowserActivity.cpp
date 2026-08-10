@@ -30,7 +30,6 @@
 #include "util/StringUtils.h"
 
 namespace {
-constexpr int PAGE_ITEMS = 23;
 constexpr size_t BOOKORBIT_DOWNLOAD_BUFFER_SIZE = 2048;
 constexpr char READ_FOLDER_PREFIX[] = "/Read";
 constexpr size_t MAX_LOCAL_ENTRIES = 200;
@@ -239,9 +238,15 @@ void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
     });
   }
 
-  // Local listings behave like a book list one level below the root.
+  // Local listings behave like a book list one level below the root. Neutralise
+  // the paging context left by a previous server listing: without this, reaching
+  // the bottom of a local list could append SERVER results into it, and the
+  // scroll indicator would size itself on the stale server total.
   navLevel = NavLevel::Books;
   booksFromFacet = false;
+  listPage = 1;
+  listTotal = static_cast<int>(entries.size());
+  listPageSize = std::max<int>(1, static_cast<int>(entries.size()));
   selectorIndex = 0;
   state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
@@ -277,8 +282,8 @@ bool BookOrbitCatalogBrowserActivity::loadFacetEntries(const std::string& sectio
   if (!append) {
     entries.clear();
   }
-  std::sort(result.entries.begin(), result.entries.end(),
-            [](const auto& a, const auto& b) { return FsHelpers::naturalLess(a.title, b.title); });
+  // Server order is kept as-is: it is already alphabetical for facets, and a
+  // per-page sort would break the overall order once pages are appended.
   for (auto& facet : result.entries) {
     Entry entry;
     entry.type = EntryType::FACET;
@@ -331,11 +336,9 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
   if (!append) {
     entries.clear();
   }
-  std::sort(result.books.begin(), result.books.end(), [](const auto& a, const auto& b) {
-    if (FsHelpers::naturalLess(a.title, b.title)) return true;
-    if (FsHelpers::naturalLess(b.title, a.title)) return false;
-    return FsHelpers::naturalLess(a.author, b.author);
-  });
+  // Server order carries the listing's meaning -- recency for "Continue reading"
+  // and "Recently added", series order for series -- and appending pages keeps
+  // it consistent; a client-side re-sort would destroy both.
   for (auto& book : result.books) {
     Entry entry;
     entry.type = EntryType::BOOK;
@@ -354,32 +357,25 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
   return true;
 }
 
-bool BookOrbitCatalogBrowserActivity::appendNextPageForCurrentList(const size_t previousCount) {
+bool BookOrbitCatalogBrowserActivity::appendNextPageForCurrentList(const bool allowNetwork) {
+  const size_t previousCount = entries.size();
   if (navLevel == NavLevel::FacetList && facetHasNext) {
     if (!loadFacetEntries(facetSectionId, facetTitle, facetPage + 1, true, /*allowNetwork=*/false)) {
+      if (!allowNetwork) return false;
       showLoadingBeforeFetch();
       loadFacetEntries(facetSectionId, facetTitle, facetPage + 1, true);
     }
-    if (state == BrowserState::BROWSING && entries.size() > previousCount) {
-      selectorIndex = static_cast<int>(previousCount);
-      requestUpdate();
-      return true;
-    }
-    return false;
+    return state == BrowserState::BROWSING && entries.size() > previousCount;
   }
 
   const bool booksHasNext = static_cast<long>(listPage) * listPageSize < listTotal;
   if (navLevel == NavLevel::Books && booksHasNext) {
     if (!loadBooks(listQuery, listTitle, listPage + 1, booksFromFacet, true, /*allowNetwork=*/false)) {
+      if (!allowNetwork) return false;
       showLoadingBeforeFetch();
       loadBooks(listQuery, listTitle, listPage + 1, booksFromFacet, true);
     }
-    if (state == BrowserState::BROWSING && entries.size() > previousCount) {
-      selectorIndex = static_cast<int>(previousCount);
-      requestUpdate();
-      return true;
-    }
-    return false;
+    return state == BrowserState::BROWSING && entries.size() > previousCount;
   }
 
   return false;
@@ -657,27 +653,73 @@ void BookOrbitCatalogBrowserActivity::loop() {
     }
 
     if (!entries.empty()) {
-      const auto entryCount = entries.size();
-      buttonNavigator.onNextRelease([this, entryCount] {
-        if (selectorIndex + 1 >= static_cast<int>(entryCount) && appendNextPageForCurrentList(entryCount)) {
+      // Same rows-per-page the themed list draws, so page jumps land where the
+      // display pages; a fixed constant would drift from the theme's row height.
+      const int pageItems = listPageItems();
+      // More content on the server than is loaded? Then the loaded end is a
+      // phantom boundary mid-listing: never wrap onto or past it.
+      const auto hasMorePages = [this] {
+        if (navLevel == NavLevel::FacetList) return facetHasNext;
+        if (navLevel == NavLevel::Books) return static_cast<long>(listPage) * listPageSize < listTotal;
+        return false;
+      };
+      // Prefetch at the page turn: after a forward move onto the last loaded
+      // screen-page, append until that page is fully backed by loaded entries
+      // (server pages are not screen-page multiples, and can even be smaller
+      // than one screen). The load pause lands on a transition the e-ink
+      // refreshes anyway instead of mid-page, and the page comes up full. The
+      // lambdas read entries.size() live because appends grow the list.
+      const auto extendIfOnLastPage = [this, pageItems, hasMorePages] {
+        const int lastPageStart = (static_cast<int>(entries.size()) - 1) / pageItems * pageItems;
+        if (selectorIndex < lastPageStart) return;
+        const int wantedCount = (selectorIndex / pageItems + 1) * pageItems;
+        while (static_cast<int>(entries.size()) < wantedCount && hasMorePages()) {
+          if (!appendNextPageForCurrentList()) break;
+        }
+      };
+      buttonNavigator.onNextRelease([this, extendIfOnLastPage, hasMorePages] {
+        if (selectorIndex + 1 >= static_cast<int>(entries.size()) && hasMorePages() &&
+            !appendNextPageForCurrentList()) {
+          requestUpdate();  // could not load past the end (e.g. network); hold position, no wrap
           return;
         }
-        selectorIndex = ButtonNavigator::nextIndex(selectorIndex, entryCount);
+        selectorIndex = ButtonNavigator::nextIndex(selectorIndex, entries.size());
+        extendIfOnLastPage();
         requestUpdate();
       });
-      buttonNavigator.onPreviousRelease([this, entryCount] {
-        selectorIndex = ButtonNavigator::previousIndex(selectorIndex, entryCount);
+      // Backward from the very top: when the session cache holds the rest of the
+      // listing, materialise it (no requests) and wrap to the real end. A cache
+      // miss keeps the clamp -- a Previous press should not start a network crawl.
+      const auto materialiseFromCache = [this, hasMorePages] {
+        while (hasMorePages() && appendNextPageForCurrentList(/*allowNetwork=*/false)) {
+        }
+        return !hasMorePages();
+      };
+      buttonNavigator.onPreviousRelease([this, hasMorePages, materialiseFromCache] {
+        if (selectorIndex == 0 && hasMorePages() && !materialiseFromCache()) return;
+        selectorIndex = ButtonNavigator::previousIndex(selectorIndex, entries.size());
         requestUpdate();
       });
-      buttonNavigator.onNextContinuous([this, entryCount] {
-        if (selectorIndex + PAGE_ITEMS >= static_cast<int>(entryCount) && appendNextPageForCurrentList(entryCount)) {
+      buttonNavigator.onNextContinuous([this, pageItems, extendIfOnLastPage, hasMorePages] {
+        const int count = static_cast<int>(entries.size());
+        if (selectorIndex / pageItems == (count - 1) / pageItems && hasMorePages() && !appendNextPageForCurrentList()) {
+          requestUpdate();
           return;
         }
-        selectorIndex = ButtonNavigator::nextPageIndex(selectorIndex, entryCount, PAGE_ITEMS);
+        selectorIndex = ButtonNavigator::nextPageIndex(selectorIndex, entries.size(), pageItems);
+        extendIfOnLastPage();
         requestUpdate();
       });
-      buttonNavigator.onPreviousContinuous([this, entryCount] {
-        selectorIndex = ButtonNavigator::previousPageIndex(selectorIndex, entryCount, PAGE_ITEMS);
+      buttonNavigator.onPreviousContinuous([this, pageItems, hasMorePages, materialiseFromCache] {
+        if (selectorIndex / pageItems == 0 && hasMorePages()) {
+          if (selectorIndex > 0) {
+            selectorIndex = 0;  // finish the backward run at the top first
+            requestUpdate();
+            return;
+          }
+          if (!materialiseFromCache()) return;
+        }
+        selectorIndex = ButtonNavigator::previousPageIndex(selectorIndex, entries.size(), pageItems);
         requestUpdate();
       });
     }
@@ -751,12 +793,25 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
 
     const int contentTop = CompactHeader::contentTop(metrics);
     const int contentHeight = pageHeight - contentTop - metrics.buttonHintsHeight;
+    // The subtitle carries the author; without it two same-title search results
+    // are indistinguishable. Passing the lambda also selects the taller row
+    // height every themed list with subtitles uses.
+    // Book listings tell the scroll indicator the server's total, so its size
+    // and position are right from the first draw of a partially loaded list.
+    const int scrollTotal = navLevel == NavLevel::Books ? listTotal : -1;
     GUI.drawList(
         renderer, Rect{0, contentTop, pageWidth, contentHeight}, entryCount, selectorIndex,
-        [this](int i) { return entries[i].title; },
-        nullptr,  // subtitle
+        [this](int i) { return entries[i].title; }, [this](int i) { return entries[i].subtitle; },
         nullptr,  // rowIcon
-        [this](int i) { return entries[i].onDevice ? ON_DEVICE_MARKER : ""; });
+        [this](int i) { return entries[i].onDevice ? ON_DEVICE_MARKER : ""; },
+        /*highlightValue=*/false, /*rowDimmed=*/nullptr, /*isHeader=*/nullptr, /*rowHeightScale=*/1,
+        /*showSelection=*/true, scrollTotal);
   }
   renderer.displayBuffer();
+}
+
+int BookOrbitCatalogBrowserActivity::listPageItems() const {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int contentHeight = renderer.getScreenHeight() - CompactHeader::contentTop(metrics) - metrics.buttonHintsHeight;
+  return std::max(1, GUI.getListPageItems(contentHeight, /*hasSubtitle=*/true));
 }

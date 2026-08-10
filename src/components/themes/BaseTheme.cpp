@@ -295,7 +295,7 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
                          const std::function<std::string(int index)>& rowValue, bool highlightValue,
                          const std::function<bool(int index)>& rowDimmed,
                          const std::function<bool(int index)>& isHeader, const int rowHeightScale,
-                         const bool showSelection) const {
+                         const bool showSelection, const int totalItemCount) const {
   const int rowScale = std::max(1, rowHeightScale);
   int rowHeight =
       ((rowSubtitle != nullptr) ? BaseMetrics::values.listWithSubtitleRowHeight : BaseMetrics::values.listRowHeight) *
@@ -303,7 +303,11 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
   int pageItems = rowHeight > 0 ? std::max(1, rect.height / rowHeight) : 1;
   constexpr int sectionHeaderTopPadding = 15;
 
-  const int totalPages = (itemCount + pageItems - 1) / pageItems;
+  // The scroll indicator reflects the full listing when the caller knows it is
+  // longer than what is loaded (paged server catalogs): its size and position
+  // are then right on the first draw and stable as further pages append.
+  const int scrollItemCount = std::max(itemCount, totalItemCount);
+  const int totalPages = (scrollItemCount + pageItems - 1) / pageItems;
   if (totalPages > 1) {
     constexpr int indicatorWidth = 20;
     constexpr int arrowSize = 6;
@@ -378,25 +382,29 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
                         EpdFontFamily::BOLD);
       continue;
     }
-    renderer.drawText(font, rect.x + BaseMetrics::values.contentSidePadding, itemY, item.c_str(), i != selectedIndex);
+    // Per row, not per list: a row whose subtitle is empty centers its title in
+    // the subtitle-height row instead of leaving the subtitle's blank line under it.
+    std::string subtitleText;
+    if (rowSubtitle != nullptr) subtitleText = rowSubtitle(i);
+    const int titleY = rowSubtitle != nullptr && subtitleText.empty()
+                           ? itemY + std::max(0, (rowHeight - renderer.getLineHeight(font)) / 2)
+                           : itemY;
+    renderer.drawText(font, rect.x + BaseMetrics::values.contentSidePadding, titleY, item.c_str(), i != selectedIndex);
 
     // Apply checkerboard dither to create gray text effect for dimmed items
     if (rowDimmed && rowDimmed(i) && i != selectedIndex) {
       const int titleWidth = renderer.getTextWidth(font, item.c_str());
       const int lineH = renderer.getLineHeight(font);
       const int tx = rect.x + BaseMetrics::values.contentSidePadding;
-      for (int py = itemY; py < itemY + lineH; py++)
+      for (int py = titleY; py < titleY + lineH; py++)
         for (int px = tx; px < tx + titleWidth; px++)
           if ((px + py) % 2 == 0) renderer.drawPixel(px, py, false);
     }
 
-    if (rowSubtitle != nullptr) {
-      std::string subtitleText = rowSubtitle(i);
-      if (!subtitleText.empty()) {
-        auto subtitle = renderer.truncatedText(SMALL_FONT_ID, subtitleText.c_str(), rowTextWidth);
-        renderer.drawText(SMALL_FONT_ID, rect.x + BaseMetrics::values.contentSidePadding, itemY + 22, subtitle.c_str(),
-                          i != selectedIndex);
-      }
+    if (!subtitleText.empty()) {
+      auto subtitle = renderer.truncatedText(SMALL_FONT_ID, subtitleText.c_str(), rowTextWidth);
+      renderer.drawText(SMALL_FONT_ID, rect.x + BaseMetrics::values.contentSidePadding, itemY + 22, subtitle.c_str(),
+                        i != selectedIndex);
     }
 
     if (!valueText.empty()) {

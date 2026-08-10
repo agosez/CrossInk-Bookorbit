@@ -241,6 +241,10 @@ class BaseTheme {
   virtual int getMenuRowHeight(const GfxRenderer& renderer) const;
   virtual int getListRowStep(bool hasSubtitle, int rowHeightScale = 1) const;
   virtual int getListPageItems(int contentHeight, bool hasSubtitle, int rowHeightScale = 1) const;
+  // totalItemCount sizes the scroll indicator when the list is a loaded prefix of
+  // a longer server-side listing (itemCount rows exist, totalItemCount are known
+  // to exist). Rows are still drawn from the first itemCount entries only; -1
+  // keeps the indicator based on itemCount.
   virtual void drawList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
                         const std::function<std::string(int index)>& rowTitle,
                         const std::function<std::string(int index)>& rowSubtitle = nullptr,
@@ -248,7 +252,7 @@ class BaseTheme {
                         const std::function<std::string(int index)>& rowValue = nullptr, bool highlightValue = false,
                         const std::function<bool(int index)>& rowDimmed = nullptr,
                         const std::function<bool(int index)>& isHeader = nullptr, int rowHeightScale = 1,
-                        bool showSelection = true) const;
+                        bool showSelection = true, int totalItemCount = -1) const;
   virtual void drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle = nullptr,
                           bool readerContext = false) const;
   virtual void drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label,

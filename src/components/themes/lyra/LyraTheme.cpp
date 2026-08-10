@@ -198,9 +198,10 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
                          const std::function<std::string(int index)>& rowValue, bool highlightValue,
                          const std::function<bool(int index)>& rowDimmed,
                          const std::function<bool(int index)>& isHeader, const int rowHeightScale,
-                         const bool showSelection) const {
+                         const bool showSelection, const int totalItemCount) const {
   drawListWithMetrics(renderer, rect, itemCount, selectedIndex, rowTitle, rowSubtitle, rowIcon, rowValue,
-                      highlightValue, rowDimmed, isHeader, LyraMetrics::values, false, rowHeightScale, showSelection);
+                      highlightValue, rowDimmed, isHeader, LyraMetrics::values, false, rowHeightScale, showSelection,
+                      totalItemCount);
 }
 
 void LyraTheme::drawListWithMetrics(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
@@ -210,8 +211,8 @@ void LyraTheme::drawListWithMetrics(const GfxRenderer& renderer, Rect rect, int 
                                     const std::function<std::string(int index)>& rowValue, bool highlightValue,
                                     const std::function<bool(int index)>& rowDimmed,
                                     const std::function<bool(int index)>& isHeader, const ThemeMetrics& metrics,
-                                    const bool invertSelectedRows, const int rowHeightScale,
-                                    const bool showSelection) const {
+                                    const bool invertSelectedRows, const int rowHeightScale, const bool showSelection,
+                                    const int totalItemCount) const {
   const int rowScale = std::max(1, rowHeightScale);
   int rowHeight = ((rowSubtitle != nullptr) ? metrics.listWithSubtitleRowHeight : metrics.listRowHeight) * rowScale;
   if (itemCount <= 0) return;
@@ -227,15 +228,19 @@ void LyraTheme::drawListWithMetrics(const GfxRenderer& renderer, Rect rect, int 
     if (i > 0 && isHeaderRow(i)) totalContentHeight += sectionHeaderTopPadding;
     totalContentHeight += visualRowHeight(i);
   }
-  const bool contentFits = totalContentHeight <= rect.height;
+  // The scroll indicator reflects the full listing when the caller knows it is
+  // longer than what is loaded its size and position are then right on the
+  // first draw and stable as further pages append.
+  const int scrollItemCount = std::max(itemCount, totalItemCount);
+  const bool contentFits = totalContentHeight <= rect.height && scrollItemCount <= itemCount;
   int pageItems = contentFits ? itemCount : (rowHeight > 0 ? std::max(1, rect.height / rowHeight) : 1);
 
-  const int totalPages = (itemCount + pageItems - 1) / pageItems;
+  const int totalPages = (scrollItemCount + pageItems - 1) / pageItems;
   if (!contentFits && totalPages > 1) {
     const int scrollAreaHeight = rect.height;
 
     // Draw scroll bar
-    const int scrollBarHeight = (scrollAreaHeight * pageItems) / itemCount;
+    const int scrollBarHeight = std::max(1, (scrollAreaHeight * pageItems) / scrollItemCount);
     const int currentPage = selectedIndex / pageItems;
     const int scrollBarY = rect.y + ((scrollAreaHeight - scrollBarHeight) * currentPage) / (totalPages - 1);
     const int scrollBarX = rect.x + rect.width - metrics.scrollBarRightOffset;
@@ -309,7 +314,11 @@ void LyraTheme::drawListWithMetrics(const GfxRenderer& renderer, Rect rect, int 
 
     auto itemName = rowTitle(i);
     auto item = renderer.truncatedText(UI_10_FONT_ID, itemName.c_str(), rowTextWidth);
-    const int titleY = rowSubtitle != nullptr ? itemY + 7 : centeredRowY(itemY, currentRowHeight, titleLineHeight);
+    // Per row, not per list: a row whose subtitle is empty centers its title in
+    // the tall row instead of leaving the subtitle's blank line under it.
+    std::string subtitleText;
+    if (rowSubtitle != nullptr) subtitleText = rowSubtitle(i);
+    const int titleY = !subtitleText.empty() ? itemY + 7 : centeredRowY(itemY, currentRowHeight, titleLineHeight);
     renderer.drawText(UI_10_FONT_ID, textX, titleY, item.c_str(), foreground);
 
     // Apply checkerboard dither to create gray text effect for dimmed items
@@ -326,7 +335,7 @@ void LyraTheme::drawListWithMetrics(const GfxRenderer& renderer, Rect rect, int 
       if (iconBitmap != nullptr) {
         const int iconX = rect.x + metrics.contentSidePadding + hPaddingInSelection;
         const int iconY =
-            rowSubtitle != nullptr ? itemY + 16 : centeredRowY(itemY, currentRowHeight, static_cast<int>(iconSize));
+            !subtitleText.empty() ? itemY + 16 : centeredRowY(itemY, currentRowHeight, static_cast<int>(iconSize));
         if (invertSelectedRows && selectedRow) {
           drawLucideIcon(renderer, *iconBitmap, iconX, iconY, false);
         } else {
@@ -335,9 +344,7 @@ void LyraTheme::drawListWithMetrics(const GfxRenderer& renderer, Rect rect, int 
       }
     }
 
-    if (rowSubtitle != nullptr) {
-      // Draw subtitle
-      std::string subtitleText = rowSubtitle(i);
+    if (!subtitleText.empty()) {
       auto subtitle = renderer.truncatedText(SMALL_FONT_ID, subtitleText.c_str(), rowTextWidth);
       renderer.drawText(SMALL_FONT_ID, textX, itemY + 30, subtitle.c_str(), foreground);
     }

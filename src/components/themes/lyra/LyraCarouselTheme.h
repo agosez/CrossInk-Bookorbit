@@ -66,6 +66,6 @@ class LyraCarouselTheme : public LyraTheme {
                 const std::function<UIIcon(int index)>& rowIcon = {},
                 const std::function<std::string(int index)>& rowValue = {}, bool highlightValue = false,
                 const std::function<bool(int index)>& rowDimmed = {},
-                const std::function<bool(int index)>& isHeader = {}, int rowHeightScale = 1,
-                bool showSelection = true) const override;
+                const std::function<bool(int index)>& isHeader = {}, int rowHeightScale = 1, bool showSelection = true,
+                int totalItemCount = -1) const override;
 };
