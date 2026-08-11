@@ -381,6 +381,27 @@ bool BookOrbitCatalogBrowserActivity::appendNextPageForCurrentList(const bool al
   return false;
 }
 
+// Rebuild the book listing that downloadBook() freed, and put the selector back on
+// the entry it was on
+void BookOrbitCatalogBrowserActivity::restoreBookListAfterDownload() {
+  // Both get overwritten as the pages reload: loadBooks() sets listPage, and its
+  // first (non-appending) call resets the selector.
+  const int wantedIndex = selectorIndex;
+  const int wantedPage = listPage;
+  for (int page = 1; page <= wantedPage; page++) {
+    const bool append = page > 1;
+    if (loadBooks(listQuery, listTitle, page, booksFromFacet, append, /*allowNetwork=*/false)) {
+      continue;
+    }
+    showLoadingBeforeFetch();
+    if (!loadBooks(listQuery, listTitle, page, booksFromFacet, append)) {
+      return;  // loadBooks() set the error state; keep whatever pages did load
+    }
+  }
+  if (entries.empty()) return;
+  selectorIndex = std::min(wantedIndex, static_cast<int>(entries.size()) - 1);
+}
+
 void BookOrbitCatalogBrowserActivity::launchSearch() {
   consumeConfirm = true;
   state = BrowserState::SEARCH_INPUT;
@@ -463,7 +484,6 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
   // Free the current listing while the download runs: every KB of contiguous heap
   // matters next to the TLS session, and the list is rebuilt from listQuery after.
   std::vector<Entry>().swap(entries);
-  selectorIndex = 0;
 
   constexpr int MAX_DOWNLOAD_ATTEMPTS = 3;
   HttpDownloader::DownloadError result = HttpDownloader::HTTP_ERROR;
@@ -487,7 +507,9 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
     LOG_ERR("BookOrbit", "Download attempt %d/%d failed (err=%d), retrying", attempt + 1, MAX_DOWNLOAD_ATTEMPTS,
             static_cast<int>(result));
   }
-  if (result != HttpDownloader::OK && result != HttpDownloader::ABORTED) {
+
+  const bool downloadFailed = result != HttpDownloader::OK && result != HttpDownloader::ABORTED;
+  if (downloadFailed) {
     // preservePartial kept the partial file for resuming between attempts; don't
     // leave a truncated EPUB behind once we give up.
     Storage.remove(filename.c_str());
@@ -495,25 +517,23 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
 
   if (result == HttpDownloader::OK) {
     clearBookCache(filename);
-    // The listing was freed for download headroom; rebuild it from the stored
-    // context so the user returns to the same page.
-    if (!loadBooks(listQuery, listTitle, listPage, booksFromFacet, /*append=*/false, /*allowNetwork=*/false)) {
-      showLoadingBeforeFetch();
-      loadBooks(listQuery, listTitle, listPage, booksFromFacet);
-    }
-    return;
   } else if (result == HttpDownloader::ABORTED) {
     LOG_DBG("BookOrbit", "Download cancelled");
     mappedInput.suppressNextBackRelease();
-    if (!loadBooks(listQuery, listTitle, listPage, booksFromFacet, /*append=*/false, /*allowNetwork=*/false)) {
-      showLoadingBeforeFetch();
-      loadBooks(listQuery, listTitle, listPage, booksFromFacet);
-    }
-    return;
   } else {
-    state = BrowserState::ERROR;
+    LOG_ERR("BookOrbit", "Download failed (err=%d)", static_cast<int>(result));
     errorMessage = tr(STR_DOWNLOAD_FAILED);
   }
+
+  // The listing was freed for download headroom; rebuild it from the stored
+  // context so the user returns to the same page, on the same book.
+  restoreBookListAfterDownload();
+
+  // The rebuild leaves BROWSING state behind, which would swallow the failure
+  if (downloadFailed) {
+    state = BrowserState::ERROR;
+  }
+
   requestUpdate();
 }
 
@@ -557,11 +577,7 @@ void BookOrbitCatalogBrowserActivity::loop() {
             loadFacetEntries(facetSectionId, facetTitle, facetPage);
           }
         } else {
-          if (!loadBooks(listQuery, listTitle, listPage, booksFromFacet, /*append=*/false,
-                         /*allowNetwork=*/false)) {
-            showLoadingBeforeFetch();
-            loadBooks(listQuery, listTitle, listPage, booksFromFacet);
-          }
+          restoreBookListAfterDownload();
         }
       } else {
         state = BrowserState::BROWSING;

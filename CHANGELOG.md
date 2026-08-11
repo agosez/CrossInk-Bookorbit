@@ -5,6 +5,12 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+### Fixed
+
+- Finishing a download in the BookOrbit catalog returns you to the exact spot you left, instead of to a list that looks like the top of the catalog. The listing is freed while the download runs, to leave the memory a secure connection needs; rebuilding it only restored the last batch of books fetched from the server, so the pages you had scrolled through were gone, the selection was back on the first line and the scrollbar agreed. The whole listing is now rebuilt — from the pages kept on the SD card, so usually without asking the server again — and the selection returns to the book you just downloaded, now marked as present on the device. Cancelling a download, or backing out of a failed one, restores the listing the same way.
+
 ## [v1.5.0+bookorbit.1] - 2026-08-10
 
 Based on CrossInk v1.5.0.

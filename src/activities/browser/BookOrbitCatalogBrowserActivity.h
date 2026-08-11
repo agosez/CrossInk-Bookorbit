@@ -81,6 +81,7 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   bool loadBooks(const BookOrbitBookQuery& query, const std::string& title, int page, bool fromFacet,
                  bool append = false, bool allowNetwork = true);
   bool appendNextPageForCurrentList(bool allowNetwork = true);
+  void restoreBookListAfterDownload();
   int listPageItems() const;
   void launchSearch();
   void performSearch(const std::string& query);
