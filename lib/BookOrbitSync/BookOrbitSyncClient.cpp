@@ -131,6 +131,23 @@ BookOrbitSyncClient::Error validateAuthResponse(const char* body) {
 // floor rather than risk an aggregate-exhaustion allocation failure mid-handshake.
 constexpr uint32_t MIN_HEAP_FOR_TLS = 55000;
 
+// A request that reuses the Session's established connection pays no handshake, and the
+// full floor would double-count the memory that live TLS session already holds -- it
+// refused affordable uploads whenever a request followed another in the same session
+// (stats after the progress fetch, bookmarks after highlights: measured 54804 free
+// against the 55000 floor). Such a request only needs its JSON bodies and framing; the
+// largest, an annotation batch with its key set, stays under half of this.
+constexpr uint32_t MIN_HEAP_FOR_KEPT_SESSION = 20000;
+
+// True from the first completed request on the shared session until the Session ends.
+// Never set on the simulator, which keeps the full floor. Blind spot: a server dropping
+// the keep-alive mid-session makes the next request re-handshake under the small floor;
+// wolfSSL fails an unaffordable handshake cleanly, so that degrades to NETWORK_ERROR
+// and a retry on the next sync rather than a crash.
+bool s_sessionHandshakePaid = false;
+
+uint32_t requiredHeapFloor() { return s_sessionHandshakePaid ? MIN_HEAP_FOR_KEPT_SESSION : MIN_HEAP_FOR_TLS; }
+
 #ifdef SIMULATOR
 void addAuthHeaders(HTTPClient& http) {
   // BookOrbit's own KOReader plugin sends plain application/json (not the kosync
@@ -197,6 +214,12 @@ int sendBookOrbitRequest(const char* method, const std::string& url, const std::
   }
   const int code = payload != nullptr ? http.sendRequest(method, *payload) : http.GET();
   outBody = http.getString();
+  // An HTTP status, even an error one, proves the session's handshake is up and paid
+  // for; a transport failure may have closed the socket, so the next request assumes
+  // it pays a new one.
+  if (pooled) {
+    s_sessionHandshakePaid = code > 0;
+  }
   // A pooled client keeps its socket for the next request; the Session closes it.
   if (!pooled) {
     http.end();
@@ -213,6 +236,7 @@ BookOrbitSyncClient::Session::Session() {}
 BookOrbitSyncClient::Session::~Session() {}
 #else
 BookOrbitSyncClient::Session::Session() {
+  s_sessionHandshakePaid = false;
   s_session = makeUniqueNoThrow<freeink::SecureHttpClient>();
   if (!s_session) {
     LOG_ERR("BookOrbit", "Session allocation failed; requests will open their own connections");
@@ -223,6 +247,7 @@ BookOrbitSyncClient::Session::Session() {
 }
 
 BookOrbitSyncClient::Session::~Session() {
+  s_sessionHandshakePaid = false;
   if (s_session) {
     s_session->end();
     s_session.reset();
@@ -242,8 +267,9 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::authenticate() {
   std::string url = BOOKORBIT_STORE.getBaseUrl() + "/users/auth";
   const uint32_t freeHeap = ESP.getFreeHeap();
   LOG_DBG("BookOrbit", "Authenticating: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("BookOrbit", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+  const uint32_t heapFloor = requiredHeapFloor();
+  if (freeHeap < heapFloor) {
+    LOG_ERR("BookOrbit", "Insufficient heap for sync request: %u bytes free (need %u)", freeHeap, heapFloor);
     return LOW_MEMORY;
   }
 
@@ -304,8 +330,9 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::getProgress(const std::string& d
   std::string url = BOOKORBIT_STORE.getBaseUrl() + "/syncs/progress/" + documentHash;
   const uint32_t freeHeap = ESP.getFreeHeap();
   LOG_DBG("BookOrbit", "Getting progress: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("BookOrbit", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+  const uint32_t heapFloor = requiredHeapFloor();
+  if (freeHeap < heapFloor) {
+    LOG_ERR("BookOrbit", "Insufficient heap for sync request: %u bytes free (need %u)", freeHeap, heapFloor);
     return LOW_MEMORY;
   }
 
@@ -403,8 +430,9 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::updateProgress(const KOReaderPro
   std::string url = BOOKORBIT_STORE.getBaseUrl() + "/syncs/progress";
   const uint32_t freeHeap = ESP.getFreeHeap();
   LOG_DBG("BookOrbit", "Updating progress: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("BookOrbit", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+  const uint32_t heapFloor = requiredHeapFloor();
+  if (freeHeap < heapFloor) {
+    LOG_ERR("BookOrbit", "Insufficient heap for sync request: %u bytes free (need %u)", freeHeap, heapFloor);
     return LOW_MEMORY;
   }
 
@@ -483,8 +511,9 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::uploadPageStats(const std::strin
   std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/page-stats";
   const uint32_t freeHeap = ESP.getFreeHeap();
   LOG_DBG("BookOrbit", "Uploading %u stat events: %s (heap: %u)", (unsigned)count, url.c_str(), (unsigned)freeHeap);
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("BookOrbit", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+  const uint32_t heapFloor = requiredHeapFloor();
+  if (freeHeap < heapFloor) {
+    LOG_ERR("BookOrbit", "Insufficient heap for sync request: %u bytes free (need %u)", freeHeap, heapFloor);
     return LOW_MEMORY;
   }
 
@@ -581,8 +610,9 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
   const uint32_t freeHeap = ESP.getFreeHeap();
   LOG_DBG("BookOrbit", "Exchanging %u annotations, %u keys (heap: %u)", (unsigned)changeCount, (unsigned)keys.count,
           (unsigned)freeHeap);
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("BookOrbit", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+  const uint32_t heapFloor = requiredHeapFloor();
+  if (freeHeap < heapFloor) {
+    LOG_ERR("BookOrbit", "Insufficient heap for sync request: %u bytes free (need %u)", freeHeap, heapFloor);
     return LOW_MEMORY;
   }
 
@@ -756,8 +786,9 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::ackAnnotations(const std::string
 
   const std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/annotations/exchange-ack";
   const uint32_t freeHeap = ESP.getFreeHeap();
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("BookOrbit", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+  const uint32_t heapFloor = requiredHeapFloor();
+  if (freeHeap < heapFloor) {
+    LOG_ERR("BookOrbit", "Insufficient heap for sync request: %u bytes free (need %u)", freeHeap, heapFloor);
     return LOW_MEMORY;
   }
 
@@ -834,8 +865,9 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeBookmarks(
   const uint32_t freeHeap = ESP.getFreeHeap();
   LOG_DBG("BookOrbit", "Exchanging %u bookmarks, %u keys (heap: %u)", (unsigned)changeCount, (unsigned)keys.count,
           (unsigned)freeHeap);
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("BookOrbit", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+  const uint32_t heapFloor = requiredHeapFloor();
+  if (freeHeap < heapFloor) {
+    LOG_ERR("BookOrbit", "Insufficient heap for sync request: %u bytes free (need %u)", freeHeap, heapFloor);
     return LOW_MEMORY;
   }
 
@@ -978,8 +1010,9 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::ackBookmarks(const std::string& 
 
   const std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/bookmarks/exchange-ack";
   const uint32_t freeHeap = ESP.getFreeHeap();
-  if (freeHeap < MIN_HEAP_FOR_TLS) {
-    LOG_ERR("BookOrbit", "Insufficient heap for TLS handshake: %u bytes free (need %u)", freeHeap, MIN_HEAP_FOR_TLS);
+  const uint32_t heapFloor = requiredHeapFloor();
+  if (freeHeap < heapFloor) {
+    LOG_ERR("BookOrbit", "Insufficient heap for sync request: %u bytes free (need %u)", freeHeap, heapFloor);
     return LOW_MEMORY;
   }
 

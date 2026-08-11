@@ -9,6 +9,7 @@ on; for everything inherited from upstream, see the
 
 ### Fixed
 
+- A BookOrbit sync no longer skips part of its work when memory is merely ordinary rather than plentiful — the symptom was reading sessions or bookmarks that only reached the server on the second sync. Every request checked for enough free memory to open a secure connection, even when it was about to reuse the one already open, whose cost is precisely what the check found missing: the first request of a sync could pass and the next ones fail by a couple hundred bytes. Requests riding an established connection now check only for what they actually allocate.
 - Finishing a download in the BookOrbit catalog returns you to the exact spot you left, instead of to a list that looks like the top of the catalog. The listing is freed while the download runs, to leave the memory a secure connection needs; rebuilding it only restored the last batch of books fetched from the server, so the pages you had scrolled through were gone, the selection was back on the first line and the scrollbar agreed. The whole listing is now rebuilt — from the pages kept on the SD card, so usually without asking the server again — and the selection returns to the book you just downloaded, now marked as present on the device. Cancelling a download, or backing out of a failed one, restores the listing the same way.
 
 ## [v1.5.0+bookorbit.1] - 2026-08-10
