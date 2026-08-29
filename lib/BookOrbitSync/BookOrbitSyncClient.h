@@ -49,6 +49,20 @@ class BookOrbitSyncClient {
   static constexpr Error LOW_MEMORY = KOReaderSyncClient::LOW_MEMORY;
 
   /**
+   * The identifier this reader reports to BookOrbit as device_id / deviceId.
+   *
+   * "crossink-" followed by the twelve hex digits of the chip's factory MAC, so two
+   * CrossInk readers on the same account are told apart. The server keys everything
+   * per device on this id alone — which highlights a device has seen (and therefore
+   * which ones it is deemed to have deleted), reading-session ids, device retirement,
+   * progress resets; the human-readable device name only appears on progress rows.
+   * Two readers sharing one id would silently delete each other's highlights.
+   *
+   * Stable across reboots and firmware updates; the buffer lives for the program.
+   */
+  static const char* deviceId();
+
+  /**
    * Keeps one TLS connection open across the requests of a single sync.
    *
    * A sync makes several requests to the same host in a row, and a handshake costs a second

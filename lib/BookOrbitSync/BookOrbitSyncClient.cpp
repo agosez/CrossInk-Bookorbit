@@ -8,6 +8,7 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <esp_mac.h>
 #ifdef SIMULATOR
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -19,6 +20,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -34,9 +36,23 @@
 int BookOrbitSyncClient::lastHttpCode = 0;
 int BookOrbitSyncClient::lastTransportError = 0;
 
-namespace {
-constexpr char DEVICE_ID[] = "crossink-device";
+const char* BookOrbitSyncClient::deviceId() {
+  static const std::array<char, 24> id = [] {
+    std::array<char, 24> value{};
+    uint8_t mac[6] = {};
+    if (esp_efuse_mac_get_default(mac) != 0) {
+      LOG_ERR("BookOrbit", "Could not read factory MAC; falling back to shared device id");
+      snprintf(value.data(), value.size(), "crossink-device");
+      return value;
+    }
+    snprintf(value.data(), value.size(), "crossink-%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4],
+             mac[5]);
+    return value;
+  }();
+  return id.data();
+}
 
+namespace {
 std::string formatHttpStatusMessage(int httpCode) {
   char buffer[96];
   snprintf(buffer, sizeof(buffer), tr(STR_KOREADER_SYNC_HTTP_STATUS_FORMAT), httpCode);
@@ -492,7 +508,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::updateProgress(const KOReaderPro
   doc["progress"] = progress.progress;
   doc["percentage"] = progress.percentage;
   doc["device"] = progress.device;
-  doc["device_id"] = DEVICE_ID;
+  doc["device_id"] = deviceId();
   if (progress.timestamp > 0) {
     doc["timestamp"] = progress.timestamp;
   }
@@ -577,7 +593,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::uploadPageStats(const std::strin
   JsonBody body;
   {
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID;
+    doc["deviceId"] = deviceId();
     doc["deviceModel"] = deviceModel;
     doc["pluginVersion"] = "crossink-bo-1";
     char deviceTime[20] = {};
@@ -670,7 +686,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
   JsonBody body;
   {
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID;
+    doc["deviceId"] = deviceId();
     doc["deviceModel"] = deviceModel;
     doc["pluginVersion"] = "crossink-bo-1";
 
@@ -842,7 +858,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::ackAnnotations(const std::string
   JsonBody body;
   {
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID;
+    doc["deviceId"] = deviceId();
     doc["deviceModel"] = deviceModel;
     doc["pluginVersion"] = "crossink-bo-1";
     JsonArray books = doc["books"].to<JsonArray>();
@@ -921,7 +937,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeBookmarks(
   JsonBody body;
   {
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID;
+    doc["deviceId"] = deviceId();
     doc["deviceModel"] = deviceModel;
     doc["pluginVersion"] = "crossink-bo-1";
 
@@ -1065,7 +1081,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::ackBookmarks(const std::string& 
   JsonBody body;
   {
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID;
+    doc["deviceId"] = deviceId();
     doc["deviceModel"] = deviceModel;
     doc["pluginVersion"] = "crossink-bo-1";
     JsonArray books = doc["books"].to<JsonArray>();
