@@ -23,6 +23,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <string_view>
 
 #include "../settings/BookOrbitSettingsActivity.h"
 #include "../settings/DictionarySelectActivity.h"
@@ -638,12 +639,13 @@ bool findClippingTextOnPageLoose(const Page& page, const std::string& clippingTe
   if (needle.empty()) return false;
 
   // Transient and bounded: one page of text (~1KB) plus one word index per kept byte, built
-  // only when the strict matcher has already failed, freed before this returns.
-  std::string haystack;
-  std::vector<uint16_t> wordOfByte;
-  haystack.reserve(1024);
-  wordOfByte.reserve(1024);
-  forEachVisiblePageWord(page, [&](const uint16_t wordIndex, const PageLine&, const TextBlock& block, const size_t i) {
+  // only when the strict matcher has already failed, freed before this returns. Counted first,
+  // then taken as two exact-size, fallible allocations: containers growing by doubling asked
+  // for fresh 2-4 KB blocks mid-way through a bare `new`, which on the heap a background
+  // chapter build leaves (a few KB, fragmented) aborted the device. When the heap cannot give
+  // even the exact sizes, not finding the highlight on this page is the right outcome.
+  size_t haystackBytes = 0;
+  forEachVisiblePageWord(page, [&](const uint16_t, const PageLine&, const TextBlock& block, const size_t i) {
     const char* word = block.wordText(static_cast<uint16_t>(i));
     for (const char* cursor = word + (hasEmSpacePrefix(word) ? 3 : 0); *cursor != '\0';) {
       const size_t skip = clipLooseSkipLen(cursor);
@@ -651,15 +653,41 @@ bool findClippingTextOnPageLoose(const Page& page, const std::string& clippingTe
         cursor += skip;
         continue;
       }
-      haystack.push_back(*cursor++);
-      wordOfByte.push_back(wordIndex);
+      haystackBytes++;
+      cursor++;
     }
     return true;
   });
-
+  if (haystackBytes == 0) return false;
+  const auto haystackBuffer = makeUniqueNoThrow<char[]>(haystackBytes);
+  const auto wordOfByte = makeUniqueNoThrow<uint16_t[]>(haystackBytes);
+  if (!haystackBuffer || !wordOfByte) {
+    LOG_DBG("CLIP", "Skipping loose highlight match: page=%u bytes, maxAlloc=%u", static_cast<unsigned>(haystackBytes),
+            static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    return false;
+  }
+  size_t filled = 0;
+  forEachVisiblePageWord(page, [&](const uint16_t wordIndex, const PageLine&, const TextBlock& block, const size_t i) {
+    const char* word = block.wordText(static_cast<uint16_t>(i));
+    for (const char* cursor = word + (hasEmSpacePrefix(word) ? 3 : 0); *cursor != '\0' && filled < haystackBytes;) {
+      const size_t skip = clipLooseSkipLen(cursor);
+      if (skip > 0) {
+        cursor += skip;
+        continue;
+      }
+      haystackBuffer[filled] = *cursor++;
+      wordOfByte[filled] = wordIndex;
+      filled++;
+    }
+    return true;
+  });
+  const std::string_view haystack(haystackBuffer.get(), filled);
   if (haystack.empty()) return false;
+  const uint16_t firstWord = wordOfByte[0];
+  const uint16_t lastWord = wordOfByte[haystack.size() - 1];
+
   const size_t position = haystack.find(needle);
-  if (position != std::string::npos) {
+  if (position != std::string_view::npos) {
     match.startWord = wordOfByte[position];
     match.endWord = wordOfByte[position + needle.size() - 1];
     return true;
@@ -674,27 +702,27 @@ bool findClippingTextOnPageLoose(const Page& page, const std::string& clippingTe
   // same two words the highlight ends with grew a spurious fragment.
   constexpr size_t MIN_SPAN_OVERLAP_BYTES = 12;
   constexpr uint16_t MIN_SPAN_OVERLAP_WORDS = 3;
-  const auto spansEnoughWords = [&](const uint16_t firstWord, const uint16_t lastWord) {
-    return lastWord >= firstWord && static_cast<uint16_t>(lastWord - firstWord + 1) >= MIN_SPAN_OVERLAP_WORDS;
+  const auto spansEnoughWords = [&](const uint16_t first, const uint16_t last) {
+    return last >= first && static_cast<uint16_t>(last - first + 1) >= MIN_SPAN_OVERLAP_WORDS;
   };
 
   if (needle.size() > haystack.size() && haystack.size() >= MIN_SPAN_OVERLAP_BYTES &&
-      spansEnoughWords(wordOfByte.front(), wordOfByte.back()) && needle.find(haystack) != std::string::npos) {
-    match.startWord = wordOfByte.front();
-    match.endWord = wordOfByte.back();
+      spansEnoughWords(firstWord, lastWord) && needle.find(haystack) != std::string::npos) {
+    match.startWord = firstWord;
+    match.endWord = lastWord;
     return true;
   }
   const size_t maxOverlap = std::min(needle.size() - 1, haystack.size());
   for (size_t overlap = maxOverlap; overlap >= MIN_SPAN_OVERLAP_BYTES; overlap--) {
     if (memcmp(haystack.data() + haystack.size() - overlap, needle.data(), overlap) == 0 &&
-        spansEnoughWords(wordOfByte[haystack.size() - overlap], wordOfByte.back())) {
+        spansEnoughWords(wordOfByte[haystack.size() - overlap], lastWord)) {
       match.startWord = wordOfByte[haystack.size() - overlap];
-      match.endWord = wordOfByte.back();
+      match.endWord = lastWord;
       return true;
     }
     if (memcmp(haystack.data(), needle.data() + needle.size() - overlap, overlap) == 0 &&
-        spansEnoughWords(wordOfByte.front(), wordOfByte[overlap - 1])) {
-      match.startWord = wordOfByte.front();
+        spansEnoughWords(firstWord, wordOfByte[overlap - 1])) {
+      match.startWord = firstWord;
       match.endWord = wordOfByte[overlap - 1];
       return true;
     }
@@ -6104,11 +6132,18 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   }
   if (!activeFootnotePreview) {
     // The page is already on the panel, so the chapter parse this may do costs nothing visible.
+    // A mint lends the framebuffer; the page is recomposed here, after the backfills have
+    // returned and released everything they loaded, so the redraw runs on the same heap the
+    // regular render just did -- not a smaller one.
+    bool pageBufferLent = false;
     if (currentSpineIndex != annotationBackfillSpine) {
-      backfillAnnotationPositions();
+      pageBufferLent = backfillAnnotationPositions() || pageBufferLent;
     }
     if (currentSpineIndex != bookmarkBackfillSpine) {
-      backfillBookmarkPositions();
+      pageBufferLent = backfillBookmarkPositions() || pageBufferLent;
+    }
+    if (pageBufferLent) {
+      restoreCurrentPageBufferAfterSilentIndex();
     }
     const int totalPages = section->estimatedTotalPages();
     // render() also runs on menu/bookmark/screenshot re-renders. Avoid repeating
@@ -6470,100 +6505,148 @@ bool EpubReaderActivity::queueProgressSave(const int spineIndex, const int curre
   return saveProgress(spineIndex, currentPage, pageCount);
 }
 
-void EpubReaderActivity::backfillBookmarkPositions() {
-  bookmarkBackfillSpine = currentSpineIndex;
-  if (!BOOKORBIT_STORE.hasCredentials() || !epub) return;
+namespace {
+// Minting a position needs heap on both sides of the framebuffer loan: Expat and the match
+// tables while the chapter streams (the inflate window and decoder come from the lent
+// framebuffer), then the page has to be reloaded and recomposed, highlights included, once the
+// buffer is handed back. A chapter still indexing in the background leaves this heap around
+// 10 KB (crash reports read free=9880 maxAlloc=5108 during the regular render of such a page;
+// the recomposition after a mint then aborted on a bare `new`); an idle reader leaves ~60 KB.
+// The floor sits between the two. Measured right before the loan, after every other allocation
+// of the call chain, and again cheaply by the backfills before they read anything from SD.
+constexpr uint32_t POSITION_MINT_MIN_FREE_HEAP = 32 * 1024;
+constexpr uint32_t POSITION_MINT_MIN_MAX_ALLOC = 16 * 1024;
 
-  std::vector<BookOrbitBookmarkRecord> records;
-  BookOrbitBookmarkStore::readAll(epub->getCachePath(), records);
+bool heapAllowsPositionMint() {
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const uint32_t maxAlloc = ESP.getMaxAllocHeap();
+  if (freeHeap >= POSITION_MINT_MIN_FREE_HEAP && maxAlloc >= POSITION_MINT_MIN_MAX_ALLOC) return true;
+  LOG_DBG("BookOrbit", "Deferring position mint: heap free=%u maxAlloc=%u", static_cast<unsigned>(freeHeap),
+          static_cast<unsigned>(maxAlloc));
+  return false;
+}
+}  // namespace
+
+bool EpubReaderActivity::backfillBookmarkPositions() {
+  // Checked before the spine is marked done, so a later page turn retries once memory frees --
+  // typically when the chapter's background build completes.
+  if (!BOOKORBIT_STORE.hasCredentials() || !epub || !heapAllowsPositionMint()) return false;
+  bookmarkBackfillSpine = currentSpineIndex;
 
   // One mint per visit: building a position streams the chapter, on the task that also serves
   // input. Reading on converges the rest, chapter by chapter.
   const auto& bookmarks = BOOKMARKS.getBookmarks();
-  for (size_t i = 0; i < bookmarks.size(); i++) {
-    if (bookmarks[i].spineIndex != static_cast<uint16_t>(currentSpineIndex)) continue;
+  size_t target = SIZE_MAX;
+  {
+    // Scoped so the whole store is released before the mint, which needs the heap it took.
+    std::vector<BookOrbitBookmarkRecord> records;
+    BookOrbitBookmarkStore::readAll(epub->getCachePath(), records);
+    for (size_t i = 0; i < bookmarks.size(); i++) {
+      if (bookmarks[i].spineIndex != static_cast<uint16_t>(currentSpineIndex)) continue;
 
-    if (bookmarks[i].timestamp == 0) {
-      uint32_t now = 0;
-      if (!WallClock::now(now) || !BOOKMARKS.stampMissingTimestamp(i, now)) continue;
+      if (bookmarks[i].timestamp == 0) {
+        uint32_t now = 0;
+        if (!WallClock::now(now) || !BOOKMARKS.stampMissingTimestamp(i, now)) continue;
+      }
+      const Bookmark& bookmark = bookmarks[i];
+      const bool stamped = std::any_of(records.begin(), records.end(), [&](const BookOrbitBookmarkRecord& record) {
+        return record.timestamp == bookmark.timestamp && record.spineIndex == bookmark.spineIndex;
+      });
+      if (stamped) continue;
+      target = i;
+      break;
     }
-    const Bookmark& bookmark = bookmarks[i];
-    const bool stamped = std::any_of(records.begin(), records.end(), [&](const BookOrbitBookmarkRecord& record) {
-      return record.timestamp == bookmark.timestamp && record.spineIndex == bookmark.spineIndex;
-    });
-    if (stamped) continue;
-
-    LOG_INF("BOB", "Backfilling a bookmark position in spine %d", currentSpineIndex);
-    recordBookmarkPosition(bookmark, /*onRenderTask=*/true);
-    break;
   }
+  if (target == SIZE_MAX) return false;
+
+  LOG_INF("BOB", "Backfilling a bookmark position in spine %d (heap free=%u maxAlloc=%u)", currentSpineIndex,
+          static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  const PositionMint outcome = recordBookmarkPosition(bookmarks[target], /*onRenderTask=*/true);
+  if (outcome == PositionMint::Deferred) bookmarkBackfillSpine = -1;  // a later page turn retries
+  return outcome == PositionMint::Done;
 }
 
-void EpubReaderActivity::backfillAnnotationPositions() {
+bool EpubReaderActivity::backfillAnnotationPositions() {
   // Once per chapter per session, whatever the outcome: a chapter with nothing to do must not
-  // be re-examined on every page turn.
+  // be re-examined on every page turn. Short memory is the exception: the spine stays unmarked
+  // and a later page turn retries, typically once the chapter's background build completes.
+  if (!BOOKORBIT_STORE.hasCredentials() || !epub || !heapAllowsPositionMint() || !CLIPPINGS.hasClippings()) {
+    return false;
+  }
   annotationBackfillSpine = currentSpineIndex;
-  if (!BOOKORBIT_STORE.hasCredentials() || !epub || !CLIPPINGS.hasClippings()) return;
-
-  std::vector<BookOrbitAnnotationRecord> records;
-  BookOrbitAnnotationStore::readAll(epub->getCachePath(), records);
 
   // One highlight per visit. Minting a position parses the whole chapter, and this runs on the
   // task that also serves input: two or three in a row would freeze the reader for seconds.
   // Reading on converges the rest, chapter by chapter.
   size_t pending = 0;
   size_t target = SIZE_MAX;
-  for (size_t i = 0; i < CLIPPINGS.clippingCount(); i++) {
-    const Clipping* clipping = CLIPPINGS.clippingAt(i);
-    if (!clipping || clipping->spineIndex != currentSpineIndex || clipping->timestamp == 0) continue;
-    if (clipping->paragraphIndex == UINT16_MAX) continue;
-    const bool stamped = std::any_of(records.begin(), records.end(), [&](const BookOrbitAnnotationRecord& record) {
-      return record.timestamp == clipping->timestamp;
-    });
-    if (stamped) continue;
-    pending++;
-    if (target == SIZE_MAX) target = i;
+  {
+    // Scoped so the whole store -- two xpointers per highlight in the book -- is released before
+    // the mint, which needs the heap it took.
+    std::vector<BookOrbitAnnotationRecord> records;
+    BookOrbitAnnotationStore::readAll(epub->getCachePath(), records);
+    for (size_t i = 0; i < CLIPPINGS.clippingCount(); i++) {
+      const Clipping* clipping = CLIPPINGS.clippingAt(i);
+      if (!clipping || clipping->spineIndex != currentSpineIndex || clipping->timestamp == 0) continue;
+      if (clipping->paragraphIndex == UINT16_MAX) continue;
+      const bool stamped = std::any_of(records.begin(), records.end(), [&](const BookOrbitAnnotationRecord& record) {
+        return record.timestamp == clipping->timestamp;
+      });
+      if (stamped) continue;
+      pending++;
+      if (target == SIZE_MAX) target = i;
+    }
   }
-  if (target == SIZE_MAX) return;
+  if (target == SIZE_MAX) return false;
 
   std::string text;
-  if (!CLIPPINGS.readClippingText(target, text) || text.empty()) return;
+  if (!CLIPPINGS.readClippingText(target, text) || text.empty()) return false;
   const Clipping* clipping = CLIPPINGS.clippingAt(target);
-  if (!clipping) return;
+  if (!clipping) return false;
 
-  LOG_INF("BOA", "Backfilling a highlight position in spine %d (%u pending here)", currentSpineIndex,
-          (unsigned)pending);
-  recordAnnotationPosition(target, clipping->paragraphIndex, text, /*onRenderTask=*/true);
+  LOG_INF("BOA", "Backfilling a highlight position in spine %d (%u pending here, heap free=%u maxAlloc=%u)",
+          currentSpineIndex, static_cast<unsigned>(pending), static_cast<unsigned>(ESP.getFreeHeap()),
+          static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  const PositionMint outcome = recordAnnotationPosition(target, clipping->paragraphIndex, text, /*onRenderTask=*/true);
+  if (outcome == PositionMint::Deferred) annotationBackfillSpine = -1;  // a later page turn retries
+  return outcome == PositionMint::Done;
 }
 
 // Resolving a position streams the chapter through miniz and Expat: ~45 KB of workspace
 // (32 KB inflate window, ~11 KB decoder state, parser buffers) that this heap rarely has
-// in one pieceonce a page is up.
-// Lend the framebuffer, as chapter indexing does, so the inflater
-// takes its window from it instead of the heap.
+// in one piece once a page is up. Lend the framebuffer, as chapter indexing does, so the
+// inflater takes its window from it instead of the heap.
+//
+// Off the render task the page is recomposed here, under the lock, before anyone can draw.
+// On the render task (the backfills, called from render()) it is not: render() recomposes the
+// page itself once the backfill has returned and released what it loaded, so that redraw gets
+// the heap the regular render just proved sufficient. Nothing draws in between -- the render
+// task is the only writer and this is its own call chain.
+//
+// Returns false, without lending or resolving, when the heap is too short for the round trip.
 template <typename Resolve>
-void EpubReaderActivity::mintPositionWithFrameBufferLent(const bool onRenderTask, Resolve&& resolve) {
-  auto run = [&] {
-    {
-      GfxRenderer::FrameBufferLoan loan(renderer);
-      resolve();
-    }
-    restoreCurrentPageBufferAfterSilentIndex();
-  };
-
+bool EpubReaderActivity::mintPositionWithFrameBufferLent(const bool onRenderTask, Resolve&& resolve) {
+  if (!heapAllowsPositionMint()) return false;
   if (onRenderTask) {
-    run();
-  } else {
-    RenderLock lock(*this);
-    run();
+    GfxRenderer::FrameBufferLoan loan(renderer);
+    resolve();
+    return true;
   }
+  RenderLock lock(*this);
+  {
+    GfxRenderer::FrameBufferLoan loan(renderer);
+    resolve();
+  }
+  restoreCurrentPageBufferAfterSilentIndex();
+  return true;
 }
 
-void EpubReaderActivity::recordBookmarkPosition(const Bookmark& bookmark, const bool onRenderTask) {
-  if (!BOOKORBIT_STORE.hasCredentials() || !epub || !section) return;
-  if (bookmark.timestamp == 0) return;  // no plausible clock yet; the backfill retries later
+EpubReaderActivity::PositionMint EpubReaderActivity::recordBookmarkPosition(const Bookmark& bookmark,
+                                                                            const bool onRenderTask) {
+  if (!BOOKORBIT_STORE.hasCredentials() || !epub || !section) return PositionMint::Skipped;
+  if (bookmark.timestamp == 0) return PositionMint::Skipped;  // no plausible clock yet; the backfill retries later
 
-  if (bookmark.spineIndex != static_cast<uint16_t>(currentSpineIndex)) return;
+  if (bookmark.spineIndex != static_cast<uint16_t>(currentSpineIndex)) return PositionMint::Skipped;
 
   // The bookmarked page's first visible codepoint, the layout-independent coordinate the
   // section cache stores per page. Minted while the section is open and never recomputed: the
@@ -6574,18 +6657,20 @@ void EpubReaderActivity::recordBookmarkPosition(const Bookmark& bookmark, const 
                                   static_cast<int>(bookmark.progress * static_cast<float>(section->pageCount) + 0.5f))
                        : 0;
   std::string pos;
-  mintPositionWithFrameBufferLent(onRenderTask, [&] {
-    const auto offset = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(page));
-    if (offset) {
-      pos = ChapterXPathResolver::findXPathForVisibleTextOffset(epub, currentSpineIndex, *offset);
-    }
-    if (pos.empty() && bookmark.paragraphIndex != UINT16_MAX) {
-      pos = ChapterXPathResolver::findXPathForParagraph(epub, currentSpineIndex, bookmark.paragraphIndex);
-    }
-  });
+  if (!mintPositionWithFrameBufferLent(onRenderTask, [&] {
+        const auto offset = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(page));
+        if (offset) {
+          pos = ChapterXPathResolver::findXPathForVisibleTextOffset(epub, currentSpineIndex, *offset);
+        }
+        if (pos.empty() && bookmark.paragraphIndex != UINT16_MAX) {
+          pos = ChapterXPathResolver::findXPathForParagraph(epub, currentSpineIndex, bookmark.paragraphIndex);
+        }
+      })) {
+    return PositionMint::Deferred;  // left unstamped; the backfill mints it once memory frees
+  }
   if (pos.empty()) {
     LOG_ERR("BOB", "No position for bookmark in spine %d; it will not sync", currentSpineIndex);
-    return;
+    return PositionMint::Skipped;
   }
 
   BookOrbitBookmarkRecord record;
@@ -6594,36 +6679,41 @@ void EpubReaderActivity::recordBookmarkPosition(const Bookmark& bookmark, const 
   record.spineIndex = static_cast<uint16_t>(currentSpineIndex);
   record.pos = std::move(pos);
   BookOrbitBookmarkStore::put(epub->getCachePath(), record);
+  return PositionMint::Done;
 }
 
-void EpubReaderActivity::recordAnnotationPosition(const size_t clippingIndex, const uint16_t paragraphIndex,
-                                                  const std::string& highlightText, const bool onRenderTask) {
-  if (!BOOKORBIT_STORE.hasCredentials()) return;  // nothing will ever sync these
-  if (paragraphIndex == UINT16_MAX || !epub) return;
+EpubReaderActivity::PositionMint EpubReaderActivity::recordAnnotationPosition(const size_t clippingIndex,
+                                                                              const uint16_t paragraphIndex,
+                                                                              const std::string& highlightText,
+                                                                              const bool onRenderTask) {
+  if (!BOOKORBIT_STORE.hasCredentials()) return PositionMint::Skipped;  // nothing will ever sync these
+  if (paragraphIndex == UINT16_MAX || !epub) return PositionMint::Skipped;
 
   const Clipping* clipping = CLIPPINGS.clippingAt(clippingIndex);
-  if (!clipping || clipping->timestamp == 0) return;
+  if (!clipping || clipping->timestamp == 0) return PositionMint::Skipped;
 
   // Positions are minted here, while the chapter is open, and never recomputed: the server
   // keys annotations by a hash of pos0, so a position rebuilt under a different layout would
   // make every highlight reappear as new.
   BookOrbitAnnotationRecord record;
   std::string sourceText;
-  mintPositionWithFrameBufferLent(onRenderTask, [&] {
-    if (!HighlightPositionResolver::findHighlightXPointers(epub, currentSpineIndex, paragraphIndex, highlightText,
-                                                           record.pos0, record.pos1, &sourceText)) {
-      // Falling back to a paragraph-level range, which the server will resolve to nothing and
-      // flag as repaired. Imprecise but visible beats a highlight that never syncs at all.
-      record.pos0 = ChapterXPathResolver::findXPathForParagraph(epub, currentSpineIndex, paragraphIndex);
-      record.pos1 = record.pos0;
-      LOG_ERR("BOA", "No precise position for highlight in spine %d paragraph %u; falling back to the paragraph",
-              currentSpineIndex, paragraphIndex);
-    }
-  });
+  if (!mintPositionWithFrameBufferLent(onRenderTask, [&] {
+        if (!HighlightPositionResolver::findHighlightXPointers(epub, currentSpineIndex, paragraphIndex, highlightText,
+                                                               record.pos0, record.pos1, &sourceText)) {
+          // Falling back to a paragraph-level range, which the server will resolve to nothing and
+          // flag as repaired. Imprecise but visible beats a highlight that never syncs at all.
+          record.pos0 = ChapterXPathResolver::findXPathForParagraph(epub, currentSpineIndex, paragraphIndex);
+          record.pos1 = record.pos0;
+          LOG_ERR("BOA", "No precise position for highlight in spine %d paragraph %u; falling back to the paragraph",
+                  currentSpineIndex, paragraphIndex);
+        }
+      })) {
+    return PositionMint::Deferred;  // left unstamped; the backfill mints it once memory frees
+  }
   if (record.pos0.empty()) {
     LOG_ERR("BOA", "No xpointer for highlight in spine %d paragraph %u; it will not sync", currentSpineIndex,
             paragraphIndex);
-    return;
+    return PositionMint::Skipped;
   }
 
   // The clipping's text was rebuilt from rendered words, whose geometric joins misplace spaces
@@ -6641,13 +6731,14 @@ void EpubReaderActivity::recordAnnotationPosition(const size_t clippingIndex, co
   // skipped as already sent. WallClock gives real time, corrected on devices with no clock chip.
   if (!WallClock::now(record.identityEpoch)) {
     LOG_ERR("BOA", "No plausible clock yet; this highlight syncs after the next time sync");
-    return;
+    return PositionMint::Skipped;
   }
   record.spineIndex = static_cast<uint16_t>(currentSpineIndex);
   record.paragraphIndex = paragraphIndex;
   if (BookOrbitAnnotationStore::put(epub->getCachePath(), record)) {
     LOG_DBG("BOA", "Stored highlight position %s", record.pos0.c_str());
   }
+  return PositionMint::Done;
 }
 
 bool EpubReaderActivity::flushQueuedProgress() {

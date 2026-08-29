@@ -30,6 +30,7 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
+#include "activities/home/RecentBookProgress.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/TouchActionButtons.h"
 #include "components/TouchHeaderBackButton.h"
@@ -195,12 +196,16 @@ void BookOrbitSyncActivity::saveProgressAndReturn(const CrossPointPosition& posi
     LOG_DBG("BookOrbit", "Adjusted remote page count before save: page=%d count=%d -> %d", position.pageNumber,
             position.totalPages, pageCount);
   }
-  // Deliberately NOT persisting position.visibleTextOffset here: the mapper derives it by
-  // streaming raw XHTML, which cannot skip CSS-hidden subtrees the way layout does, so its
-  // offset lives in a different coordinate space than the section cache's page offsets and
-  // repositions late on books with hidden content. The page/percentage mapping is exact to
-  // about one page now that senders report estimated chapter totals.
-  if (!EpubReaderUtils::saveProgress(*epub, position.spineIndex, position.pageNumber, pageCount)) {
+  // Persist the content coordinate too, as KOReaderSyncActivity does. The page number alone
+  // is a fraction of an *estimated* chapter total; the reader can only rescale it once the
+  // chapter is fully laid out, and with incremental indexing it opens the chapter before
+  // that, so the raw page was shown as-is and landed behind whenever the estimate ran short.
+  // The offset resolves as soon as the build reaches it, whatever the final page count.
+  // (The mapper streams raw XHTML and cannot skip CSS-hidden subtrees the way layout does;
+  // that skews the offset and the page fraction alike, so it is no reason to prefer one.)
+  const std::optional<uint32_t> visibleTextOffset =
+      position.hasVisibleTextOffset ? std::optional<uint32_t>(position.visibleTextOffset) : std::nullopt;
+  if (!EpubReaderUtils::saveProgress(*epub, position.spineIndex, position.pageNumber, pageCount, visibleTextOffset)) {
     {
       RenderLock lock(*this);
       state = SYNC_FAILED;
@@ -209,6 +214,7 @@ void BookOrbitSyncActivity::saveProgressAndReturn(const CrossPointPosition& posi
     requestUpdate(true);
     return;
   }
+  RecentBookProgress::saveCachedEpubPercent(*epub, position.spineIndex, position.pageNumber, pageCount);
   // Manual applies record the marker too, so the history smart sync reads is
   // already there the day the option gets switched on.
   writeLastSyncMarker(Epub::cachePathForFilePath(epubPath, "/.crosspoint"), remoteProgress.timestamp);

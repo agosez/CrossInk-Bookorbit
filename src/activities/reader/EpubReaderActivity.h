@@ -357,31 +357,40 @@ class EpubReaderActivity final : public Activity {
   bool queueProgressSave(int spineIndex, int currentPage, int pageCount, bool forceSave = false);
   bool flushQueuedProgress();
 
+  // How a position mint went: Skipped when there was nothing to do (or nothing that can be
+  // done), Deferred when the heap was too short and the backfill should try again later, Done
+  // when the chapter was walked -- which on the render task also means the framebuffer was lent
+  // and the caller must recompose the page.
+  enum class PositionMint : uint8_t { Skipped, Deferred, Done };
+
   // Mints the BookOrbit xpointer for a highlight just added to the clipping store. Done here
   // rather than at sync time because it walks the chapter's HTML structure, which is nearly
   // free while this activity already has the chapter open (see BookOrbitAnnotationStore).
   // Callers on the render task (the backfills) must say so: the walk runs under a framebuffer
   // loan, which takes the RenderLock unless it is already held.
-  void recordAnnotationPosition(size_t clippingIndex, uint16_t paragraphIndex, const std::string& highlightText,
-                                bool onRenderTask = false);
+  PositionMint recordAnnotationPosition(size_t clippingIndex, uint16_t paragraphIndex, const std::string& highlightText,
+                                        bool onRenderTask = false);
 
   // Mints the BookOrbit position for a bookmark just added, from the current page's visible
   // text offset (see BookOrbitBookmarkStore). Same render-task contract as above.
-  void recordBookmarkPosition(const Bookmark& bookmark, bool onRenderTask = false);
+  PositionMint recordBookmarkPosition(const Bookmark& bookmark, bool onRenderTask = false);
 
-  // Runs `resolve` with the framebuffer lent to it,
-  // then rebuilds the page in RAM.
+  // Runs `resolve` with the framebuffer lent to it, when the heap allows (false otherwise).
+  // Off the render task it then recomposes the page in RAM; on it, the caller does, once its
+  // own locals are gone.
   template <typename Resolve>
-  void mintPositionWithFrameBufferLent(bool onRenderTask, Resolve&& resolve);
+  bool mintPositionWithFrameBufferLent(bool onRenderTask, Resolve&& resolve);
 
   // Stamps a position onto one highlight made before this feature existed, or before a book was
-  // moved. Runs once per chapter per session, after the page is on screen.
-  void backfillAnnotationPositions();
+  // moved. Runs once per chapter per session, after the page is on screen -- unless memory is
+  // short at that moment, in which case a later page turn retries. Returns true when the
+  // framebuffer was lent and the page must be recomposed.
+  bool backfillAnnotationPositions();
   int annotationBackfillSpine = -1;
 
   // Same pattern for bookmarks: stamps legacy ones (timestamp 0) and mints missing positions,
   // one per chapter visit.
-  void backfillBookmarkPositions();
+  bool backfillBookmarkPositions();
   int bookmarkBackfillSpine = -1;
   void cacheCurrentSectionPosition();
   void pauseReadingPaceTimer(const char* reason = "unknown");
