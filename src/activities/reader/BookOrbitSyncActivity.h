@@ -123,7 +123,9 @@ class BookOrbitSyncActivity final : public Activity {
   void onWifiSelectionComplete(bool success);
   void performSync();
   void performUpload();
-  void uploadQueuedStats();
+  // Returns how many queued reading-session events the server accepted this sync,
+  // reported in the sweep record that closes the sync (see completeSweep).
+  size_t uploadQueuedStats();
 
   // Highlights are copied out of the clipping store one batch at a time and the store is
   // unloaded before the request runs: the resident store is ~20KB, a batch ~6KB, and only
@@ -157,6 +159,9 @@ class BookOrbitSyncActivity final : public Activity {
   uint16_t annotationsSent = 0;
   uint16_t annotationsAdded = 0;
   uint16_t annotationsRemoved = 0;
+  // The server's answer on whether it recognises this document at all, taken from the
+  // annotation exchange (which always runs); the sweep record reports it as booksMatched.
+  bool documentUnmatched = false;
   std::vector<BookOrbitAnnotation> pendingAnnotations;
   uint32_t pendingAnnotationWatermark = 0;
   // Fixed-width rows rather than a container of strings, so the whole set is one allocation.

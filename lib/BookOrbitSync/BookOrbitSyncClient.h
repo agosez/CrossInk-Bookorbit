@@ -118,6 +118,29 @@ class BookOrbitSyncClient {
                                const BookOrbitStatEvent* events, size_t count);
 
   /**
+   * Record a completed sync on the server (POST /plugin/sweeps), the same call BookOrbit's
+   * own KOReader plugin makes at the end of a sweep.
+   *
+   * The sweep is this device's declaration that it uploads its own page timings. A device
+   * with no sweep in the server's recent-sweep window is treated as a plain KOReader
+   * install, and the server fabricates estimated reading sessions from every advancing
+   * progress push — duplicating the measured sessions uploadPageStats already carried.
+   * Recording the sweep suppresses that estimation and makes the server retire estimates
+   * that measured sessions overlap.
+   *
+   * The counters are informational telemetry mirroring the plugin's report of what the
+   * sync did; the sweep row itself is what matters.
+   *
+   * @param deviceModel Human-readable device name reported alongside the sweep
+   * @param booksMatched Books the server recognised this sync (0 or 1: a sync covers one book)
+   * @param pageStatsUploaded Reading-session events the server accepted this sync
+   * @param annotationsUpserted Highlights sent to the server this sync
+   * @return OK on success, error code on failure
+   */
+  static Error completeSweep(const std::string& deviceModel, uint32_t booksMatched, uint32_t pageStatsUploaded,
+                             uint32_t annotationsUpserted);
+
+  /**
    * Send one batch of local highlight changes to BookOrbit's annotation exchange
    * (POST /plugin/annotations/exchange).
    *

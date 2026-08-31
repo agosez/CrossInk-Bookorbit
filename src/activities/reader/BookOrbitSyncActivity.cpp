@@ -321,7 +321,7 @@ void BookOrbitSyncActivity::performSync() {
   // connectivity are good: the queued reading-session stats and the highlight and
   // bookmark exchanges all follow on the same session.
   if (result == BookOrbitSyncClient::OK || result == BookOrbitSyncClient::NOT_FOUND) {
-    uploadQueuedStats();
+    const size_t statsAccepted = uploadQueuedStats();
 
     {
       RenderLock lock(*this);
@@ -374,6 +374,25 @@ void BookOrbitSyncActivity::performSync() {
       }
       requestUpdateAndWait();
       delay(1500);
+    }
+
+    // Recorded before any progress push: the push is what triggers the server's session
+    // estimation, and a sweep already on file is what suppresses it (and retires the
+    // duplicate estimates earlier syncs may have left). A failure never fails the sync —
+    // the next sync records another one, and the server's sweep window spans many syncs.
+    const auto sweepResult = BookOrbitSyncClient::completeSweep(SETTINGS.getEffectiveDeviceName(),
+                                                                documentUnmatched ? 0 : 1,
+                                                                static_cast<uint32_t>(statsAccepted), annotationsSent);
+    if (sweepResult != BookOrbitSyncClient::OK) {
+      const int httpCode = BookOrbitSyncClient::lastHttpCode;
+      if (httpCode == 404 || httpCode == 405 || httpCode == 501) {
+        // This BookOrbit server predates the sweeps endpoint; it does not estimate
+        // sessions from sync pushes either, so there is nothing to suppress.
+        LOG_INF("BookOrbit", "Server has no sweeps endpoint (http=%d); skipping sweep record", httpCode);
+      } else {
+        LOG_ERR("BookOrbit", "Sweep record failed (result=%d, http=%d); server may estimate duplicate sessions",
+                static_cast<int>(sweepResult), httpCode);
+      }
     }
   }
 
@@ -652,6 +671,7 @@ void BookOrbitSyncActivity::uploadAnnotationBatch() {
       unmatched, &incomingAnnotations, &morePending);
   LOG_INF("BookOrbit", "Highlight upload result=%d (http=%d, unmatched=%d)", static_cast<int>(result),
           BookOrbitSyncClient::lastHttpCode, unmatched ? 1 : 0);
+  documentUnmatched = unmatched;
 
   if (result != BookOrbitSyncClient::OK || unmatched) return;  // retried on the next sync
 
@@ -1168,7 +1188,7 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
   incomingAnnotations.clear();
 }
 
-void BookOrbitSyncActivity::uploadQueuedStats() {
+size_t BookOrbitSyncActivity::uploadQueuedStats() {
   // Reading-session events queued by the reader (see BookOrbitStatsQueue), pushed
   // while WiFi is already up for the progress sync. Upload-only: BookOrbit has no
   // stats download API, so stats flow CrossInk -> BookOrbit.
@@ -1180,7 +1200,7 @@ void BookOrbitSyncActivity::uploadQueuedStats() {
   const size_t total = std::min(BookOrbitStatsQueue::queuedCount(cachePath), BookOrbitStatsQueue::MAX_QUEUED_EVENTS);
   if (total == 0) {
     LOG_INF("BookOrbit", "No queued reading stats for this book");
-    return;
+    return 0;
   }
   LOG_INF("BookOrbit", "Draining %u queued events (era now %u)", (unsigned)total, (unsigned)WallClock::era());
 
@@ -1230,7 +1250,7 @@ void BookOrbitSyncActivity::uploadQueuedStats() {
   for (size_t offset = 0; offset < total; offset += BATCH_SIZE) {
     if (!BookOrbitStatsQueue::readRange(cachePath, offset, BATCH_SIZE, batch)) {
       LOG_ERR("BookOrbit", "Failed to read queued stats at event %u; keeping the queue", (unsigned)offset);
-      return;
+      return uploaded;
     }
     if (batch.empty()) {
       // The file is shorter than its size implied: a truncated queue. Clearing it
@@ -1288,13 +1308,13 @@ void BookOrbitSyncActivity::uploadQueuedStats() {
         // progress sync is unaffected. Updating the server starts buffering fresh.
         LOG_INF("BookOrbit", "Server has no page-stats endpoint (http=%d); discarding queued stats", httpCode);
         BookOrbitStatsQueue::clear(cachePath);
-        return;
+        return uploaded;
       }
       // Transient failure: keep the whole queue for a later attempt; re-sending an
       // already-accepted batch next time is harmless compared to losing sessions.
       LOG_ERR("BookOrbit", "Stats upload failed after %u/%u events (http=%d)", (unsigned)uploaded, (unsigned)total,
               httpCode);
-      return;
+      return uploaded;
     }
     uploaded += batch.size();
 
@@ -1316,6 +1336,7 @@ void BookOrbitSyncActivity::uploadQueuedStats() {
   }
   LOG_INF("BookOrbit", "Uploaded %u reading-session events", (unsigned)uploaded);
   BookOrbitStatsQueue::clear(cachePath);
+  return uploaded;
 }
 
 void BookOrbitSyncActivity::performUpload() {

@@ -655,6 +655,86 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::uploadPageStats(const std::strin
 #endif
 }
 
+BookOrbitSyncClient::Error BookOrbitSyncClient::completeSweep(const std::string& deviceModel,
+                                                              const uint32_t booksMatched,
+                                                              const uint32_t pageStatsUploaded,
+                                                              const uint32_t annotationsUpserted) {
+  lastHttpCode = 0;
+  lastTransportError = 0;
+  if (!BOOKORBIT_STORE.hasCredentials()) {
+    LOG_DBG("BookOrbit", "No credentials configured");
+    return NO_CREDENTIALS;
+  }
+
+  std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/sweeps";
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  LOG_DBG("BookOrbit", "Recording sweep: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
+  const uint32_t heapFloor = requiredHeapFloor();
+  if (freeHeap < heapFloor) {
+    LOG_ERR("BookOrbit", "Insufficient heap for sync request: %u bytes free (need %u)", freeHeap, heapFloor);
+    return LOW_MEMORY;
+  }
+
+  // See uploadPageStats for why pluginVersion is a literal and the JsonDocument is scoped.
+  JsonBody body;
+  {
+    JsonDocument doc;
+    doc["deviceId"] = deviceId();
+    doc["deviceModel"] = deviceModel;
+    doc["pluginVersion"] = "crossink-bo-1";
+    char deviceTime[20] = {};
+    if (bookOrbitFormatDatetime(static_cast<uint32_t>(time(nullptr)), deviceTime)) {
+      // Optional server-side, but an empty string fails its format validation with HTTP 400
+      // and takes the whole sweep down with it: better omitted when the clock is implausible.
+      doc["deviceTime"] = deviceTime;
+    }
+    doc["booksMatched"] = booksMatched;
+    doc["pageStatsUploaded"] = pageStatsUploaded;
+    doc["annotationsUpserted"] = annotationsUpserted;
+    if (!body.build(doc)) return LOW_MEMORY;
+  }
+
+#ifdef SIMULATOR
+  HTTPClient http;
+  std::unique_ptr<WiFiClientSecure> secureClient;
+  WiFiClient plainClient;
+
+  if (isHttpsUrl(url)) {
+    secureClient.reset(new WiFiClientSecure);
+    secureClient->setInsecure();
+    http.begin(*secureClient, url.c_str());
+  } else {
+    http.begin(plainClient, url.c_str());
+  }
+  addAuthHeaders(http);
+  http.addHeader("Content-Type", "application/json");
+
+  const int httpCode = http.POST(body.c_str());
+  lastHttpCode = httpCode;
+  lastTransportError = (httpCode < 0) ? httpCode : 0;
+  http.end();
+
+  LOG_DBG("BookOrbit", "Sweep response: %d", httpCode);
+
+  if (httpCode >= 200 && httpCode < 300) return OK;
+  if (httpCode == 401) return AUTH_FAILED;
+  if (httpCode < 0) return NETWORK_ERROR;
+  return SERVER_ERROR;
+#else
+  LOG_DBG("BookOrbit", "POST body bytes=%u", static_cast<unsigned>(body.length()));
+  std::string response;
+  const int httpCode = sendBookOrbitRequest("POST", url, &body, response);
+  lastHttpCode = httpCode > 0 ? httpCode : 0;
+  lastTransportError = httpCode < 0 ? httpCode : 0;
+  LOG_DBG("BookOrbit", "Sweep response: %d", httpCode);
+
+  if (httpCode < 0) return NETWORK_ERROR;
+  if (httpCode >= 200 && httpCode < 300) return OK;
+  if (httpCode == 401) return AUTH_FAILED;
+  return SERVER_ERROR;
+#endif
+}
+
 BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
     const std::string& documentHash, const std::string& deviceModel, const BookOrbitAnnotationKeys& keys,
     const BookOrbitAnnotation* changes, const size_t changeCount, bool& outUnmatched,
