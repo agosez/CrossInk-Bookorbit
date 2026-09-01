@@ -231,7 +231,16 @@ void SdCardFont::applyKernLigaturePointers(PerStyle& s, EpdFontData& data, const
   // kern matrix is never resident — see PerStyle::miniKernMatrix comment.
   data.kernLeftClasses = includeKerning ? s.miniKernLeftClasses : nullptr;
   data.kernRightClasses = includeKerning ? s.miniKernRightClasses : nullptr;
+  // .cpfont files map packed class tables and a dense matrix. Explicitly clear
+  // the built-in-only representation because getKerning() selects by pointer.
+  data.kernLeftCodepoints = nullptr;
+  data.kernLeftClassIds = nullptr;
+  data.kernRightCodepoints = nullptr;
+  data.kernRightClassIds = nullptr;
   data.kernMatrix = includeKerning ? s.miniKernMatrix : nullptr;
+  data.kernRowOffsets = nullptr;
+  data.kernSparseCols = nullptr;
+  data.kernSparseValues = nullptr;
   data.kernLeftEntryCount = includeKerning ? s.miniKernLeftEntryCount : 0;
   data.kernRightEntryCount = includeKerning ? s.miniKernRightEntryCount : 0;
   data.kernLeftClassCount = includeKerning ? s.miniKernLeftClassCount : 0;

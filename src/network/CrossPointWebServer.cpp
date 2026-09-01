@@ -601,60 +601,67 @@ void CrossPointWebServer::handleStatus() const {
   server->send(200, "application/json", response);
 }
 
-void CrossPointWebServer::scanFiles(const char* path, const FileVisitor visitor, void* context) const {
+bool CrossPointWebServer::scanFiles(const char* path, const FileVisitor visitor, void* context) const {
   HalFile root = Storage.open(path);
   if (!root) {
     LOG_DBG("WEB", "Failed to open directory: %s", path);
-    return;
+    return false;
   }
 
   if (!root.isDirectory()) {
     LOG_DBG("WEB", "Not a directory: %s", path);
     root.close();
-    return;
+    return false;
   }
 
   HalFile file = root.openNextFile();
   char name[500];
   while (file) {
-    file.getName(name, sizeof(name));
-    auto fileName = String(name);
+    if (visitor) {
+      file.getName(name, sizeof(name));
+      auto fileName = String(name);
 
-    // Skip hidden items (starting with ".")
-    bool shouldHide = !SETTINGS.showHiddenFiles && fileName.startsWith(".");
+      // Skip hidden items (starting with ".")
+      bool shouldHide = !SETTINGS.showHiddenFiles && fileName.startsWith(".");
 
-    // Treat OS/device metadata like other hidden items: keep it out of the
-    // default view, but let users manage it when Show Hidden Files is enabled.
-    if (!shouldHide && !SETTINGS.showHiddenFiles) {
-      for (const auto* item : HIDDEN_ITEMS) {
-        if (fileName.equals(item)) {
-          shouldHide = true;
-          break;
+      // Treat OS/device metadata like other hidden items: keep it out of the
+      // default view, but let users manage it when Show Hidden Files is enabled.
+      if (!shouldHide && !SETTINGS.showHiddenFiles) {
+        for (const auto* item : HIDDEN_ITEMS) {
+          if (fileName.equals(item)) {
+            shouldHide = true;
+            break;
+          }
         }
       }
-    }
 
-    if (!shouldHide) {
-      FileInfo info;
-      info.name = fileName;
-      info.isDirectory = file.isDirectory();
+      if (!shouldHide) {
+        FileInfo info;
+        info.name = fileName;
+        info.isDirectory = file.isDirectory();
 
-      if (info.isDirectory) {
-        info.size = 0;
-        info.isEpub = false;
-      } else {
-        info.size = file.size();
-        info.isEpub = isEpubFile(info.name);
+        if (info.isDirectory) {
+          info.size = 0;
+          info.isEpub = false;
+        } else {
+          info.size = file.size();
+          info.isEpub = isEpubFile(info.name);
+        }
+
+        visitor(info, context);
       }
-
-      visitor(info, context);
     }
 
     file.close();
     yield();  // Yield to allow WiFi and other tasks to process during long scans
     file = root.openNextFile();
   }
+  const bool complete = !FsHelpers::directoryIterationFailed(root);
+  if (!complete) {
+    LOG_ERR("WEB", "Directory listing failed before EOF: %s", path);
+  }
   root.close();
+  return complete;
 }
 
 bool CrossPointWebServer::isEpubFile(const String& filename) const { return FsHelpers::hasEpubExtension(filename); }
@@ -675,9 +682,6 @@ void CrossPointWebServer::handleFileListData() const {
     return;
   }
 
-  server->setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server->send(200, "application/json", "");
-
   // This response runs on the web-server task, so a TCP-sized heap buffer is
   // safer than adding 1.4KB to its stack. Allocation is fallible and retains
   // the old per-entry path as a low-memory fallback.
@@ -686,6 +690,16 @@ void CrossPointWebServer::handleFileListData() const {
   char output[512];
   constexpr size_t outputSize = sizeof(output);
   JsonDocument doc;
+
+  // Check the iterator before committing to a streamed 200 response. Without
+  // this pass, an SD read error is indistinguishable from a complete JSON list.
+  if (!scanFiles(currentPath.c_str(), nullptr, nullptr)) {
+    server->send(500, "application/json", "{\"error\":\"Directory listing failed\"}");
+    return;
+  }
+
+  server->setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server->send(200, "application/json", "");
 
   struct FileListContext {
     WebServer* server;
@@ -703,7 +717,7 @@ void CrossPointWebServer::handleFileListData() const {
     server->sendContent("[");
   }
 
-  scanFiles(
+  const bool complete = scanFiles(
       currentPath.c_str(),
       [](const FileInfo& info, void* rawContext) {
         auto& context = *static_cast<FileListContext*>(rawContext);
@@ -736,6 +750,12 @@ void CrossPointWebServer::handleFileListData() const {
         context.seenFirst = true;
       },
       &context);
+
+  if (!complete) {
+    // A second-pass failure must not be closed into a valid partial array.
+    server->client().stop();
+    return;
+  }
 
   if (batch) {
     if (context.batchLen + 1 > BATCH_CAPACITY) {
@@ -990,6 +1010,14 @@ void CrossPointWebServer::handleCreateFolder() const {
     parentPath = normalizeWebPath(server->arg("path"));
   }
 
+  HalFile parent = Storage.open(parentPath.c_str());
+  if (!parent || !parent.isDirectory()) {
+    parent.close();
+    server->send(404, "text/plain", "Parent directory does not exist");
+    return;
+  }
+  parent.close();
+
   // Build full folder path
   String folderPath = parentPath;
   if (!folderPath.endsWith("/")) folderPath += "/";
@@ -1008,6 +1036,15 @@ void CrossPointWebServer::handleCreateFolder() const {
 
   // Create the folder
   if (Storage.mkdir(folderPath.c_str())) {
+    const auto visibility = FsHelpers::directoryEntryVisibility(parentPath.c_str(), folderPath.c_str());
+    if (visibility != FsHelpers::DirectoryEntryVisibility::Visible) {
+      const bool rolledBack =
+          visibility == FsHelpers::DirectoryEntryVisibility::Missing && Storage.rmdir(folderPath.c_str());
+      LOG_ERR("WEB", "Created folder is not enumerable: %s (visibility=%u rollback=%d)", folderPath.c_str(),
+              static_cast<unsigned>(visibility), rolledBack);
+      server->send(500, "text/plain", "Folder could not be added to the directory listing");
+      return;
+    }
     SleepImageIndex::invalidateForPath(folderPath.c_str());
     server->send(200, "text/plain", "Folder created: " + folderName);
   } else {

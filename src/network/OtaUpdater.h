@@ -26,10 +26,12 @@ class OtaUpdater {
     CANCELLED_ERROR,
     HASH_MISMATCH_ERROR,
     WRONG_DEVICE_ERROR,
+    SD_CARD_FULL_ERROR,
   };
 
   size_t getOtaSize() const { return otaSize; }
 
+  // Progress work covers both staging and flashing so it never moves backwards.
   size_t getProcessedSize() const { return processedSize; }
 
   size_t getTotalSize() const { return totalSize; }

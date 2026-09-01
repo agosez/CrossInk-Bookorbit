@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "ControlsOptionsActivity.h"
+#include "EpubReaderMenuModel.h"
 #include "ReaderOptionsActivity.h"
 #include "activities/Activity.h"
 #include "components/OptionPopup.h"
@@ -19,36 +20,7 @@ struct Rect;
 
 class EpubReaderMenuActivity final : public Activity {
  public:
-  // Menu actions available from the reader menu.
-  enum class MenuAction {
-    SELECT_CHAPTER,
-    FOOTNOTES,
-    GO_TO_PERCENT,
-    AUTO_PAGE_TURN,
-    ROTATE_SCREEN,
-    SCREENSHOT,
-    DISPLAY_QR,
-    GO_HOME,
-    SYNC,
-    BOOKORBIT_SYNC,
-    NEARBY_POSITION_SYNC,
-    SEND_NEARBY_BOOK,
-    DELETE_STATS,
-    DELETE_CACHE,
-    RESET_READING_PACE,
-    READING_STATS,
-    TOGGLE_COMPLETED,
-    READER_OPTIONS,
-    CONTROLS_OPTIONS,
-    BOOKMARK_TOGGLE,
-    VIEW_BOOKMARKS,
-    DELETE_BOOKMARKS,
-    SAVE_CLIPPING,
-    VIEW_CLIPPINGS,
-    LOOKUP,
-    LOOKUP_HISTORY,
-    SET_BOOK_DICTIONARY
-  };
+  using MenuAction = EpubReaderMenuAction;
 
   explicit EpubReaderMenuActivity(
       GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& title, const int currentPage,

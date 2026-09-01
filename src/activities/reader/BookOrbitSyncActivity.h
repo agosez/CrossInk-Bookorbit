@@ -119,6 +119,7 @@ class BookOrbitSyncActivity final : public Activity {
   // performUpload() makes WiFi.getMode() unreliable for the onExit() decision).
   bool wifiActivated = false;
   bool lockInitialConfirmRelease = false;
+  bool touchOverrideActive = false;
 
   void onWifiSelectionComplete(bool success);
   void performSync();

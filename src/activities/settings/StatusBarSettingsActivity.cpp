@@ -475,7 +475,7 @@ void StatusBarSettingsActivity::render(RenderLock&&) {
   const int previewLabelY = bottomPreviewTop - previewLabelLineHeight - previewLabelGap;
 
   renderer.drawText(UI_10_FONT_ID, previewX, previewLabelY, tr(STR_PREVIEW));
-  GUI.drawStatusBar(renderer, 75, 8, 32, title, bottomPreviewPadding, 0, false, timeLeftPreview, false, -1.0f,
+  GUI.drawStatusBar(renderer, 75, 8, 32, title.c_str(), bottomPreviewPadding, 0, false, timeLeftPreview, false, -1.0f,
                     stablePageNumbersAvailable ? 120 : 0, stablePageNumbersAvailable ? 540 : 0);
 
   renderer.displayBuffer();

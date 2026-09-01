@@ -74,7 +74,6 @@ struct ReaderLayoutSettingsSnapshot {
   uint8_t embeddedStyle;
   uint8_t hyphenationEnabled;
   uint8_t textAntiAliasing;
-  uint8_t readerDarkMode;
   uint8_t imageRendering;
   uint8_t extraParagraphSpacing;
   uint8_t forceParagraphIndents;
@@ -92,8 +91,8 @@ struct ReaderLayoutSettingsSnapshot {
            screenMarginHorizontal == other.screenMarginHorizontal &&
            publisherPageNumbers == other.publisherPageNumbers && paragraphAlignment == other.paragraphAlignment &&
            embeddedStyle == other.embeddedStyle && hyphenationEnabled == other.hyphenationEnabled &&
-           textAntiAliasing == other.textAntiAliasing && readerDarkMode == other.readerDarkMode &&
-           imageRendering == other.imageRendering && extraParagraphSpacing == other.extraParagraphSpacing &&
+           textAntiAliasing == other.textAntiAliasing && imageRendering == other.imageRendering &&
+           extraParagraphSpacing == other.extraParagraphSpacing &&
            forceParagraphIndents == other.forceParagraphIndents && bionicReadingEnabled == other.bionicReadingEnabled &&
            guideReadingEnabled == other.guideReadingEnabled && epubRenderMode == other.epubRenderMode &&
            std::strncmp(sdFontFamilyName, other.sdFontFamilyName, sizeof(sdFontFamilyName)) == 0;
@@ -115,7 +114,6 @@ ReaderLayoutSettingsSnapshot captureReaderLayoutSettings() {
       SETTINGS.embeddedStyle,
       SETTINGS.hyphenationEnabled,
       SETTINGS.textAntiAliasing,
-      SETTINGS.readerDarkMode,
       SETTINGS.imageRendering,
       SETTINGS.extraParagraphSpacing,
       SETTINGS.forceParagraphIndents,
@@ -159,7 +157,7 @@ Rect readerMenuHeaderActionTouchRect(const Rect& header, const Rect& actionRect)
   const int touchWidth = std::min(headerActionTouchSize, header.width);
   const int touchX = actionRect.x + actionRect.width - touchWidth;
   // The title reserves the space left of touchX. Treat the remaining header
-  // corner—including the non-interactive battery area—as Home so the icon is
+  // corner, including the non-interactive battery area, as Home so the icon is
   // easy to hit without changing its visual placement.
   return Rect{touchX, header.y, header.x + header.width - touchX, header.height};
 }
@@ -239,10 +237,10 @@ EpubReaderMenuActivity::TabMenuItems EpubReaderMenuActivity::buildMenuItems(
     mainItems.push_back({MenuAction::LOOKUP_HISTORY, StrId::STR_LOOKUP_HISTORY});
   }
   mainItems.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
-  mainItems.push_back({MenuAction::READER_OPTIONS, StrId::STR_READER_OPTIONS});
   mainItems.push_back({MenuAction::GO_TO_PERCENT, StrId::STR_GO_TO_PERCENT});
   mainItems.push_back({MenuAction::AUTO_PAGE_TURN, StrId::STR_AUTO_TURN_INTERVAL_SECONDS});
   mainItems.push_back({MenuAction::READING_STATS, StrId::STR_READING_STATS});
+  mainItems.push_back({MenuAction::READER_OPTIONS, StrId::STR_READER_OPTIONS});
   bookmarkItems.push_back({MenuAction::SAVE_CLIPPING, StrId::STR_SAVE_CLIPPING});
   if (hasClippings) {
     bookmarkItems.push_back({MenuAction::VIEW_CLIPPINGS, StrId::STR_VIEW_CLIPPINGS});
@@ -533,7 +531,7 @@ void EpubReaderMenuActivity::loop() {
 
   // A home-key long press toggles the reader menu: the same hold that opens it
   // closes it. The SDK fires the long event once per hold, so the opening hold
-  // (still down as the menu appears) does not immediately re-close it — only a
+  // (still down as the menu appears) does not immediately re-close it, only a
   // fresh press-and-hold does.
   if (mappedInput.wasReaderMenuHold()) {
     finishCancelled();

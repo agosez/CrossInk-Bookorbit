@@ -655,21 +655,35 @@ bool MappedInputManager::wasMenuGesture() const {
 
 bool MappedInputManager::wasReaderMenuGesture() const {
   const SwipeDir direction = wasSwipe();
+#if defined(FREEINK_DEVICE_STICKY) && FREEINK_DEVICE_STICKY
+  return direction == SwipeDir::Up;
+#else
   return hasHomeKeyHardware() ? direction == SwipeDir::Up : direction == SwipeDir::Down;
+#endif
 }
 
 bool MappedInputManager::wasReaderHomeGesture() const {
   // X4 Pro's capacitive Home key remains the reader's Home action. Only the
   // touch gesture changes in reader mode: other touch boards use an upward
   // swipe across the page.
+#if defined(FREEINK_DEVICE_STICKY) && FREEINK_DEVICE_STICKY
+  // Sticky uses swipe up for the bottom reader drawer and swipe down for the
+  // reader-details panel. Home remains available from that panel's header.
+  return false;
+#else
   if (hasHomeKeyHardware()) {
     return wasHomeGesture();
   }
   return wasSwipe() == SwipeDir::Up;
+#endif
 }
 
 bool MappedInputManager::wasReaderLightPanelGesture() const {
+#if defined(FREEINK_DEVICE_STICKY) && FREEINK_DEVICE_STICKY
+  return wasSwipe() == SwipeDir::Down;
+#else
   return hasHomeKeyHardware() && wasSwipe() == SwipeDir::Down;
+#endif
 }
 
 bool MappedInputManager::wasHomeGesture() const {
@@ -813,6 +827,10 @@ bool MappedInputManager::wasReleased(const Button button) const {
       return false;
     }
 
+    // Only consume a release belonging to a Power press that was actually
+    // routed to Confirm. `powerAsConfirmInReaderMode` is an activity
+    // capability, not evidence that this particular click confirmed a modal:
+    // global Power actions must still work in reader menus.
     if (suppressPowerRelease) {
       suppressPowerRelease = false;
       return false;

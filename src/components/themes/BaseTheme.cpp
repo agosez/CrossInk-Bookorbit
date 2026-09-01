@@ -88,7 +88,9 @@ void BaseTheme::drawBatteryLeft(const GfxRenderer& renderer, Rect rect, const bo
                                 const bool foregroundBlack) const {
   // Left aligned: icon on left, percentage on right (reader mode)
   const uint16_t percentage = powerManager.getBatteryPercentage();
-  const int y = rect.y + 6;
+  // The icon's nub makes its visual center sit slightly below its bounding
+  // box. Lift it one pixel to center it with the percentage text.
+  const int y = rect.y + 5;
 
   if (showPercentage) {
     const auto percentageText = std::to_string(percentage) + "%";
@@ -106,7 +108,7 @@ void BaseTheme::drawBatteryRight(const GfxRenderer& renderer, Rect rect, const b
   // Right aligned: percentage on left, icon on right (UI headers)
   // rect.x is already positioned for the icon (drawHeader calculated it)
   const uint16_t percentage = powerManager.getBatteryPercentage();
-  const int y = rect.y + 6;
+  const int y = rect.y + 5;
 
   if (showPercentage) {
     const auto percentageText = std::to_string(percentage) + "%";
@@ -892,7 +894,7 @@ void BaseTheme::fillPopupProgress(const GfxRenderer& renderer, const Rect& layou
 }
 
 void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage,
-                              const int pageCount, std::string title, const int paddingBottom, const int textYOffset,
+                              const int pageCount, const char* title, const int paddingBottom, const int textYOffset,
                               const bool isPageBookmarked, const char* timeLeftLabel, const bool darkMode,
                               const float chapterProgressPercent, const int stableCurrentPage,
                               const int stablePageCount, const bool showProgress, const bool pageCountEstimated) const {
@@ -913,18 +915,17 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   if (showProgress && (statusBar.showBookProgressPercent || statusBar.showChapterPageCount || showStablePageNumbers)) {
     // Right aligned text for progress counter
     char progressStr[48];
-    // Prefix the section page count with "~" while a still-building spine only yields an estimated total.
-    const char* estimatePrefix = pageCountEstimated ? "~" : "";
+    // Draw the estimate marker separately so it is legible on lower-PPI displays.
+    const bool showEstimate = pageCountEstimated && statusBar.showChapterPageCount;
 
     if (statusBar.showChapterPageCount && showStablePageNumbers && statusBar.showBookProgressPercent) {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d  %d/%d  %.0f%%", estimatePrefix, currentPage, pageCount,
-               stableCurrentPage, stablePageCount, bookProgress);
+      snprintf(progressStr, sizeof(progressStr), "%d/%d  %d/%d  %.0f%%", currentPage, pageCount, stableCurrentPage,
+               stablePageCount, bookProgress);
     } else if (statusBar.showChapterPageCount && showStablePageNumbers) {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d  %d/%d", estimatePrefix, currentPage, pageCount,
-               stableCurrentPage, stablePageCount);
+      snprintf(progressStr, sizeof(progressStr), "%d/%d  %d/%d", currentPage, pageCount, stableCurrentPage,
+               stablePageCount);
     } else if (statusBar.showChapterPageCount && statusBar.showBookProgressPercent) {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d  %.0f%%", estimatePrefix, currentPage, pageCount,
-               bookProgress);
+      snprintf(progressStr, sizeof(progressStr), "%d/%d  %.0f%%", currentPage, pageCount, bookProgress);
     } else if (showStablePageNumbers && statusBar.showBookProgressPercent) {
       snprintf(progressStr, sizeof(progressStr), "%d/%d  %.0f%%", stableCurrentPage, stablePageCount, bookProgress);
     } else if (statusBar.showBookProgressPercent) {
@@ -932,14 +933,21 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     } else if (showStablePageNumbers) {
       snprintf(progressStr, sizeof(progressStr), "%d/%d", stableCurrentPage, stablePageCount);
     } else {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d", estimatePrefix, currentPage, pageCount);
+      snprintf(progressStr, sizeof(progressStr), "%d/%d", currentPage, pageCount);
     }
 
     progressTextWidth = renderer.getTextWidth(SMALL_FONT_ID, progressStr);
-    renderer.drawText(
-        SMALL_FONT_ID,
-        renderer.getScreenWidth() - metrics.statusBarHorizontalMargin - orientedMarginRight - progressTextWidth, textY,
-        progressStr, foregroundBlack);
+    const int estimateWidth = showEstimate ? renderer.getTextWidth(UI_10_FONT_ID, "~") : 0;
+    constexpr int estimateGap = 2;
+    const int estimateSpacing = showEstimate ? estimateGap : 0;
+    const int progressX = renderer.getScreenWidth() - metrics.statusBarHorizontalMargin - orientedMarginRight -
+                          estimateWidth - estimateSpacing - progressTextWidth;
+    if (showEstimate) {
+      const int estimateY = textY + (renderer.getLineHeight(SMALL_FONT_ID) - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
+      renderer.drawText(UI_10_FONT_ID, progressX, estimateY, "~");
+    }
+    renderer.drawText(SMALL_FONT_ID, progressX + estimateWidth + estimateSpacing, textY, progressStr);
+    progressTextWidth += estimateWidth + estimateSpacing;
   }
 
   // Draw Progress Bar
@@ -1008,7 +1016,7 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   }
 
   // Draw Title
-  if (!title.empty()) {
+  if (title && title[0] != '\0') {
     textY -= textYOffset;
     // Centered chapter title text
     // Page width minus existing content with 30px padding on each side
@@ -1024,27 +1032,32 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     int availableTitleSpace = rendererableScreenWidth - 2 * titleMarginLeftAdjusted;
 
     int titleWidth;
-    titleWidth = renderer.getTextWidth(SMALL_FONT_ID, title.c_str());
+    titleWidth = renderer.getTextWidth(SMALL_FONT_ID, title);
     if (titleWidth > availableTitleSpace) {
       // Not enough space to center on the screen, center it within the remaining space instead
       availableTitleSpace = rendererableScreenWidth - titleMarginLeft - titleMarginRight;
       titleMarginLeftAdjusted = titleMarginLeft;
     }
+    // Only the overflow path needs storage, and it must outlive the drawText below.
+    std::string truncated;
     if (titleWidth > availableTitleSpace) {
-      title = renderer.truncatedText(SMALL_FONT_ID, title.c_str(), availableTitleSpace);
-      titleWidth = renderer.getTextWidth(SMALL_FONT_ID, title.c_str());
+      truncated = renderer.truncatedText(SMALL_FONT_ID, title, availableTitleSpace);
+      title = truncated.c_str();
+      titleWidth = renderer.getTextWidth(SMALL_FONT_ID, title);
     }
 
     renderer.drawText(SMALL_FONT_ID,
                       titleMarginLeftAdjusted + metrics.statusBarHorizontalMargin + orientedMarginLeft +
                           (availableTitleSpace - titleWidth) / 2,
-                      textY, title.c_str(), foregroundBlack);
+                      textY, title, foregroundBlack);
   }
 }
 
 void BaseTheme::drawTopStatusBarClock(const GfxRenderer& renderer, int topY, const char* previewTime,
-                                      const bool readerContext, const int textYOffset, const bool darkMode) const {
-  if (!(readerContext ? SETTINGS.shouldShowClockInReader() : SETTINGS.shouldShowClockOutsideReader())) {
+                                      const bool readerContext, const int textYOffset, const bool darkMode,
+                                      const bool forceVisible) const {
+  if (!forceVisible &&
+      !(readerContext ? SETTINGS.shouldShowClockInReader() : SETTINGS.shouldShowClockOutsideReader())) {
     return;
   }
 

@@ -99,6 +99,7 @@ class ChapterHtmlSlimParser {
   uint32_t previewStartOrdinal = 0;
   uint32_t previewElementOrdinal = 0;
   bool malformedMarkupTruncated = false;
+  bool htmlEnded_ = false;
   bool syntheticCharacterData = false;
   XML_Parser activeParser = nullptr;
   FsFile parseFile_;

@@ -25,6 +25,7 @@ class FileIndex {
   bool open(const char* dirPath, AcceptFn accept);
   void close();
   bool isOpen() const { return opened; }
+  bool directoryReadFailed() const { return directoryReadFailed_; }
 
   size_t totalCount() const { return hdr.dirCount + hdr.fileCount; }
 
@@ -73,6 +74,7 @@ class FileIndex {
   HalFile idxFile;
   IndexHeader hdr{};
   bool opened = false;
+  bool directoryReadFailed_ = false;
   char idxPath[64] = {0};
   std::unique_ptr<char[]> nameBuf;
 

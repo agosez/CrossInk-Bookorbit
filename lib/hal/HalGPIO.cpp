@@ -284,45 +284,22 @@ bool HalGPIO::hasEdgeSideButtons() const {
          BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4Pro;
 }
 
-bool HalGPIO::verifyPowerButtonWakeup(uint16_t requiredDurationMs, bool shortPressAllowed) {
-  // Boards without a power button (or M5Paper's latch circuit) cannot verify a
-  // hold; treat the wake as valid.
-  if (BoardConfig::ACTIVE.input.power < 0) {
+bool HalGPIO::verifyPowerButtonWakeup() {
+  // M5Paper v1.1 reaches setup after a normal wheel click has already been
+  // released. Its hardware pull-ups make this ghost-wake debounce unnecessary.
+  if (BoardConfig::isPaperMono() || BoardConfig::isM5PaperV11() || BoardConfig::ACTIVE.input.power < 0) {
     return true;
   }
-#if defined(FREEINK_DEVICE_M5PAPER) && FREEINK_DEVICE_M5PAPER
-  return true;
-#endif
-  if (shortPressAllowed) {
-    // Fast path - no duration check needed
-    return true;
-  }
-  // TODO: Intermittent edge case remains: a single tap followed by another single tap
-  // can still power on the device. Tighten wake debounce/state handling here.
 
-  // Calibrate: subtract boot time already elapsed, assuming button held since boot.
-  const unsigned long calibration = millis();
-  const unsigned long calibratedDuration = (calibration < requiredDurationMs) ? (requiredDurationMs - calibration) : 1;
-
-  const auto start = millis();
+  constexpr unsigned long POWER_WAKE_STABILITY_MS = 10;
+  const bool heldAtFirstSample = inputMgr.isPowerButtonPhysicallyPressed();
+  const unsigned long sampleStart = millis();
   inputMgr.update();
-  // inputMgr.isPressed() may take up to ~500ms to return correct state
-  while (!inputMgr.isPressed(BTN_POWER) && millis() - start < 1000) {
-    delay(10);
+  while (millis() - sampleStart < POWER_WAKE_STABILITY_MS || inputMgr.isDebouncePending()) {
+    delay(1);
     inputMgr.update();
   }
-  if (inputMgr.isPressed(BTN_POWER)) {
-    do {
-      delay(10);
-      inputMgr.update();
-    } while (inputMgr.isPressed(BTN_POWER) && inputMgr.getPowerButtonHeldTime() < calibratedDuration);
-    if (inputMgr.getPowerButtonHeldTime() < calibratedDuration) {
-      return false;
-    }
-  } else {
-    return false;
-  }
-  return true;
+  return heldAtFirstSample && inputMgr.isPowerButtonPhysicallyPressed();
 }
 
 #if FREEINK_MCU_S3
@@ -369,17 +346,38 @@ bool HalGPIO::isUsbConnected() const {
 #if FREEINK_DEVICE_X4PRO && !ARDUINO_USB_MODE
   // X4 Pro uses native TinyUSB for its composite CDC+MSC device. The mounted
   // state is the reliable bus-presence signal for this OTG configuration.
-  return tud_mounted();
+  if (tud_mounted()) return true;
 #endif
   if (BoardConfig::ACTIVE.usbDetect >= 0) {
     return digitalRead(BoardConfig::ACTIVE.usbDetect) == HIGH;
   }
 #if FREEINK_MCU_S3
-  // No VBUS line on this board (X4 Pro): fall back to native-USB host detection.
-  return usbHostSofActive();
+  // Without a VBUS pin, prefer native-USB host traffic, then use charging as a
+  // fallback for power-only adapters that do not emit USB frames. Charge
+  // termination at 100% can still report disconnected.
+  if (usbHostSofActive()) return true;
+  static const BatteryMonitor battery;
+  static bool sampled = false;
+  static bool charging = false;
+  static unsigned long lastSampleMs = 0;
+  const unsigned long now = millis();
+  if (!sampled || now - lastSampleMs >= 500) {
+    charging = battery.isCharging();
+    lastSampleMs = now;
+    sampled = true;
+  }
+  return charging;
 #else
   return false;
 #endif
+}
+
+bool HalGPIO::coldBootImpliesPowerButton() const {
+  // These boards use a button-energized or otherwise known latch topology, so
+  // a no-USB POWERON can be trusted as a power-button boot. Unknown/future
+  // topologies must continue booting instead of risking an immediate sleep
+  // after flashing or when charge detection is unavailable.
+  return isXteinkDevice() || BoardConfig::isPaperMono() || BoardConfig::isSticky();
 }
 
 HalGPIO::WakeupReason HalGPIO::getWakeupReason() const {
@@ -392,7 +390,8 @@ HalGPIO::WakeupReason HalGPIO::getWakeupReason() const {
       (wakeupCause == ESP_SLEEP_WAKEUP_GPIO || wakeupCause == ESP_SLEEP_WAKEUP_EXT1)) {
     return WakeupReason::PowerButton;
   }
-  if (wakeupCause == ESP_SLEEP_WAKEUP_UNDEFINED && resetReason == ESP_RST_POWERON && !usbConnected) {
+  if (wakeupCause == ESP_SLEEP_WAKEUP_UNDEFINED && resetReason == ESP_RST_POWERON && !usbConnected &&
+      coldBootImpliesPowerButton()) {
     return WakeupReason::PowerButton;
   }
   if (wakeupCause == ESP_SLEEP_WAKEUP_UNDEFINED && resetReason == ESP_RST_UNKNOWN && usbConnected) {

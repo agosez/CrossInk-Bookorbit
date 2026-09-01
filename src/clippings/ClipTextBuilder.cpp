@@ -75,18 +75,17 @@ bool areWordsVisuallyAttached(const WordRef& previousWord, const WordRef& word) 
 
 std::string selectedWordText(const ClipWordStore& wordStore, const WordRef& word,
                              const SelectionBounds* selectionBounds) {
-  if (!selectionBounds || (word.pageWordIndex != selectionBounds->firstPageWordOrdinal &&
-                           word.pageWordIndex != selectionBounds->lastPageWordOrdinal)) {
+  const bool isFirstBound = selectionBounds && word.pageIdx == selectionBounds->firstPageIdx &&
+                            word.pageWordIndex == selectionBounds->firstPageWordOrdinal;
+  const bool isLastBound = selectionBounds && word.pageIdx == selectionBounds->lastPageIdx &&
+                           word.pageWordIndex == selectionBounds->lastPageWordOrdinal;
+  if (!selectionBounds || (!isFirstBound && !isLastBound)) {
     return cleanWordText(wordStore.text(word));
   }
 
   const size_t textLength = word.textLength;
-  const size_t begin = word.pageWordIndex == selectionBounds->firstPageWordOrdinal
-                           ? std::min<size_t>(selectionBounds->firstWordByteOffset, textLength)
-                           : 0;
-  const size_t end = word.pageWordIndex == selectionBounds->lastPageWordOrdinal
-                         ? std::min<size_t>(selectionBounds->lastWordByteEndOffset, textLength)
-                         : textLength;
+  const size_t begin = isFirstBound ? std::min<size_t>(selectionBounds->firstWordByteOffset, textLength) : 0;
+  const size_t end = isLastBound ? std::min<size_t>(selectionBounds->lastWordByteEndOffset, textLength) : textLength;
   if (end < begin) return {};
   return cleanWordText(std::string(wordStore.text(word) + begin, end - begin));
 }

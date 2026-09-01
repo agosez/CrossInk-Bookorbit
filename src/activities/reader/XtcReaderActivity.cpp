@@ -196,6 +196,8 @@ void XtcReaderActivity::loop() {
 
   const bool shortcutPageTurn = shortcutPageTurnPending;
   shortcutPageTurnPending = false;
+  const bool shortcutPreviousPage = shortcutPreviousPagePending;
+  shortcutPreviousPagePending = false;
 
   const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
   const int statusBarHeight = UITheme::getInstance().getStatusBarHeight();
@@ -471,7 +473,7 @@ void XtcReaderActivity::loop() {
   const bool fromTilt = tiltPrev || tiltNext;
   bool prevTriggered = tiltPrev || sidePrev || frontPrev;
   bool nextTriggered = tiltNext || sideNext || frontNext;
-  prevTriggered = prevTriggered || touch.prev;
+  prevTriggered = prevTriggered || touch.prev || shortcutPreviousPage;
   nextTriggered = nextTriggered || touch.next || shortcutPageTurn;
 
   if (!prevTriggered && !nextTriggered) {
@@ -946,6 +948,7 @@ void XtcReaderActivity::onReaderMenuConfirm(const int action) {
 
 bool XtcReaderActivity::supportsQuickAction(const CrossPointSettings::SHORT_PWRBTN action) {
   switch (action) {
+    case CrossPointSettings::SHORT_PWRBTN::PREVIOUS_PAGE:
     case CrossPointSettings::SHORT_PWRBTN::SLEEP:
     case CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH:
     case CrossPointSettings::SHORT_PWRBTN::FILE_TRANSFER:
@@ -965,6 +968,9 @@ bool XtcReaderActivity::executeReaderShortcutAction(const CrossPointSettings::SH
   switch (action) {
     case CrossPointSettings::SHORT_PWRBTN::PAGE_TURN:
       shortcutPageTurnPending = true;
+      return true;
+    case CrossPointSettings::SHORT_PWRBTN::PREVIOUS_PAGE:
+      shortcutPreviousPagePending = true;
       return true;
     case CrossPointSettings::SHORT_PWRBTN::FILE_TRANSFER:
       activityManager.goToFileTransfer(xtc ? xtc->getPath() : "");
@@ -1151,8 +1157,8 @@ void XtcReaderActivity::renderStatusBarOverlay(const StatusBarOverlayPosition po
   char timeLeftLabel[24] = {};
   const char* timeLeft =
       formatTimeLeftLabel(timeLeftLabel, sizeof(timeLeftLabel), pageToRender) ? timeLeftLabel : nullptr;
-  GUI.drawStatusBar(renderer, progress, pageInfo.currentPage, pageInfo.pageCount, pageInfo.title, paddingBottom, 0,
-                    false, timeLeft);
+  GUI.drawStatusBar(renderer, progress, pageInfo.currentPage, pageInfo.pageCount, pageInfo.title.c_str(), paddingBottom,
+                    0, false, timeLeft);
 }
 
 void XtcReaderActivity::renderPage(const uint32_t pageToRender) {

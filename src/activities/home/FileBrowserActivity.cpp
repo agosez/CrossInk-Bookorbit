@@ -1,6 +1,7 @@
 #include "FileBrowserActivity.h"
 
 #include <Arduino.h>
+#include <FreeInkUIIcon.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
@@ -19,6 +20,7 @@
 #include "MappedInputManager.h"
 #include "activities/boot_sleep/SleepImageIndex.h"
 #include "activities/reader/EpubReaderActivity.h"
+#include "activities/settings/SettingsActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "activities/util/OptionSelectionActivity.h"
 #include "components/CompactHeader.h"
@@ -26,6 +28,7 @@
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
+#include "components/icons/listIcons.h"
 #include "components/themes/minimal/MinimalTheme.h"
 #include "fontIds.h"
 
@@ -37,6 +40,7 @@ constexpr unsigned long COMPLETED_FEEDBACK_MS = 1000;
 constexpr int ROOT_HINT_GAP = 20;
 constexpr size_t NAME_BUFFER_SIZE = 500;
 constexpr fui::ActionId ACTION_ROW = 1;
+constexpr fui::ActionId ACTION_SETTINGS = 2;
 constexpr size_t INDEX_THRESHOLD = 200;
 constexpr size_t MAX_VIRTUAL_LIST_ENTRIES = static_cast<size_t>(std::numeric_limits<int16_t>::max());
 constexpr uint32_t FILE_BROWSER_APPEND_MIN_FREE_AFTER_ALLOC = 48U * 1024U;
@@ -251,6 +255,13 @@ bool FileBrowserActivity::loadFilesIntoVector(size_t cap, bool& overflow) {
     files.emplace_back(fileNameBuffer.get());
     file.close();
   }
+  if (FsHelpers::directoryIterationFailed(root)) {
+    LOG_ERR("FileBrowser", "Directory listing failed before EOF: %s", basepath.c_str());
+    fileListReadFailed = true;
+    files.clear();
+    root.close();
+    return false;
+  }
   root.close();
   return true;
 }
@@ -264,6 +275,7 @@ void FileBrowserActivity::loadFilesLocked() {
   usingIndex = false;
   clearIndexNameCache();
   fileListMemoryLimited = false;
+  fileListReadFailed = false;
   if (fileIndex) fileIndex->close();
 
   bool overflow = false;
@@ -288,6 +300,12 @@ void FileBrowserActivity::loadFilesLocked() {
         mode == Mode::PickFirmware ? acceptFirmware : (mode == Mode::PickDirectory ? acceptDirectory : acceptCommon);
     if (fileIndex->open(basepath.c_str(), accept)) {
       usingIndex = true;
+      return;
+    }
+    if (fileIndex->directoryReadFailed()) {
+      LOG_ERR("FileBrowser", "index scan failed before EOF: %s", basepath.c_str());
+      fileListReadFailed = true;
+      files.clear();
       return;
     }
   } else {
@@ -384,6 +402,7 @@ void FileBrowserActivity::onEnter() {
   listNav.visibleRows = visibleRows;
   applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &FileBrowserActivity::onRowEvent, this);
+  app.on(ACTION_SETTINGS, &FileBrowserActivity::onSettingsEvent, this);
   app.setScreen(&FileBrowserActivity::listScreen, this);
   requestUpdate();
 }
@@ -793,6 +812,39 @@ void FileBrowserActivity::onRowEvent(const fui::ActionEvent& event, void* user) 
   self->activateSelected();
 }
 
+void FileBrowserActivity::onSettingsEvent(const fui::ActionEvent&, void* user) {
+  auto* self = static_cast<FileBrowserActivity*>(user);
+  if (self->mode != Mode::Books || !self->mappedInput.hasTouchHardware()) return;
+  self->app.clearTapFlash();
+  self->openSettings();
+}
+
+void FileBrowserActivity::openSettings() {
+  const std::string selectedEntry =
+      entryCount() > 0 && selectorIndex < entryCount() ? entryNameAt(selectorIndex) : std::string();
+  startActivityForResult(
+      std::make_unique<SettingsActivity>(renderer, mappedInput, false, true, SettingsActivity::View::FileBrowser),
+      [this, selectedEntry](const ActivityResult&) {
+        {
+          RenderLock lock(*this);
+          if (!SETTINGS.showHiddenFiles && containsHiddenPathSegment(basepath)) {
+            basepath = "/";
+          }
+          loadFilesLocked();
+          selectorIndex = selectedEntry.empty() ? 0 : findEntry(selectedEntry);
+          if (entryCount() > 0 && selectorIndex >= entryCount()) {
+            selectorIndex = entryCount() - 1;
+          }
+          topIndex =
+              followListSelection(static_cast<int>(selectorIndex), 0, visibleRows, static_cast<int>(entryCount()));
+          listNav.reset(static_cast<int>(selectorIndex));
+          listNav.top = topIndex;
+          listNav.visibleRows = visibleRows;
+        }
+        requestUpdate();
+      });
+}
+
 void FileBrowserActivity::activateSelected() {
   if (lockNextConfirmRelease) {
     lockNextConfirmRelease = false;
@@ -1077,6 +1129,26 @@ void FileBrowserActivity::buildListScreen(UiApp::ScreenType& screen) {
   screen.setContentMargin(
       fui::Insets{static_cast<int16_t>(metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput)), 0,
                   static_cast<int16_t>(metrics.buttonHintsHeight), 0});
+
+  if (mode == Mode::Books && mappedInput.hasTouchHardware()) {
+    const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+    const auto backLayout = TouchHeaderBackButton::layout(header);
+    const fui::Rect settingsRect{static_cast<int16_t>(header.x + header.width - backLayout.iconRect.width),
+                                 static_cast<int16_t>(backLayout.iconRect.y),
+                                 static_cast<int16_t>(backLayout.iconRect.width),
+                                 static_cast<int16_t>(backLayout.iconRect.height)};
+    fui::ButtonProps settings;
+    settings.action = ACTION_SETTINGS;
+    settings.styles = fui::plainStyles(fui::Paint::solid(fui::Color::Black));
+    settings.minTouchSize = screen.theme().minTouchSize;
+    screen.button(settings, settingsRect);
+    const auto icon = fui::bitmapFromIcon(icon_sliders_horizontal_24);
+    const int16_t iconX = static_cast<int16_t>(settingsRect.x + (settingsRect.width - icon.width) / 2);
+    const int16_t iconY = static_cast<int16_t>(backLayout.iconRect.y + TouchHeaderBackButton::TITLE_VERTICAL_OFFSET +
+                                               (backLayout.iconRect.height - icon.height) / 2);
+    screen.target().bitmap(fui::Rect{iconX, iconY, icon.width, icon.height}, icon, fui::BitmapMode::Center,
+                           fui::Paint::solid(fui::Color::Black));
+  }
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   // Full path band at the bottom: separator on top, left-truncated so the
@@ -1110,9 +1182,11 @@ void FileBrowserActivity::buildListScreen(UiApp::ScreenType& screen) {
 
   const size_t totalEntries = entryCount();
   if (totalEntries == 0) {
-    const char* emptyMessage = fileListMemoryLimited
-                                   ? tr(STR_MEMORY_ERROR)
-                                   : (mode == Mode::PickFirmware ? tr(STR_NO_BIN_FILES) : tr(STR_NO_FILES_FOUND));
+    const char* emptyMessage =
+        fileListMemoryLimited
+            ? tr(STR_MEMORY_ERROR)
+            : (fileListReadFailed ? tr(STR_ERROR_GENERAL_FAILURE)
+                                  : (mode == Mode::PickFirmware ? tr(STR_NO_BIN_FILES) : tr(STR_NO_FILES_FOUND)));
     screen.centeredText(emptyMessage, screen.theme().bodyText);
     return;
   }
@@ -1210,7 +1284,8 @@ void FileBrowserActivity::render(RenderLock&&) {
   // indicator; the rest of the screen renders through the app.
   const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
   if (mappedInput.hasTouchHardware()) {
-    TouchHeaderBackButton::draw(renderer, uiTarget, header, folderName.c_str(), false);
+    const int rightReserve = mode == Mode::Books ? TouchHeaderBackButton::layout(header).iconRect.width + 8 : 0;
+    TouchHeaderBackButton::draw(renderer, uiTarget, header, folderName.c_str(), false, rightReserve);
   } else {
     GUI.drawHeader(renderer, header, folderName.c_str());
   }

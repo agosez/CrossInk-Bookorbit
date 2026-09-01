@@ -47,7 +47,12 @@ size_t zipFillCallback(void* vctx, const uint8_t** data) {
   if (ctx->fileRemaining == 0) return 0;
 
   const size_t toRead = ctx->fileRemaining < ctx->readBufSize ? ctx->fileRemaining : ctx->readBufSize;
-  const size_t bytesRead = ctx->file->read(ctx->readBuf, toRead);
+  const int result = ctx->file->read(ctx->readBuf, toRead);
+  if (result < 0) {
+    LOG_ERR("ZIP", "Failed to read compressed data: %d", result);
+    return 0;
+  }
+  const size_t bytesRead = static_cast<size_t>(result);
   ctx->fileRemaining -= bytesRead;
 
   *data = ctx->readBuf;
@@ -59,7 +64,12 @@ size_t zipStreamFillCallback(void* vctx, const uint8_t** data) {
   if (!ctx->file || ctx->fileRemaining == 0) return 0;
 
   const size_t toRead = ctx->fileRemaining < ctx->readBufSize ? ctx->fileRemaining : ctx->readBufSize;
-  const size_t bytesRead = ctx->file->read(ctx->readBuf, toRead);
+  const int result = ctx->file->read(ctx->readBuf, toRead);
+  if (result < 0) {
+    LOG_ERR("ZIP", "Failed to read cooperative compressed data: %d", result);
+    return 0;
+  }
+  const size_t bytesRead = static_cast<size_t>(result);
   ctx->fileRemaining -= bytesRead;
 
   *data = ctx->readBuf;
@@ -151,11 +161,14 @@ ZipStreamStatus ZipFileStreamReader::pump(Print& out, const size_t maxOutputByte
       active = false;
       return ZipStreamStatus::Done;
     }
-    const size_t dataRead = zipFile.read(outputBuffer, toRead);
+    const int readResult = zipFile.read(outputBuffer, toRead);
     zipFile.close();
-    if (dataRead == 0 || out.write(outputBuffer, dataRead) != dataRead) {
+    if (readResult <= 0) {
+      LOG_ERR("ZIP", "Failed to read stored stream data: %d", readResult);
       return ZipStreamStatus::Error;
     }
+    const size_t dataRead = static_cast<size_t>(readResult);
+    if (out.write(outputBuffer, dataRead) != dataRead) return ZipStreamStatus::Error;
     totalProduced += dataRead;
     if (totalProduced == static_cast<size_t>(uncompressedSize)) {
       active = false;
@@ -404,10 +417,10 @@ long ZipFile::getDataOffset(const FileStatSlim& fileStat) {
   const uint64_t fileOffset = fileStat.localHeaderOffset;
 
   file.seek(fileOffset);
-  const size_t read = file.read(pLocalHeader, localHeaderSize);
+  const int readResult = file.read(pLocalHeader, localHeaderSize);
 
-  if (read != localHeaderSize) {
-    LOG_ERR("ZIP", "Something went wrong reading the local header");
+  if (readResult != localHeaderSize) {
+    LOG_ERR("ZIP", "Something went wrong reading the local header: %d", readResult);
     return -1;
   }
 
@@ -664,10 +677,10 @@ uint8_t* ZipFile::readFileToMemory(const char* filename, size_t* size, const boo
 
   if (fileStat.method == ZIP_METHOD_STORED) {
     // no deflation, just read content
-    const size_t dataRead = file.read(data, inflatedDataSize);
+    const int readResult = file.read(data, inflatedDataSize);
 
-    if (dataRead != inflatedDataSize) {
-      LOG_ERR("ZIP", "Failed to read data");
+    if (readResult < 0 || static_cast<size_t>(readResult) != inflatedDataSize) {
+      LOG_ERR("ZIP", "Failed to read stored data: %d", readResult);
       free(data);
       return nullptr;
     }
@@ -678,9 +691,9 @@ uint8_t* ZipFile::readFileToMemory(const char* filename, size_t* size, const boo
     if (deflatedDataSize <= ONE_SHOT_DEFLATE_MAX_COMPRESSED_BYTES) {
       auto* compressedData = static_cast<uint8_t*>(malloc(deflatedDataSize));
       if (compressedData) {
-        const size_t compressedRead = file.read(compressedData, deflatedDataSize);
-        if (compressedRead != deflatedDataSize) {
-          LOG_ERR("ZIP", "Failed to read compressed data");
+        const int readResult = file.read(compressedData, deflatedDataSize);
+        if (readResult < 0 || static_cast<size_t>(readResult) != deflatedDataSize) {
+          LOG_ERR("ZIP", "Failed to read compressed data: %d", readResult);
           free(compressedData);
           free(data);
           return nullptr;
@@ -779,12 +792,13 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
 
     size_t remaining = inflatedDataSize;
     while (remaining > 0) {
-      const size_t dataRead = file.read(buffer, remaining < chunkSize ? remaining : chunkSize);
-      if (dataRead == 0) {
-        LOG_ERR("ZIP", "Could not read more bytes");
+      const int readResult = file.read(buffer, remaining < chunkSize ? remaining : chunkSize);
+      if (readResult <= 0) {
+        LOG_ERR("ZIP", "Could not read more stored bytes: %d", readResult);
         free(buffer);
         return false;
       }
+      const size_t dataRead = static_cast<size_t>(readResult);
 
       if (out.write(buffer, dataRead) != dataRead) {
         free(buffer);

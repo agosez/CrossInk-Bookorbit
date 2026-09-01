@@ -39,6 +39,9 @@ class HalDisplay {
                             bool fromProgmem = false) const;
 
   void displayBuffer(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
+  // Persistently invert panel output while leaving framebuffer drawing in its
+  // normal logical colors.
+  void setInverted(bool inverted);
   // Non-blocking refresh (shadow-free): starts the panel waveform and returns
   // while the panel refreshes on its own. The framebuffer must stay untouched
   // until waitRefreshComplete(), and the caller must rebuild the differential
@@ -54,6 +57,7 @@ class HalDisplay {
   // base pass. X3 has a dedicated grayscale waveform and must stay blocking.
   bool supportsAsyncGrayscaleBase() const;
   void refreshDisplay(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
+  bool isInverted() const;
 
   // Power management
   void deepSleep();

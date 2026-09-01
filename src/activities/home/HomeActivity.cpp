@@ -7,6 +7,7 @@
 #include <HalDisplay.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Memory.h>
 #include <Serialization.h>
 #include <Utf8.h>
 #include <Xtc.h>
@@ -29,6 +30,7 @@
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "GlobalActions.h"
+#include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBookProgress.h"
@@ -974,6 +976,80 @@ std::string HomeActivity::getCurrentBookPath() const {
   return idx >= 0 ? recentBooks[idx].path : std::string{};
 }
 
+std::string HomeActivity::getCurrentBookTitle() const {
+  const int idx = getHighlightedBookIndex();
+  return idx >= 0 ? recentBooks[idx].title : std::string{};
+}
+
+std::unique_ptr<Activity> HomeActivity::createFrontlightReadingStatsActivity() {
+  const std::string path = APP_STATE.openEpubPath;
+  const bool validEpub = FsHelpers::hasEpubExtension(path) && Storage.exists(path.c_str());
+  std::string title = tr(STR_READING_STATS);
+  float progress = -1.0f;
+  if (validEpub) {
+    const auto recent = std::find_if(recentBooks.begin(), recentBooks.end(),
+                                     [&path](const RecentBook& book) { return book.path == path; });
+    if (recent != recentBooks.end()) {
+      title = recent->title;
+      progress = RecentBookProgress::loadCachedEpubPercent(*recent);
+    } else {
+      const size_t slash = path.find_last_of('/');
+      title = slash == std::string::npos ? path : path.substr(slash + 1);
+    }
+  }
+  const std::string cachePath = validEpub ? Epub::cachePathForFilePath(path, "/.crosspoint") : std::string{};
+  const BookReadingStats bookStats = validEpub ? BookReadingStats::load(cachePath) : BookReadingStats{};
+  const GlobalReadingStats deviceStats = GlobalReadingStats::load();
+  if (GlobalReadingStats::hasSyncedStats()) {
+    return makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, title, cachePath, bookStats, progress, false, 0,
+                                                deviceStats, GlobalReadingStats::loadAggregated(deviceStats));
+  }
+  return makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, title, cachePath, bookStats, progress, false, 0,
+                                              deviceStats);
+}
+
+void HomeActivity::onFrontlightPanelClosed() {
+  globalStats = GlobalReadingStats::load();
+  showAllDevicesStats = GlobalReadingStats::hasSyncedStats();
+  allDevicesGlobalStats = showAllDevicesStats ? GlobalReadingStats::loadAggregated(globalStats) : globalStats;
+  bookStatsCached = false;
+  updateHighlightedBookContext();
+  requestUpdate();
+}
+
+bool HomeActivity::handleFrontlightPanelResult(const FrontlightPanelResult& result) {
+  if (result.bookPath.empty() || result.action == FrontlightPanelAction::None) return false;
+  if (result.action != FrontlightPanelAction::SyncProgress && result.action != FrontlightPanelAction::BookOrbitSync &&
+      result.action != FrontlightPanelAction::NearbyPositionSync &&
+      result.action != FrontlightPanelAction::SendNearbyBook) {
+    return false;
+  }
+
+  PendingOverlayResume resume;
+  resume.origin = PendingOverlayOrigin::Home;
+  resume.overlay = PendingOverlayType::FrontlightDrawer;
+  resume.selectedIndex = result.state.selectedAction;
+  resume.bookPath = result.bookPath;
+  resume.returnHomeAfterReaderFlow = result.action == FrontlightPanelAction::NearbyPositionSync;
+  if (result.action == FrontlightPanelAction::SyncProgress) {
+    if (KOREADER_STORE.hasCredentials()) APP_STATE.setPendingOverlayResume(resume);
+    return startGlobalSyncProgress();
+  }
+  if (result.action == FrontlightPanelAction::BookOrbitSync) {
+    if (BOOKORBIT_STORE.hasCredentials()) APP_STATE.setPendingOverlayResume(resume);
+    return startGlobalBookOrbitSync();
+  }
+  if (result.action == FrontlightPanelAction::NearbyPositionSync) {
+    activityManager.goToReaderAndRunMenuAction(result.bookPath,
+                                               static_cast<uint8_t>(EpubReaderMenuAction::NEARBY_POSITION_SYNC));
+    APP_STATE.setPendingOverlayResume(std::move(resume));
+    return true;
+  }
+  if (!activityManager.goToNearbyBookSend(result.bookPath, false)) return false;
+  APP_STATE.setPendingOverlayResume(std::move(resume));
+  return true;
+}
+
 void HomeActivity::updateHighlightedBookContext(const bool allowEpubLoad) {
   currentBookStats = BookReadingStats{};
   currentBookProgressPercent = -1.0f;
@@ -1578,16 +1654,22 @@ void HomeActivity::loop() {
       minimalHomeNavIndex = homeNavCount - 1;
     }
 
-    if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
-      minimalHomeNavIndex = minimalHomeNavIndex < 0 ? homeNavCount - 1
-                                                    : ButtonNavigator::previousIndex(minimalHomeNavIndex, homeNavCount);
-      requestUpdate();
-      return;
-    }
-    if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
-      minimalHomeNavIndex = minimalHomeNavIndex < 0 ? 0 : ButtonNavigator::nextIndex(minimalHomeNavIndex, homeNavCount);
-      requestUpdate();
-      return;
+    // Touch readers do not show the front-button hints, so retain their
+    // existing side-button handling without moving the non-touch hint focus.
+    if (mappedInput.hasTouch()) {
+      if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
+        minimalHomeNavIndex = minimalHomeNavIndex < 0
+                                  ? homeNavCount - 1
+                                  : ButtonNavigator::previousIndex(minimalHomeNavIndex, homeNavCount);
+        requestUpdate();
+        return;
+      }
+      if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
+        minimalHomeNavIndex =
+            minimalHomeNavIndex < 0 ? 0 : ButtonNavigator::nextIndex(minimalHomeNavIndex, homeNavCount);
+        requestUpdate();
+        return;
+      }
     }
 
     auto activateMinimalHomeNav = [this](int index) {

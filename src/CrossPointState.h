@@ -7,6 +7,8 @@
 #include <mutex>
 #include <string>
 
+#include "PendingOverlayResume.h"
+
 class CrossPointState : public PersistableStore<CrossPointState> {
   mutable std::mutex _mutex;
   CrossPointState() = default;
@@ -31,6 +33,10 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   bool quickLockResumePending = false;
   // Serialized raw QuickLockTrigger value for the one permitted post-wake unlock.
   uint8_t quickLockResumeTrigger = 0;
+  PendingOverlayResume pendingOverlayResume{};
+
+  void setPendingOverlayResume(PendingOverlayResume value);
+  bool consumePendingOverlayResume(PendingOverlayResume& value);
 
   // Returns true if idx was shown within the last checkCount picks.
   // Walks backwards from the most recently written slot.

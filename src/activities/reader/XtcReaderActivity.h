@@ -37,6 +37,7 @@ class XtcReaderActivity final : public Activity {
   // Home-key shortcuts are dispatched before this activity's normal input loop.
   // Queue the turn so it follows the same guarded XTC page-turn path.
   bool shortcutPageTurnPending = false;
+  bool shortcutPreviousPagePending = false;
   // Session-only display toggle; fixed-layout XTC pages are never regenerated.
   bool statusBarVisible = true;
   bool longPressMenuHandled = false;

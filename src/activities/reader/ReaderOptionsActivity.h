@@ -68,6 +68,7 @@ class ReaderOptionsActivity final : public Activity {
   void openDictionaryFontPicker(const SettingInfo& setting);
   void openDictionaryFontSizePicker(const SettingInfo& setting);
   void openScreenMarginPicker(const SettingInfo& setting);
+  void openWordSpacingPicker();
   void toggleCurrentSetting();
   void openLineHeightPicker();
   void persistReaderSettings();

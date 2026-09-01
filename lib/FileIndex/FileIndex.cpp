@@ -1,6 +1,7 @@
 #include "FileIndex.h"
 
 #include <Arduino.h>
+#include <FsHelpers.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <NaturalSort.h>
@@ -64,6 +65,7 @@ struct FileIndex::BuildState {
 
 bool FileIndex::open(const char* dirPath, AcceptFn accept) {
   close();
+  directoryReadFailed_ = false;
 
   if (!nameBuf) nameBuf = makeUniqueNoThrow<char[]>(NAME_BUF_SIZE);
   if (!nameBuf) {
@@ -126,6 +128,16 @@ bool FileIndex::scanDirectory(const char* dirPath, AcceptFn accept, uint32_t& si
     }
     file.close();
     maybeYield(yieldCounter);
+  }
+  if (FsHelpers::directoryIterationFailed(root)) {
+    if (root.allocationFailed()) {
+      LOG_ERR("FIDX", "directory entry allocation failed: %s", dirPath);
+    } else {
+      LOG_ERR("FIDX", "directory listing failed before EOF: %s", dirPath);
+      directoryReadFailed_ = true;
+    }
+    root.close();
+    return false;
   }
   root.close();
 
@@ -285,6 +297,15 @@ bool FileIndex::build(const char* dirPath, AcceptFn accept, uint32_t signature, 
         if (bs.chunkUsed == CHUNK_ENTRIES) ok = ok && flushChunk(bs);
         file.close();
         maybeYield(bs.yieldCounter);
+      }
+      if (FsHelpers::directoryIterationFailed(root)) {
+        if (root.allocationFailed()) {
+          LOG_ERR("FIDX", "directory entry allocation failed during index build: %s", dirPath);
+        } else {
+          LOG_ERR("FIDX", "directory listing failed during index build: %s", dirPath);
+          directoryReadFailed_ = true;
+        }
+        ok = false;
       }
       root.close();
     }

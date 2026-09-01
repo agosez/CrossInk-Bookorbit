@@ -2,6 +2,7 @@
 #include <EpdFontFamily.h>
 #include <HalStorage.h>
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,6 +21,7 @@ class TextBlock final : public Block {
   bool bionicPresent = false;
   bool guideDotsPresent = false;
   bool wordFlagsPresent = false;
+  bool wordSpacesPresent = false;
   bool isValid = true;
   std::unique_ptr<uint8_t[]> arena;
 
@@ -32,11 +34,14 @@ class TextBlock final : public Block {
   const uint8_t* stylesArr = nullptr;
   const uint8_t* bionicBoundaryArr = nullptr;  // null when !bionicPresent
   const uint8_t* wordFlagsArr = nullptr;       // null when !wordFlagsPresent
+  const uint8_t* wordSpacesArr = nullptr;      // null when !wordSpacesPresent
   const char* textArr = nullptr;
   std::vector<std::string> rubyTexts;
 
   TextBlock() = default;  // deserialize() fills the fields directly.
-  static size_t arenaSize(uint16_t wordCount, bool hasBionic, bool hasGuideDots, bool hasWordFlags, uint16_t textBytes);
+  static constexpr size_t wordSpacesBytes(const uint16_t wordCount) { return (wordCount + 7U) / 8U; }
+  static size_t arenaSize(uint16_t wordCount, bool hasBionic, bool hasGuideDots, bool hasWordFlags, bool hasWordSpaces,
+                          uint16_t textBytes);
   void bindArenaPointers();
 
  public:
@@ -48,8 +53,8 @@ class TextBlock final : public Block {
   explicit TextBlock(const std::vector<std::string>& words, const std::vector<int16_t>& wordXpos,
                      const std::vector<EpdFontFamily::Style>& wordStyles, const std::vector<uint8_t>& bionicBoundary,
                      const std::vector<uint16_t>& bionicRunOffset, const std::vector<uint16_t>& guideDotXOffset,
-                     const std::vector<uint8_t>& wordFlags, const BlockStyle& blockStyle = BlockStyle(),
-                     std::vector<std::string> rubyTexts = {});
+                     const std::vector<uint8_t>& wordFlags, const std::vector<bool>& wordHasSpaceBefore,
+                     const BlockStyle& blockStyle = BlockStyle(), std::vector<std::string> rubyTexts = {});
   ~TextBlock() override = default;
   TextBlock(const TextBlock&) = delete;
   TextBlock& operator=(const TextBlock&) = delete;
@@ -70,6 +75,10 @@ class TextBlock final : public Block {
   uint16_t bionicRunOffset(const uint16_t i) const { return bionicPresent ? bionicRunOffsetArr[i] : 0; }
   uint16_t guideDotXOffset(const uint16_t i) const { return guideDotsPresent ? guideDotXOffsetArr[i] : 0; }
   uint8_t wordFlags(const uint16_t i) const { return wordFlagsPresent ? wordFlagsArr[i] : 0; }
+  bool wordHasSpaceBefore(const uint16_t i) const {
+    if (!wordSpacesPresent) return i > 0;
+    return (wordSpacesArr[i / 8U] & static_cast<uint8_t>(1U << (i % 8U))) != 0;
+  }
   uint8_t wordLinkId(const uint16_t i) const {
     return static_cast<uint8_t>((wordFlags(i) & WORD_FLAG_LINK_ID_MASK) >> WORD_FLAG_LINK_ID_SHIFT);
   }

@@ -34,8 +34,9 @@ int EpubReaderChapterSelectionActivity::getTotalItems() const { return epub->get
 void EpubReaderChapterSelectionActivity::onEnter() {
   Activity::onEnter();
   mappedInput.setReaderTouchscreenOverride(true);
-  if (!epub) return;
 
+  // epub is a required collaborator: the caller dereferences it before constructing
+  // this activity, and loop()/render() use it unguarded on every frame.
   selectorIndex = epub->getTocIndexForSpineIndex(currentSpineIndex);
   if (selectorIndex < 0) selectorIndex = 0;
   topIndex = 0;

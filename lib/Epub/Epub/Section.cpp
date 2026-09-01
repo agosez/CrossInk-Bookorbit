@@ -16,10 +16,10 @@
 
 namespace {
 constexpr uint32_t SECTION_CACHE_MAGIC = 0x535843FF;  // bytes: 0xFF, "CXS"
-// v61: v1.5.1 updates table fragments and geometry, image-aware page estimates,
-// inline-image margins, and ruby continuation layout. These all change cached
-// pagination or the serialized layout payload.
-constexpr uint8_t SECTION_FILE_VERSION = 61;
+// v62: Text blocks persist source whitespace semantics for font-preview reflow.
+// This changes their serialized payload, so full and suspended section caches
+// must rebuild together.
+constexpr uint8_t SECTION_FILE_VERSION = 62;
 // Suspended incremental build: valid pages plus LUTs and a parse-watermark trailer.
 // Change this with layout or payload changes so stale partial pages cannot resume
 // under a different layout contract.

@@ -22,88 +22,59 @@ emit_hash_define() {
   echo "#define ${name} (${hash})"
 }
 
-# Emit a reading-font ID define.
-# When the noemoji/ directory exists, emits an #ifdef OMIT_EMOJI_FONTS block so
-# the correct hash is selected at compile time.
-# Usage: reading_font_id DEFINE_NAME file1 [file2 ...]
-#   Files are relative paths from builtinFonts/ (e.g. ./lexenddeca_10_regular.h).
-#   Noemoji counterparts are assumed to live at noemoji/<basename>.
-reading_font_id() {
-  local name="$1"; shift
-  local files=("$@")
-
-  if [ -d "./noemoji" ]; then
-    local noemoji_files=()
-    for f in "${files[@]}"; do
-      noemoji_files+=("./noemoji/$(basename "$f")")
-    done
-    local noemoji_hash
-    local default_hash
-    noemoji_hash="$(hash_files "${noemoji_files[@]}")"
-    default_hash="$(hash_files "${files[@]}")"
-    echo "#ifdef OMIT_EMOJI_FONTS"
-    echo "#define ${name} (${noemoji_hash})"
-    echo "#else"
-    echo "#define ${name} (${default_hash})"
-    echo "#endif"
-  else
-    emit_hash_define "${name}" "${files[@]}"
-  fi
-}
-
-# Reading fonts - support OMIT_EMOJI_FONTS
-reading_font_id LEXENDDECA_8_FONT_ID \
+# Reading fonts
+emit_hash_define LEXENDDECA_8_FONT_ID \
   ./lexenddeca_8_regular.h ./lexenddeca_8_bold.h ./lexenddeca_8_bolditalic.h ./lexenddeca_8_italic.h
-reading_font_id LEXENDDECA_9_FONT_ID \
+emit_hash_define LEXENDDECA_9_FONT_ID \
   ./lexenddeca_9_regular.h ./lexenddeca_9_bold.h ./lexenddeca_9_bolditalic.h ./lexenddeca_9_italic.h
-reading_font_id LEXENDDECA_10_FONT_ID \
+emit_hash_define LEXENDDECA_10_FONT_ID \
   ./lexenddeca_10_regular.h ./lexenddeca_10_bold.h ./lexenddeca_10_bolditalic.h ./lexenddeca_10_italic.h
-reading_font_id LEXENDDECA_12_FONT_ID \
+emit_hash_define LEXENDDECA_12_FONT_ID \
   ./lexenddeca_12_regular.h ./lexenddeca_12_bold.h ./lexenddeca_12_bolditalic.h ./lexenddeca_12_italic.h
-reading_font_id LEXENDDECA_14_FONT_ID \
+emit_hash_define LEXENDDECA_14_FONT_ID \
   ./lexenddeca_14_regular.h ./lexenddeca_14_bold.h ./lexenddeca_14_bolditalic.h ./lexenddeca_14_italic.h
-reading_font_id LEXENDDECA_16_FONT_ID \
+emit_hash_define LEXENDDECA_16_FONT_ID \
   ./lexenddeca_16_regular.h ./lexenddeca_16_bold.h ./lexenddeca_16_bolditalic.h ./lexenddeca_16_italic.h
-reading_font_id LEXENDDECA_18_FONT_ID \
+emit_hash_define LEXENDDECA_18_FONT_ID \
   ./lexenddeca_18_regular.h ./lexenddeca_18_bold.h ./lexenddeca_18_bolditalic.h ./lexenddeca_18_italic.h
-reading_font_id LEXENDDECA_20_FONT_ID \
+emit_hash_define LEXENDDECA_20_FONT_ID \
   ./lexenddeca_20_regular.h ./lexenddeca_20_bold.h ./lexenddeca_20_bolditalic.h ./lexenddeca_20_italic.h
 
-reading_font_id CHAREINK_8_FONT_ID \
+emit_hash_define CHAREINK_8_FONT_ID \
   ./charein_8_regular.h ./charein_8_bold.h ./charein_8_bolditalic.h ./charein_8_italic.h
-reading_font_id CHAREINK_9_FONT_ID \
+emit_hash_define CHAREINK_9_FONT_ID \
   ./charein_9_regular.h ./charein_9_bold.h ./charein_9_bolditalic.h ./charein_9_italic.h
-reading_font_id CHAREINK_10_FONT_ID \
+emit_hash_define CHAREINK_10_FONT_ID \
   ./charein_10_regular.h ./charein_10_bold.h ./charein_10_bolditalic.h ./charein_10_italic.h
-reading_font_id CHAREINK_12_FONT_ID \
+emit_hash_define CHAREINK_12_FONT_ID \
   ./charein_12_regular.h ./charein_12_bold.h ./charein_12_bolditalic.h ./charein_12_italic.h
-reading_font_id CHAREINK_14_FONT_ID \
+emit_hash_define CHAREINK_14_FONT_ID \
   ./charein_14_regular.h ./charein_14_bold.h ./charein_14_bolditalic.h ./charein_14_italic.h
-reading_font_id CHAREINK_16_FONT_ID \
+emit_hash_define CHAREINK_16_FONT_ID \
   ./charein_16_regular.h ./charein_16_bold.h ./charein_16_bolditalic.h ./charein_16_italic.h
-reading_font_id CHAREINK_18_FONT_ID \
+emit_hash_define CHAREINK_18_FONT_ID \
   ./charein_18_regular.h ./charein_18_bold.h ./charein_18_bolditalic.h ./charein_18_italic.h
-reading_font_id CHAREINK_20_FONT_ID \
+emit_hash_define CHAREINK_20_FONT_ID \
   ./charein_20_regular.h ./charein_20_bold.h ./charein_20_bolditalic.h ./charein_20_italic.h
 
-reading_font_id BITTER_8_FONT_ID \
+emit_hash_define BITTER_8_FONT_ID \
   ./bitter_8_regular.h ./bitter_8_bold.h ./bitter_8_bolditalic.h ./bitter_8_italic.h
-reading_font_id BITTER_9_FONT_ID \
+emit_hash_define BITTER_9_FONT_ID \
   ./bitter_9_regular.h ./bitter_9_bold.h ./bitter_9_bolditalic.h ./bitter_9_italic.h
-reading_font_id BITTER_10_FONT_ID \
+emit_hash_define BITTER_10_FONT_ID \
   ./bitter_10_regular.h ./bitter_10_bold.h ./bitter_10_bolditalic.h ./bitter_10_italic.h
-reading_font_id BITTER_12_FONT_ID \
+emit_hash_define BITTER_12_FONT_ID \
   ./bitter_12_regular.h ./bitter_12_bold.h ./bitter_12_bolditalic.h ./bitter_12_italic.h
-reading_font_id BITTER_14_FONT_ID \
+emit_hash_define BITTER_14_FONT_ID \
   ./bitter_14_regular.h ./bitter_14_bold.h ./bitter_14_bolditalic.h ./bitter_14_italic.h
-reading_font_id BITTER_16_FONT_ID \
+emit_hash_define BITTER_16_FONT_ID \
   ./bitter_16_regular.h ./bitter_16_bold.h ./bitter_16_bolditalic.h ./bitter_16_italic.h
-reading_font_id BITTER_18_FONT_ID \
+emit_hash_define BITTER_18_FONT_ID \
   ./bitter_18_regular.h ./bitter_18_bold.h ./bitter_18_bolditalic.h ./bitter_18_italic.h
-reading_font_id BITTER_20_FONT_ID \
+emit_hash_define BITTER_20_FONT_ID \
   ./bitter_20_regular.h ./bitter_20_bold.h ./bitter_20_bolditalic.h ./bitter_20_italic.h
 
-# UI fonts — no emoji variant
+# UI fonts
 emit_hash_define UI_10_FONT_ID ./inter_10_regular.h ./inter_10_bold.h
 emit_hash_define UI_12_FONT_ID ./inter_12_regular.h ./inter_12_bold.h
 emit_hash_define SMALL_FONT_ID ./inter_8_regular.h

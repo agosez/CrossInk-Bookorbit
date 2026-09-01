@@ -216,6 +216,19 @@ void WebDAVHandler::handlePropfind(WebServer& s) {
 
   bool isDir = root.isDirectory();
 
+  if (isDir && depth > 0) {
+    root.close();
+    if (!FsHelpers::directoryCanBeEnumerated(path.c_str())) {
+      s.send(500, "text/plain", "Directory listing failed");
+      return;
+    }
+    root = Storage.open(path.c_str());
+    if (!root) {
+      s.send(500, "text/plain", "Failed to reopen directory");
+      return;
+    }
+  }
+
   s.setContentLength(CONTENT_LENGTH_UNKNOWN);
   s.send(207, "application/xml; charset=\"utf-8\"", "");
   s.sendContent(
@@ -255,6 +268,12 @@ void WebDAVHandler::handlePropfind(WebServer& s) {
       file.close();
       yield();
       file = root.openNextFile();
+    }
+    if (FsHelpers::directoryIterationFailed(root)) {
+      LOG_ERR("DAV", "Directory listing failed before EOF: %s", path.c_str());
+      root.close();
+      s.client().stop();
+      return;
     }
   }
 
@@ -479,6 +498,15 @@ void WebDAVHandler::handleMkcol(WebServer& s) {
   }
 
   if (Storage.mkdir(path.c_str())) {
+    const String parentPath = lastSlash > 0 ? path.substring(0, lastSlash) : "/";
+    const auto visibility = FsHelpers::directoryEntryVisibility(parentPath.c_str(), path.c_str());
+    if (visibility != FsHelpers::DirectoryEntryVisibility::Visible) {
+      const bool rolledBack = visibility == FsHelpers::DirectoryEntryVisibility::Missing && Storage.rmdir(path.c_str());
+      LOG_ERR("DAV", "Created collection is not enumerable: %s (visibility=%u rollback=%d)", path.c_str(),
+              static_cast<unsigned>(visibility), rolledBack);
+      s.send(500, "text/plain", "Directory could not be added to its parent listing");
+      return;
+    }
     SleepImageIndex::invalidateForPath(path.c_str());
     s.send(201);
   } else {

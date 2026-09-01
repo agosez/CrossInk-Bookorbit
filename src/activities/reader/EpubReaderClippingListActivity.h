@@ -31,14 +31,17 @@ class EpubReaderClippingListActivity final : public Activity {
   bool longPressConfirmHandled = false;
   bool detailMode = false;
   using UiApp = freeink::ui::FreeInkApp<20, 4>;
+  // Caps the rendered row window: the label buffers below are fixed size, so the
+  // visible-row count from the theme geometry must never exceed them.
+  static constexpr size_t CLIPPING_WINDOW_SIZE = 20;
   freeink::ui::GfxRendererTarget uiTarget;
   UiApp app;
   std::atomic<bool> uiReady{false};
   int visibleRows = 1;
   int topIndex = 0;
   std::vector<freeink::ui::ListItem> uiItems;
-  std::array<std::string, 20> uiRawText;
-  std::array<std::string, 20> uiLabels;
+  std::array<std::string, CLIPPING_WINDOW_SIZE> uiRawText;
+  std::array<std::string, CLIPPING_WINDOW_SIZE> uiLabels;
 
   static void listScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);

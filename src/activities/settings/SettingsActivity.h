@@ -243,6 +243,10 @@ inline bool settingShowsNavigationCaret(const SettingInfo& setting) {
 }
 
 class SettingsActivity final : public Activity {
+ public:
+  enum class View : uint8_t { Root, FileBrowser };
+
+ private:
   ButtonNavigator buttonNavigator;
 
   int selectedCategoryIndex = 0;  // Currently selected category
@@ -267,6 +271,7 @@ class SettingsActivity final : public Activity {
   std::vector<SettingInfo> systemSettings;
   std::vector<SettingInfo> systemDeviceSettings;
   std::vector<SettingInfo> systemFilesCacheSettings;
+  std::vector<SettingInfo> fileBrowserSettings;
   std::vector<SettingInfo> systemReadingStatsSettings;
   std::vector<SettingInfo> systemGlobalStatsSettings;
   const std::vector<SettingInfo>* currentSettings = nullptr;
@@ -276,6 +281,10 @@ class SettingsActivity final : public Activity {
   // The frontlight-panel shortcut opens Settings as a transient Home menu.
   // Its swipe-up closes the screen; regular Settings keeps swipe scrolling.
   bool dismissOnUpSwipe = false;
+  // The frontlight drawer pushes Settings over an active reader. Closing that
+  // instance must pop back to the panel instead of replacing the reader with Home.
+  bool returnToParentOnClose = false;
+  View view = View::Root;
   // Settings can be created over a landscape reader. Its teardown resets the
   // renderer before this activity enters, so retain the requested layout.
   GfxRenderer::Orientation entryOrientation;
@@ -316,6 +325,7 @@ class SettingsActivity final : public Activity {
   void openEnumOptionPicker(const SettingInfo& setting);
   void maybePromptKeepClockInSleep(const SettingInfo& changed);
   void openScreenMarginPicker(const SettingInfo& setting);
+  void openWordSpacingPicker();
   void openLanguagePicker();
   void openIdleTimeThresholdPicker();
   void toggleCurrentSetting();
@@ -325,9 +335,12 @@ class SettingsActivity final : public Activity {
   void openStringEditor(const SettingInfo& setting);
   void rebuildSettingsLists();
   void syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged);
+  void closeRootSettings();
+  bool isFileBrowserView() const { return view == View::FileBrowser; }
 
  public:
-  explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool dismissOnUpSwipe = false);
+  explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool dismissOnUpSwipe = false,
+                            bool returnToParentOnClose = false, View view = View::Root);
   bool allowGlobalHomeSwipeGesture() const override { return false; }
   void onEnter() override;
   void onExit() override;

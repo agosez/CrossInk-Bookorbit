@@ -72,6 +72,9 @@ TEST(OptionPopup, PowerConfirmSelectionSuppressesItsPowerRelease) {
   EXPECT_EQ(selections, 1);
   EXPECT_FALSE(popup.isActive());
   EXPECT_TRUE(input.isPowerReleaseSuppressed());
+
+  input.injectPowerConfirmRelease();
+  EXPECT_FALSE(input.wasReleased(MappedInputManager::Button::Power));
 }
 
 }  // namespace

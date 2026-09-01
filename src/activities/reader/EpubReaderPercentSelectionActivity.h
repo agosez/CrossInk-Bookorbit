@@ -50,6 +50,7 @@ class EpubReaderPercentSelectionActivity final : public Activity {
   // Swallow the swipe/tap fallout of a slider drag so its release can't trigger
   // the back gesture and cancel the dialog, or step the percent as a swipe.
   bool draggingSlider = false;
+  bool sliderTapPending = false;
 
   // Change the current percent by a delta and wrap within bounds.
   void adjustPercent(int delta);

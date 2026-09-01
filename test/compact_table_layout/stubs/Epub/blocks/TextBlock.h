@@ -19,7 +19,8 @@ class TextBlock {
 
   TextBlock(const std::vector<std::string>& words, const std::vector<int16_t>& xPositions,
             const std::vector<EpdFontFamily::Style>& styles, const std::vector<uint8_t>&, const std::vector<uint16_t>&,
-            const std::vector<uint16_t>&, const std::vector<uint8_t>&, const BlockStyle& style)
+            const std::vector<uint16_t>&, const std::vector<uint8_t>&, const std::vector<bool>&,
+            const BlockStyle& style)
       : words(words), xPositions(xPositions), styles(styles), style(style) {}
 
   bool valid() const { return true; }

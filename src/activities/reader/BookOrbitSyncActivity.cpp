@@ -22,6 +22,7 @@
 #include "BookmarkStore.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
+#include "CrossPointState.h"
 #include "Epub/Section.h"
 #include "EpubReaderUtils.h"
 #include "KOReaderDocumentId.h"
@@ -96,6 +97,16 @@ ResultActionLayout resultActionLayout(const Rect& screen, const ThemeMetrics& me
     result.rowHeight = touchHeight;
   }
   return result;
+}
+
+TouchActionButtons::Layout noRemoteProgressActionLayout(const Rect& screen, const ThemeMetrics& metrics) {
+  constexpr uint8_t buttonCount = 2;
+  constexpr int totalHeight =
+      TouchActionButtons::kDefaultHeight * buttonCount + TouchActionButtons::kDefaultGap * (buttonCount - 1);
+  const Rect container{screen.x + metrics.contentSidePadding,
+                       screen.y + screen.height - metrics.verticalSpacing - totalHeight,
+                       std::max(1, screen.width - metrics.contentSidePadding * 2), totalHeight};
+  return TouchActionButtons::vertical(container, buttonCount);
 }
 
 // Smart sync's memory: the server progress timestamp this device saw at the
@@ -246,6 +257,7 @@ void BookOrbitSyncActivity::onWifiSelectionComplete(const bool success) {
   }
 
   LOG_DBG("BookOrbit", "WiFi connected, starting sync");
+  WiFi.setSleep(false);
   sdFontSystem.releaseForNetwork(renderer);
 
   {
@@ -380,9 +392,9 @@ void BookOrbitSyncActivity::performSync() {
     // estimation, and a sweep already on file is what suppresses it (and retires the
     // duplicate estimates earlier syncs may have left). A failure never fails the sync —
     // the next sync records another one, and the server's sweep window spans many syncs.
-    const auto sweepResult = BookOrbitSyncClient::completeSweep(SETTINGS.getEffectiveDeviceName(),
-                                                                documentUnmatched ? 0 : 1,
-                                                                static_cast<uint32_t>(statsAccepted), annotationsSent);
+    const auto sweepResult =
+        BookOrbitSyncClient::completeSweep(SETTINGS.getEffectiveDeviceName(), documentUnmatched ? 0 : 1,
+                                           static_cast<uint32_t>(statsAccepted), annotationsSent);
     if (sweepResult != BookOrbitSyncClient::OK) {
       const int httpCode = BookOrbitSyncClient::lastHttpCode;
       if (httpCode == 404 || httpCode == 405 || httpCode == 501) {
@@ -1399,7 +1411,22 @@ void BookOrbitSyncActivity::performUpload() {
 void BookOrbitSyncActivity::onEnter() {
   Activity::onEnter();
   LOG_INF("BookOrbit", "BookOrbit sync starting");
-  ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+
+  // Sync is a reader-originated activity, but its decision prompts are not
+  // reader content. Keep their touch actions available even when the reader's
+  // tap controls are disabled. (Mirrors KOReaderSyncActivity.)
+  if (mappedInput.hasTouchHardware()) {
+    mappedInput.setReaderTouchscreenOverride(true);
+    touchOverrideActive = true;
+  }
+
+  uint8_t syncOrientation = SETTINGS.orientation;
+  const PendingOverlayResume& resume = APP_STATE.pendingOverlayResume;
+  if (resume.origin == PendingOverlayOrigin::Reader && resume.overlay == PendingOverlayType::FrontlightDrawer &&
+      resume.preserveReaderOrientation && resume.readerOrientation < CrossPointSettings::ORIENTATION_COUNT) {
+    syncOrientation = resume.readerOrientation;
+  }
+  ReaderUtils::applyOrientation(renderer, syncOrientation);
   lockInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
 
   if (!BOOKORBIT_STORE.hasCredentials()) {
@@ -1434,6 +1461,10 @@ void BookOrbitSyncActivity::onEnter() {
 }
 
 void BookOrbitSyncActivity::onExit() {
+  if (touchOverrideActive) {
+    mappedInput.setReaderTouchscreenOverride(false);
+    touchOverrideActive = false;
+  }
   Activity::onExit();
 
   syncSession.reset();
@@ -1536,9 +1567,9 @@ void BookOrbitSyncActivity::render(RenderLock&&) {
                       localPageStr);
 
     const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
-    const auto actions = resultActionLayout(screen, metrics, top, lineHeight, mappedInput.hasTouch());
+    const auto actions = resultActionLayout(screen, metrics, top, lineHeight, mappedInput.hasTouchHardware());
     const char* actionLabels[] = {tr(STR_APPLY_REMOTE), tr(STR_UPLOAD_LOCAL)};
-    if (mappedInput.hasTouch()) {
+    if (mappedInput.hasTouchHardware()) {
       TouchActionButtons::draw(renderer, actions.touchLayout, actionLabels, selectedOption, selectedOption,
                                UI_10_FONT_ID);
     } else {
@@ -1564,6 +1595,12 @@ void BookOrbitSyncActivity::render(RenderLock&&) {
   if (state == NO_REMOTE_PROGRESS) {
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, tr(STR_NO_REMOTE_MSG), true, EpdFontFamily::BOLD);
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 40, tr(STR_UPLOAD_PROMPT));
+
+    if (mappedInput.hasTouch()) {
+      const auto actions = noRemoteProgressActionLayout(screen, metrics);
+      const char* actionLabels[] = {tr(STR_UPLOAD), tr(STR_CANCEL)};
+      TouchActionButtons::draw(renderer, actions, actionLabels, 0, -1, UI_10_FONT_ID);
+    }
 
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_UPLOAD), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
@@ -1633,7 +1670,7 @@ void BookOrbitSyncActivity::loop() {
     // Touch: pressing a button highlights it, releasing on it takes the choice.
     // The same layout the draw used, so a translated label cannot move one
     // without the other.
-    if (mappedInput.hasTouch()) {
+    if (mappedInput.hasTouchHardware()) {
       const auto& metrics = UITheme::getInstance().getMetrics();
       const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
       const Rect header = headerBandRect();
@@ -1686,6 +1723,29 @@ void BookOrbitSyncActivity::loop() {
   }
 
   if (state == NO_REMOTE_PROGRESS) {
+    if (mappedInput.hasTouch()) {
+      const auto& metrics = UITheme::getInstance().getMetrics();
+      const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+      const auto actions = noRemoteProgressActionLayout(screen, metrics);
+      int touchedOption = -1;
+      const auto touch = mappedInput.rowTouch(
+          touchedOption, actions.buttons[0].y, TouchActionButtons::kDefaultHeight + TouchActionButtons::kDefaultGap,
+          actions.count, actions.buttons[0].x, actions.buttons[0].x + actions.buttons[0].width,
+          actions.buttons[0].height);
+      if (touch == MappedInputManager::RowTouch::Down) return;
+      if (touch == MappedInputManager::RowTouch::Tap) {
+        if (touchedOption == 0) {
+          if (documentHash.empty()) {
+            documentHash = KOReaderDocumentId::calculate(epubPath);
+          }
+          performUpload();
+        } else if (touchedOption == 1) {
+          returnToReader();
+        }
+        return;
+      }
+    }
+
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       if (documentHash.empty()) {
         documentHash = KOReaderDocumentId::calculate(epubPath);

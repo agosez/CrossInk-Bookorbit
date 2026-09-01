@@ -15,6 +15,7 @@
 #include <cmath>
 
 #include "CrossPointSettings.h"
+#include "CrossPointState.h"
 #include "Epub/Section.h"
 #include "EpubReaderUtils.h"
 #include "HalClock.h"
@@ -78,6 +79,16 @@ ResultActionLayout resultActionLayout(const Rect& screen, const ThemeMetrics& me
     result.rowHeight = touchHeight;
   }
   return result;
+}
+
+TouchActionButtons::Layout noRemoteProgressActionLayout(const Rect& screen, const ThemeMetrics& metrics) {
+  constexpr uint8_t buttonCount = 2;
+  constexpr int totalHeight =
+      TouchActionButtons::kDefaultHeight * buttonCount + TouchActionButtons::kDefaultGap * (buttonCount - 1);
+  const Rect container{screen.x + metrics.contentSidePadding,
+                       screen.y + screen.height - metrics.verticalSpacing - totalHeight,
+                       std::max(1, screen.width - metrics.contentSidePadding * 2), totalHeight};
+  return TouchActionButtons::vertical(container, buttonCount);
 }
 
 std::string calculateDocumentHashForMethod(const std::string& path, const DocumentMatchMethod method) {
@@ -210,6 +221,9 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
     returnToReader();
     return;
   }
+
+  WiFi.setSleep(false);
+  LOG_DBG("KOSync", "WiFi sleep disabled for sync");
 
   sdFontSystem.releaseForNetwork(renderer);
 
@@ -569,6 +583,14 @@ void KOReaderSyncActivity::performUpload() {
 void KOReaderSyncActivity::onEnter() {
   Activity::onEnter();
 
+  // Sync is a reader-originated activity, but its decision prompts are not
+  // reader content. Keep their touch actions available even when the reader's
+  // tap controls are disabled.
+  if (mappedInput.hasTouchHardware()) {
+    mappedInput.setReaderTouchscreenOverride(true);
+    touchOverrideActive = true;
+  }
+
   // The reader uses this activity as a tiny handoff so ActivityManager can run
   // reader onExit() before rebooting. Network boot uses the other constructor.
   if (restartBeforeNetwork) {
@@ -578,7 +600,13 @@ void KOReaderSyncActivity::onEnter() {
 
   LOG_INF("KOSync", "network entry free=%u maxAlloc=%u stack=%u", ESP.getFreeHeap(), ESP.getMaxAllocHeap(),
           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
-  ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+  uint8_t syncOrientation = SETTINGS.orientation;
+  const PendingOverlayResume& resume = APP_STATE.pendingOverlayResume;
+  if (resume.origin == PendingOverlayOrigin::Reader && resume.overlay == PendingOverlayType::FrontlightDrawer &&
+      resume.preserveReaderOrientation && resume.readerOrientation < CrossPointSettings::ORIENTATION_COUNT) {
+    syncOrientation = resume.readerOrientation;
+  }
+  ReaderUtils::applyOrientation(renderer, syncOrientation);
   lockInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
 
   if (!localProgressDeferred && !localProgress.valid) {
@@ -614,6 +642,10 @@ void KOReaderSyncActivity::onEnter() {
 }
 
 void KOReaderSyncActivity::onExit() {
+  if (touchOverrideActive) {
+    mappedInput.setReaderTouchscreenOverride(false);
+    touchOverrideActive = false;
+  }
   Activity::onExit();
 
   if (wifiActivated) {
@@ -698,9 +730,9 @@ void KOReaderSyncActivity::render(RenderLock&&) {
                       localPageStr);
 
     const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
-    const auto actions = resultActionLayout(screen, metrics, top, lineHeight, mappedInput.hasTouch());
+    const auto actions = resultActionLayout(screen, metrics, top, lineHeight, mappedInput.hasTouchHardware());
     const char* actionLabels[] = {tr(STR_APPLY_REMOTE), tr(STR_UPLOAD_LOCAL)};
-    if (mappedInput.hasTouch()) {
+    if (mappedInput.hasTouchHardware()) {
       TouchActionButtons::draw(renderer, actions.touchLayout, actionLabels, selectedOption, selectedOption,
                                UI_10_FONT_ID);
     } else {
@@ -728,6 +760,12 @@ void KOReaderSyncActivity::render(RenderLock&&) {
   if (state == NO_REMOTE_PROGRESS) {
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, tr(STR_NO_REMOTE_MSG), true, EpdFontFamily::BOLD);
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + 40, tr(STR_UPLOAD_PROMPT));
+
+    if (mappedInput.hasTouch()) {
+      const auto actions = noRemoteProgressActionLayout(screen, metrics);
+      const char* actionLabels[] = {tr(STR_UPLOAD), tr(STR_CANCEL)};
+      TouchActionButtons::draw(renderer, actions, actionLabels, 0, -1, UI_10_FONT_ID);
+    }
 
     const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_UPLOAD), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
@@ -801,8 +839,8 @@ void KOReaderSyncActivity::loop() {
       const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
       const int top =
           screen.y + metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing;
-      const auto actions =
-          resultActionLayout(screen, metrics, top, renderer.getLineHeight(UI_10_FONT_ID), mappedInput.hasTouch());
+      const auto actions = resultActionLayout(screen, metrics, top, renderer.getLineHeight(UI_10_FONT_ID),
+                                              mappedInput.hasTouchHardware());
       int touchedOption = -1;
       const auto touch =
           mappedInput.rowTouch(touchedOption, actions.buttons[0].y, actions.rowStep, 2, actions.buttons[0].x,
@@ -848,14 +886,33 @@ void KOReaderSyncActivity::loop() {
   }
 
   if (state == NO_REMOTE_PROGRESS) {
+    if (mappedInput.hasTouch()) {
+      const auto& metrics = UITheme::getInstance().getMetrics();
+      const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+      const auto actions = noRemoteProgressActionLayout(screen, metrics);
+      int touchedOption = -1;
+      const auto touch = mappedInput.rowTouch(
+          touchedOption, actions.buttons[0].y, TouchActionButtons::kDefaultHeight + TouchActionButtons::kDefaultGap,
+          actions.count, actions.buttons[0].x, actions.buttons[0].x + actions.buttons[0].width,
+          actions.buttons[0].height);
+      if (touch == MappedInputManager::RowTouch::Down) return;
+      if (touch == MappedInputManager::RowTouch::Tap) {
+        if (touchedOption == 0) {
+          if (documentHash.empty()) {
+            documentHash = calculateDocumentHashForMethod(epubPath, primaryMatchMethod);
+          }
+          performUpload();
+        } else if (touchedOption == 1) {
+          returnToReader();
+        }
+        return;
+      }
+    }
+
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       // Calculate hash if not done yet
       if (documentHash.empty()) {
-        if (primaryMatchMethod == DocumentMatchMethod::FILENAME) {
-          documentHash = KOReaderDocumentId::calculateFromFilename(epubPath);
-        } else {
-          documentHash = KOReaderDocumentId::calculate(epubPath);
-        }
+        documentHash = calculateDocumentHashForMethod(epubPath, primaryMatchMethod);
       }
       performUpload();
     }

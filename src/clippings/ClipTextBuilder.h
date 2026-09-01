@@ -9,8 +9,10 @@
 namespace ClipTextBuilder {
 
 struct SelectionBounds {
+  uint8_t firstPageIdx = 0;
   uint16_t firstPageWordOrdinal = 0;
   uint16_t firstWordByteOffset = 0;
+  uint8_t lastPageIdx = 0;
   uint16_t lastPageWordOrdinal = 0;
   uint16_t lastWordByteEndOffset = 0;
 };

@@ -16,6 +16,8 @@
 #include "util/QuickLockTrigger.h"
 #include "util/ScreenshotInfo.h"
 
+struct PendingOverlayResume;
+
 class Activity {
   friend class ActivityManager;
 
@@ -69,6 +71,13 @@ class Activity {
   virtual bool usesFullScreenReaderVerticalSwipes() const { return false; }
   // Overlays can reserve the frontlight gesture for their own dismissal.
   virtual bool allowFrontlightPanelGesture() const { return true; }
+  // Partial-screen overlays preserve pixels from the activity beneath them.
+  // After a full-screen child pops, ActivityManager must redraw that source
+  // activity before pushing one of these overlays again.
+  virtual bool requiresFreshBackdrop() const { return false; }
+  // A backdrop-only render must not make a paused reader count overlay time as
+  // reading time. Readers clear that transient render timestamp here.
+  virtual void onBackdropRenderedForOverlay() {}
   virtual bool allowPowerAsConfirmInReaderMode() const { return false; }
   virtual bool allowGlobalHomeGesture() const { return true; }
   // Activities with a modal can keep global gestures from acting behind it.
@@ -89,6 +98,18 @@ class Activity {
   virtual bool handleShortcutAction(uint8_t) { return false; }
   virtual bool handleShortcutAction(CrossPointSettings::SHORT_PWRBTN) { return false; }
   virtual std::string getCurrentBookPath() const { return {}; }
+  virtual std::string getCurrentBookTitle() const { return {}; }
+  virtual bool getFrontlightPanelBookDetails(FrontlightPanelBookDetails&) { return false; }
+  virtual bool isEpubReaderActivity() const { return false; }
+  virtual std::unique_ptr<Activity> createFrontlightReadingStatsActivity() { return {}; }
+  virtual void onFrontlightPanelOpened() {}
+  virtual void onFrontlightPanelClosed() { requestUpdate(); }
+  virtual void persistFrontlightPanelSettings() { SETTINGS.saveToFile(); }
+  virtual void onFrontlightGlobalSettingsOpened() {}
+  virtual void onFrontlightGlobalSettingsClosed() {}
+  virtual bool handleFrontlightPanelResult(const FrontlightPanelResult&) { return false; }
+  virtual bool handleExternalReaderMenuAction(uint8_t) { return false; }
+  virtual bool restorePendingOverlay(const PendingOverlayResume&) { return false; }
   virtual ScreenshotInfo getScreenshotInfo() const { return {}; }
 
   // Start a new activity without destroying the current one

@@ -403,6 +403,11 @@ void ControlsOptionsActivity::buildOptionsScreen(UiApp::ScreenType& screen) {
     item.icon = directionIcon;
     if (!isSectionHeader && !values[i].empty()) item.value = values[i].c_str();
     item.isHeader = isSectionHeader;
+    item.toggle = !isSectionHeader && setting.type == SettingType::TOGGLE;
+    if (item.toggle) {
+      item.toggleChecked = setting.valuePtr != nullptr && SETTINGS.*(setting.valuePtr) != 0;
+      item.value = nullptr;
+    }
     item.actionValue = static_cast<int16_t>(i);
     items.push_back(item);
   }

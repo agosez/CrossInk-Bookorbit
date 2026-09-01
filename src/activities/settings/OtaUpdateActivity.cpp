@@ -22,6 +22,7 @@ bool hasActiveWifiConnection() { return WiFi.status() == WL_CONNECTED && WiFi.lo
 StrId failureMessageFor(const OtaUpdater::OtaUpdaterError error) {
   if (error == OtaUpdater::HASH_MISMATCH_ERROR) return StrId::STR_UPDATE_HASH_MISMATCH;
   if (error == OtaUpdater::WRONG_DEVICE_ERROR) return StrId::STR_FIRMWARE_WRONG_DEVICE;
+  if (error == OtaUpdater::SD_CARD_FULL_ERROR) return StrId::STR_SD_CARD_FULL;
   return StrId::STR_UPDATE_FAILED;
 }
 
@@ -173,8 +174,8 @@ void OtaUpdateActivity::render(RenderLock&&) {
         static_cast<int>(updaterProgress * 100), 100);
 
     y += metrics.progressBarHeight + metrics.verticalSpacing;
-    // Percent label is drawn by BaseTheme::drawProgressBar; this slot is left intentionally empty
-    // so the bytes line below stays at the same Y it was at when the activity drew its own percent.
+    // BaseTheme::drawProgressBar draws the percentage. This line shows the
+    // monotonic combined staging-and-flashing work instead.
     y += height + metrics.verticalSpacing;
     renderer.drawCenteredText(
         UI_10_FONT_ID, y,

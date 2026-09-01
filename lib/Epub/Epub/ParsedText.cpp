@@ -1797,9 +1797,12 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
   std::vector<uint16_t> outRunOffsets;
   std::vector<uint16_t> outGuideDotXOffset;
   std::vector<uint8_t> outBackgroundBlack;
+  auto& outHasSpaceBefore = lineHasSpaceBeforeScratch;
   outWords.reserve(lineWordCount);
   outXPos.reserve(lineWordCount);
   outStyles.reserve(lineWordCount);
+  outHasSpaceBefore.clear();
+  outHasSpaceBefore.reserve(lineWordCount);
   if (lineHasBionicSplit) {
     outBoundaries.reserve(lineWordCount);
     outRunOffsets.reserve(lineWordCount);
@@ -1824,6 +1827,9 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
     outWords.push_back(std::move(lineWords[i]));
     outXPos.push_back(lineXPos[i]);
     outStyles.push_back(lineWordStyles[i]);
+    const bool continues = willReorder ? reorderedContinuesScratch[i] : wordContinues[lastBreakAt + i];
+    const bool noSpaceBefore = willReorder ? reorderedNoSpaceBeforeScratch[i] : wordNoSpaceBefore[lastBreakAt + i];
+    outHasSpaceBefore.push_back(!continues && !noSpaceBefore);
     if (lineHasBionicSplit) {
       outBoundaries.push_back(boundary);
       outRunOffsets.push_back(runOffset);
@@ -1852,7 +1858,7 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
 
   auto block =
       std::make_shared<TextBlock>(outWords, outXPos, outStyles, outBoundaries, outRunOffsets, outGuideDotXOffset,
-                                  outBackgroundBlack, blockStyle, std::move(lineRubyTexts));
+                                  outBackgroundBlack, outHasSpaceBefore, blockStyle, std::move(lineRubyTexts));
   if (!block->valid()) {
     LOG_ERR("PTX", "Dropping line: TextBlock arena allocation failed");
     return false;

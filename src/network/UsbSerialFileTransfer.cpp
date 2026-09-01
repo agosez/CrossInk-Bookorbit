@@ -328,6 +328,18 @@ void handleList() {
     writeLine("ERR:not_directory\n");
     return;
   }
+  root.close();
+
+  if (!FsHelpers::directoryCanBeEnumerated(path)) {
+    writeLine("ERR:list_failed\n");
+    return;
+  }
+
+  root = Storage.open(path);
+  if (!root) {
+    writeLine("ERR:opendir\n");
+    return;
+  }
 
   logSerial.printf("DIR:%s\n", path);
   HalFile file = root.openNextFile();
@@ -346,6 +358,12 @@ void handleList() {
     yield();
     file = root.openNextFile();
   }
+  if (FsHelpers::directoryIterationFailed(root)) {
+    LOG_ERR("USB", "Directory listing failed before EOF: %s", path);
+    root.close();
+    writeLine("ERR:list_failed\n");
+    return;
+  }
   root.close();
   writeLine("END\n");
 }
@@ -359,9 +377,29 @@ void handleMkdir() {
     return;
   }
 
+  const std::string parentPath = FsHelpers::extractFolderPath(path);
+  std::string rollbackBoundary = parentPath;
+  while (rollbackBoundary != "/" && !Storage.exists(rollbackBoundary.c_str())) {
+    rollbackBoundary = FsHelpers::extractFolderPath(rollbackBoundary);
+  }
+
   const bool created = Storage.mkdir(path, true);
   if (created || Storage.exists(path)) {
-    if (created) SleepImageIndex::invalidateForPath(path);
+    if (created) {
+      const auto visibility = FsHelpers::directoryEntryVisibility(parentPath.c_str(), path);
+      if (visibility != FsHelpers::DirectoryEntryVisibility::Visible) {
+        if (visibility == FsHelpers::DirectoryEntryVisibility::Missing) {
+          std::string rollbackPath = path;
+          while (rollbackPath != rollbackBoundary) {
+            Storage.rmdir(rollbackPath.c_str());
+            rollbackPath = FsHelpers::extractFolderPath(rollbackPath);
+          }
+        }
+        writeLine("ERR:mkdir_not_visible\n");
+        return;
+      }
+      SleepImageIndex::invalidateForPath(path);
+    }
     writeLine("OK\n");
   } else {
     writeLine("ERR:mkdir_failed\n");

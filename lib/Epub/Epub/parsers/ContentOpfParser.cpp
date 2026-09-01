@@ -407,6 +407,9 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
         LOG_DBG("COF", "Found %s reference in guide: %s", type.c_str(), guideHref.c_str());
         self->textReferenceHref = guideHref;
         self->hasExplicitStartReference = true;
+      } else if (type == "toc" && self->guideTocPageHref.empty()) {
+        const auto fragmentPos = guideHref.find('#');
+        self->guideTocPageHref = guideHref.substr(0, fragmentPos);
       } else if ((type == "cover" || type == "cover-page") && self->guideCoverPageHref.empty()) {
         self->guideCoverPageHref = guideHref;
       }

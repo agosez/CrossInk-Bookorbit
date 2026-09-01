@@ -112,12 +112,14 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "simulator/SimulatorSmokeTest.h"
 #endif
 #include "images/LoadingIcon.h"
+#include "util/BatteryDiagnosticLog.h"
 #include "util/ButtonNavigator.h"
 #include "util/ButtonShortcutController.h"
 #include "util/Dictionary.h"
 #include "util/DictionaryRegistry.h"
 #include "util/FrontlightSchedule.h"
 #include "util/ScreenshotUtil.h"
+#include "util/SleepWakePolicy.h"
 
 GfxRenderer renderer(display);
 MappedInputManager mappedInputManager(gpio, renderer);
@@ -201,14 +203,6 @@ EpdFontFamily ui10FontFamily(&ui10RegularFont, &ui10BoldFont);
 EpdFont ui12RegularFont(&inter_12_regular);
 EpdFont ui12BoldFont(&inter_12_bold);
 EpdFontFamily ui12FontFamily(&ui12RegularFont, &ui12BoldFont);
-
-// measurement of power button press duration calibration value
-unsigned long t1 = 0;
-unsigned long t2 = 0;
-
-// Power + Down is an established screenshot-only shortcut. Keep its release
-// separate from configurable chords so it cannot trigger another Power action.
-static bool screenshotComboHandled = false;
 
 const char* resetReasonName(const esp_reset_reason_t reason) {
   switch (reason) {
@@ -326,12 +320,7 @@ constexpr uint32_t READER_RENDER_TASK_STACK_BYTES = 16384;
 // How the device is coming back to life, resolved once at boot. Both resume
 // flows suppress the splash and leave the panel holding its pre-boot frame; a
 // plain boot shows the splash. See setup() for the resolution.
-enum class BootResume : uint8_t {
-  Splash,          // cold boot, flash, panic, or plain reboot
-  Silent,          // heap-defrag ESP.restart() (RTC flag; lost on power loss)
-  Network,         // minimal boot directly into a memory-intensive network activity
-  SplashlessWake,  // wake from deep sleep with the splash suppressed by the SD flag
-};
+using BootResume = SleepWakePolicy::Resume;
 
 // Latched true once enterDeepSleep() commits to sleeping, before it tears down
 // the current activity. WiFi activities call silentRestart() in onExit() to
@@ -373,6 +362,12 @@ void silentRestart() {
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   delay(50);
   restartWithSilentToken();
+}
+
+void restartToHomeAfterStorageHandoff() {
+  // Keep this distinct from other callers: USB Drive has released raw SD
+  // storage and must reboot into Home before any normal filesystem work runs.
+  silentRestart();
 }
 
 void armSilentRestartReaderPageBuild(const std::string& bookPath, const uint16_t spineIndex, const uint16_t targetPage,
@@ -431,7 +426,7 @@ bool isGlobalPowerButtonAction(const CrossPointSettings::SHORT_PWRBTN action) {
   return isPowerButtonActionAvailableOutsideReader(action);
 }
 
-bool startGlobalSyncProgress(const bool networkBootReady = false) {
+bool startGlobalSyncProgress(const bool networkBootReady) {
 #if !CROSSINK_APP_CAP_KOREADER_SYNC
   // No KOReader sync screens in this build: every caller treats false as
   // "nothing to launch", which is what an unassignable action should do.
@@ -479,7 +474,7 @@ bool startGlobalSyncProgress(const bool networkBootReady = false) {
 // networkBootReady mirrors the KOReader flow: false is a live request, which restarts
 // into a minimal network boot like KOReader does; true is the resume after that
 // restart. The payload is the BOOKORBIT_SYNC restart payload.
-bool startGlobalBookOrbitSync(const bool networkBootReady = false, const uint32_t payload = 0) {
+bool startGlobalBookOrbitSync(const bool networkBootReady, const uint32_t payload) {
   if (!BOOKORBIT_STORE.hasCredentials()) {
     if (networkBootReady) return false;
     activityManager.pushActivity(std::make_unique<BookOrbitSettingsActivity>(renderer, mappedInputManager));
@@ -559,12 +554,6 @@ CrossPointSettings::SHORT_PWRBTN getPowerButtonAction() {
   if (mappedInputManager.wasReleased(MappedInputManager::Button::Power)) {
     if (longPowerButtonHandled) {
       longPowerButtonHandled = false;
-      screenshotComboHandled = false;
-      return CrossPointSettings::SHORT_PWRBTN::IGNORE;
-    }
-
-    if (screenshotComboHandled) {
-      screenshotComboHandled = false;
       return CrossPointSettings::SHORT_PWRBTN::IGNORE;
     }
 
@@ -601,8 +590,10 @@ void notifyQuickLockChanged() {
     constexpr int badgeSize = 40;
     const int x = std::max(left, renderer.getScreenWidth() - right - badgeSize);
     const int y = std::max(top, renderer.getScreenHeight() - bottom - badgeSize);
-    const bool background = SETTINGS.readerDarkMode != 0;
-    const bool foreground = !background;
+    // ActivityManager applies Night Mode at the display boundary, so direct
+    // framebuffer writes retain the normal palette.
+    constexpr bool background = false;
+    constexpr bool foreground = true;
     RenderLock lock;
     renderer.fillRect(x, y, badgeSize, badgeSize, background);
     freeink::ui::GfxRendererTarget target(renderer);
@@ -751,6 +742,8 @@ CrossPointSettings::SHORT_PWRBTN chordPowerAction(const ButtonShortcutController
       return Power::SLEEP;
     case Chord::PageTurn:
       return Power::PAGE_TURN;
+    case Chord::PreviousPage:
+      return Power::PREVIOUS_PAGE;
     case Chord::ToggleBookmark:
       return Power::TOGGLE_BOOKMARK;
     case Chord::ReadingStats:
@@ -769,6 +762,8 @@ CrossPointSettings::SHORT_PWRBTN chordPowerAction(const ButtonShortcutController
       return Power::CYCLE_PAGE_TURN;
     case Chord::SyncProgress:
       return Power::SYNC_PROGRESS;
+    case Chord::NearbyPositionSync:
+      return Power::NEARBY_POSITION_SYNC;
     case Chord::FileTransfer:
       return Power::FILE_TRANSFER;
     case Chord::CalibreWireless:
@@ -883,6 +878,15 @@ bool handleX4ProHomeKeyShortcuts() {
     return false;
   }
 
+  // A modal owns Home too. Clear a pending single tap so a gesture started
+  // while Quick Actions is open cannot fire after the popup closes.
+  if (activityManager.blocksGlobalInput()) {
+    const bool hadPendingTap = x4ProHomeKeyTapPending;
+    x4ProHomeKeyTapPending = false;
+    mappedInputManager.clearDeferredHomeGesture();
+    return hadPendingTap || gpio.wasHomeKeyTapped() || gpio.wasHomeKeyLongPressed();
+  }
+
   // Reader menus set the touchscreen override while they are active, which
   // intentionally lets Home work there. On a page, consume every Home edge
   // and discard a deferred single tap so nothing fires after it is re-enabled.
@@ -964,41 +968,31 @@ static bool loadSleepFrameBuffer() {
   return true;
 }
 
-// The wake-hold verification runs before the SD card is mounted (see setup()),
-// so the one setting it needs — "short press = sleep", which makes any tap a
-// valid wake — is mirrored into NVS. Written at sleep entry (the value that
-// matters is the one in force when the device went down) and re-synced after
-// each settings load in case the device lost power without a clean sleep.
-constexpr char WAKE_NVS_NAMESPACE[] = "crosspoint";
-constexpr char WAKE_SHORT_PRESS_KEY[] = "wakeShortPr";
+static bool preflightSleepFrameBuffer() {
+  if (!Storage.exists(SLEEP_FRAME_FILE)) return false;
 
-bool readWakeShortPressFromNvs() {
-#ifdef SIMULATOR
-  return false;
-#else
-  nvs_handle_t h;
-  if (nvs_open(WAKE_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
-  uint8_t v = 0;
-  const esp_err_t e = nvs_get_u8(h, WAKE_SHORT_PRESS_KEY, &v);
-  nvs_close(h);
-  return e == ESP_OK && v != 0;
-#endif
-}
-
-void mirrorWakeShortPressToNvs() {
-#ifndef SIMULATOR
-  const uint8_t want =
-      (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP || APP_STATE.quickLockResumePending) ? 1 : 0;
-  nvs_handle_t h;
-  if (nvs_open(WAKE_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
-  uint8_t cur = 0;
-  const bool have = nvs_get_u8(h, WAKE_SHORT_PRESS_KEY, &cur) == ESP_OK;
-  if (!have || cur != want) {  // skip the flash write when unchanged
-    nvs_set_u8(h, WAKE_SHORT_PRESS_KEY, want);
-    nvs_commit(h);
+  HalFile file;
+  if (!Storage.openFileForRead("SLP", SLEEP_FRAME_FILE, file)) {
+    LOG_ERR("SLP", "Failed to open Quick Resume frame for preflight");
+    Storage.remove(SLEEP_FRAME_FILE);
+    return false;
   }
-  nvs_close(h);
+
+#ifdef SIMULATOR
+  // The simulator's legacy display stub has no X3 runtime geometry. This path
+  // is unreachable there because it cannot identify a UC8279 X3 profile.
+  const size_t expectedSize = HalDisplay::BUFFER_SIZE;
+#else
+  const size_t expectedSize = EInkDisplay::X3_BUFFER_SIZE;
 #endif
+  const size_t actualSize = file.fileSize();
+  file.close();
+  if (SleepWakePolicy::hasValidSavedFrame(true, actualSize, expectedSize)) return true;
+
+  LOG_ERR("SLP", "Invalid Quick Resume frame: expected=%u actual=%u", static_cast<unsigned>(expectedSize),
+          static_cast<unsigned>(actualSize));
+  Storage.remove(SLEEP_FRAME_FILE);
+  return false;
 }
 
 bool shouldClearX4WakeGhosting() {
@@ -1051,9 +1045,12 @@ void enterDeepSleep(bool fromTimeout) {
     }
   }
 
+  // Last chance to sample: startDeepSleep() cuts the SD rail on X3, so nothing
+  // can be written again until the next wake.
+  BatteryDiagnosticLog::record(BatteryDiagnosticLog::Event::Sleep);
+
   putTiltSensorToSleepForDeepSleep();
   display.deepSleep();
-  mirrorWakeShortPressToNvs();  // next boot's wake-hold check reads this pre-SD
   LOG_DBG("MAIN", "Entering deep sleep");
 
   powerManager.startDeepSleep(gpio, SETTINGS.keepClockInSleep != 0);
@@ -1080,6 +1077,7 @@ void setupDisplayAndFonts(const bool seamless, const bool loadReaderResources, c
   display.begin(seamless);
 #endif
   renderer.begin();
+  display.setInverted(SETTINGS.screenInverted != 0);
   // FreeInkUI headers need more than 4 KB once the render loop and nested
   // screen builders share the task stack. KOReader Sync and OPDS need the
   // reader stack on S3 devices because their deferred Wi-Fi transitions can
@@ -1120,18 +1118,15 @@ void setup() {
 #endif
   BoardConfig::holdPowerRails();
 
-  t1 = millis();
-
   const esp_reset_reason_t rawResetReason = esp_reset_reason();
   const esp_sleep_wakeup_cause_t rawWakeupCause = esp_sleep_get_wakeup_cause();
 
 #ifdef ENABLE_SERIAL_LOG
-  // Earliest possible Serial setup. The 250 ms stall before begin() lets the
-  // USB Serial/JTAG peripheral finish power-on and lets the host complete USB
-  // enumeration before we touch the CDC state — otherwise cold boot races
-  // and the host has to be physically replugged for logs to flow. Warm reboot
-  // worked without the delay because USB was already enumerated.
+#ifdef CROSSPOINT_WAIT_FOR_USB_SERIAL
+  // Development builds preserve reliable early CDC logs; release builds let
+  // enumeration proceed asynchronously so users do not pay this startup cost.
   delay(250);
+#endif
   // Web Serial sends file data in 256-byte chunks and waits for a 1-byte ACK.
   // Native USB CDC needs a larger queue because TinyUSB can deliver several
   // chunks before the cooperative transfer loop runs.
@@ -1193,6 +1188,24 @@ void setup() {
   // only on screens that explicitly allow the fallback.
   gpio.setSharedConfirmPowerShortPressEmitsPower(true);
   powerManager.begin();
+
+  const auto wakeupReason = gpio.getWakeupReason();
+#ifndef SIMULATOR
+  if (wakeupReason == HalGPIO::WakeupReason::PowerButton && !gpio.verifyPowerButtonWakeup()) {
+    LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
+    powerManager.startDeepSleep(gpio);
+  }
+#endif
+
+#ifndef SIMULATOR
+  const auto recoveryButton =
+      BoardConfig::isX4Pro() ? MappedInputManager::Button::Down : MappedInputManager::Button::Up;
+  const bool recoveryFirmwareMode = wakeupReason == HalGPIO::WakeupReason::PowerButton && !BoardConfig::isPaperMono() &&
+                                    mappedInputManager.isPressed(recoveryButton);
+#else
+  const bool recoveryFirmwareMode = false;
+#endif
+
   halTiltSensor.begin();
   halClock.begin();
 
@@ -1209,29 +1222,11 @@ void setup() {
 #endif
 #endif
 
-  // Verify the wake reason BEFORE the SD mount and settings loads. The power
-  // button must still be held when the check runs (released = back to sleep),
-  // so everything ahead of it extends the real-world hold requirement — and
-  // the SD mount (per-attempt power-cycle retries on some boards) is the
-  // slowest, most variable stage of boot. Verifying here needs only gpio +
-  // powerManager; the one setting involved ("short press = sleep" makes any
-  // tap a valid wake) comes from its NVS mirror since SETTINGS lives on the
-  // not-yet-mounted SD card.
-  const auto wakeupReason = gpio.getWakeupReason();
   LOG_INF("BOOT", "Wake route: %s", wakeupRouteName(wakeupReason));
   switch (wakeupReason) {
-    case HalGPIO::WakeupReason::PowerButton: {
-      const bool shortPressWakes = readWakeShortPressFromNvs();
-      const uint16_t requiredDuration = shortPressWakes ? CrossPointSettings::POWER_BUTTON_WAKE_SHORT_MS
-                                                        : CrossPointSettings::POWER_BUTTON_WAKE_LONG_MS;
-      LOG_INF("BOOT", "Power-button wake: verifying duration required=%u shortAllowed=%d", requiredDuration,
-              shortPressWakes);
-      if (!gpio.verifyPowerButtonWakeup(requiredDuration, shortPressWakes)) {
-        powerManager.startDeepSleep(gpio);
-      }
+    case HalGPIO::WakeupReason::PowerButton:
       wakePowerReleasePending = true;
       break;
-    }
     case HalGPIO::WakeupReason::AfterUSBPower:
       // TEMP: continue booting while diagnosing post-flash/reset behavior.
       // Normal behavior is to go back to sleep when USB power causes a cold boot.
@@ -1265,6 +1260,9 @@ void setup() {
   // power era used to correct queued reading-stats timestamps at sync time.
   WallClock::initAtBoot();
   APP_STATE.loadFromFile();
+  // Needs SETTINGS for the clock's UTC offset, so it cannot run any earlier.
+  BatteryDiagnosticLog::record(BatteryDiagnosticLog::Event::Wake);
+  const bool isSleepWake = wakeupReason == HalGPIO::WakeupReason::PowerButton;
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
   if (!isNetworkResume) {
     RECENT_BOOKS.loadFromFile();
@@ -1304,33 +1302,10 @@ void setup() {
   }
   Frontlight.begin(SETTINGS.frontlightBrightness, SETTINGS.frontlightWarmth, restoreLightOn);
 
-  // Re-sync the wake-hold NVS mirror with the freshly-loaded settings, covering
-  // a setting change followed by power loss without a clean sleep. (The wake
-  // verification itself already ran, pre-SD, further up.)
-  mirrorWakeShortPressToNvs();
-
-  // Recovery firmware mode: hold a side button together with Power to open the
-  // SD-card firmware update screen. X4 Pro uses BTN_DOWN because BTN_UP is GPIO0,
-  // an S3 strap pin that can read low during boot and false-trigger recovery.
-  bool recoveryFirmwareMode = false;
-  if (wakeupReason == HalGPIO::WakeupReason::PowerButton) {
-    // Refresh the cached button state a few times — isPressed() needs ~half a second to settle
-    // after boot per the HalGPIO contract. Use a millis-based deadline so we always wait the full
-    // settle window even if the loop body takes longer than expected on slow boots.
-    const unsigned long settleStart = millis();
-    while (millis() - settleStart < 500) {
-      gpio.update();
-      delay(10);
-    }
-    const bool recoveryButtonHeld =
-        BoardConfig::isX4Pro() ? gpio.isPressed(HalGPIO::BTN_DOWN) : gpio.isPressed(HalGPIO::BTN_UP);
-    if (recoveryButtonHeld) {
-      recoveryFirmwareMode = true;
-      LOG_INF("MAIN", "Recovery firmware mode (%s + POWER held at boot)", BoardConfig::isX4Pro() ? "DOWN" : "UP");
-    }
+  if (recoveryFirmwareMode) {
+    LOG_INF("MAIN", "Recovery firmware mode (%s + POWER held at boot)", BoardConfig::isX4Pro() ? "DOWN" : "UP");
   }
 
-  // First serial output only here to avoid timing inconsistencies for power button press duration verification
   LOG_DBG("MAIN", "Starting CrossInk version " CROSSINK_VERSION);
   logMemoryStats("Boot");
 
@@ -1341,7 +1316,6 @@ void setup() {
   // X4 Pro cuts its switched rails during sleep and wakes with a POWERON reset,
   // while C3 boards normally report DEEPSLEEP. HalGPIO normalizes both hardware
   // paths to PowerButton, so use that route with the one-shot persisted flag.
-  const bool isSleepWake = wakeupReason == HalGPIO::WakeupReason::PowerButton;
   const bool restoreQuickLockAfterWake = APP_STATE.quickLockResumePending && isSleepWake && !recoveryFirmwareMode &&
                                          !rebootedFromPanic && !isNetworkResume && !isSilentReboot;
   const auto quickLockResumeTrigger = static_cast<QuickLockTrigger>(APP_STATE.quickLockResumeTrigger);
@@ -1351,15 +1325,22 @@ void setup() {
     APP_STATE.quickLockResumePending = false;
     APP_STATE.quickLockResumeTrigger = static_cast<uint8_t>(QuickLockTrigger::None);
     APP_STATE.saveToFile();
-    mirrorWakeShortPressToNvs();
   }
   const BootResume resume = isNetworkResume                            ? BootResume::Network
                             : isSilentReboot                           ? BootResume::Silent
                             : isSleepWake && !APP_STATE.showBootScreen ? BootResume::SplashlessWake
                                                                        : BootResume::Splash;
+  bool isUc8279X3 = false;
+#ifndef SIMULATOR
+  isUc8279X3 = gpio.deviceIsX3() && BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX3Uc8279;
+#endif
+  const bool hasValidSleepFrame = resume == BootResume::SplashlessWake && isUc8279X3 && preflightSleepFrameBuffer();
+  const bool shouldRestoreSleepFrame =
+      resume == BootResume::SplashlessWake && (isUc8279X3 ? hasValidSleepFrame : Storage.exists(SLEEP_FRAME_FILE));
   bool allowFastInitialReaderRefresh = false;
 
-  setupDisplayAndFonts(resume != BootResume::Splash, resume != BootResume::Network, useReaderRenderStack);
+  setupDisplayAndFonts(SleepWakePolicy::shouldInitializeSeamlessly(resume, isUc8279X3, hasValidSleepFrame),
+                       resume != BootResume::Network, useReaderRenderStack);
   logBootHeap("display and selected fonts ready");
 
   switch (resume) {
@@ -1377,7 +1358,7 @@ void setup() {
       // us in a splashless-with-no-frame loop on the next boot.
       APP_STATE.showBootScreen = true;
       APP_STATE.saveToFile();
-      if (Storage.exists(SLEEP_FRAME_FILE) && loadSleepFrameBuffer()) {
+      if (shouldRestoreSleepFrame && loadSleepFrameBuffer()) {
         const bool useDifferentialRefresh = gpio.deviceIsX3();
         if (useDifferentialRefresh) {
           // begin() clears the X3 controller RAM, so restore the saved frame as
@@ -1386,12 +1367,7 @@ void setup() {
         }
 
         const auto pageHeight = renderer.getScreenHeight();
-        if (SETTINGS.readerDarkMode != 0) {
-          renderer.drawImageInverted(LoadingIcon, 0, pageHeight - LOADINGICON_HEIGHT, LOADINGICON_WIDTH,
-                                     LOADINGICON_HEIGHT);
-        } else {
-          renderer.drawImage(LoadingIcon, 0, pageHeight - LOADINGICON_HEIGHT, LOADINGICON_WIDTH, LOADINGICON_HEIGHT);
-        }
+        renderer.drawImage(LoadingIcon, 0, pageHeight - LOADINGICON_HEIGHT, LOADINGICON_WIDTH, LOADINGICON_HEIGHT);
         if (useDifferentialRefresh) {
           renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
           allowFastInitialReaderRefresh = true;
@@ -1403,6 +1379,14 @@ void setup() {
             allowFastInitialReaderRefresh = true;
           }
         }
+      } else if (isUc8279X3 && hasValidSleepFrame) {
+        // The frame passed the size preflight but could not be read after display
+        // setup. Do one clean, device-specific recovery rather than painting
+        // differentially against an invalid controller baseline.
+        LOG_ERR("BOOT", "Quick Resume frame load failed; rebuilding UC8279 X3 display baseline");
+        Storage.remove(SLEEP_FRAME_FILE);
+        renderer.clearScreen();
+        renderer.displayBuffer(HalDisplay::HALF_REFRESH);
       } else if (shouldClearX4WakeGhosting() && SETTINGS.fadingFix != 0) {
         LOG_INF("BOOT", "X4 wake: clearing retained sleep image with half refresh");
         renderer.clearScreen();
@@ -1547,7 +1531,15 @@ void loop() {
     // while every filesystem/UI/global path remains suspended by the activity.
     (void)UsbSerialFileTransfer::process(false);
     activityManager.loop();
-    delay(10);
+    if (activityManager.preventAutoSleep()) {
+      powerManager.setPowerSaving(false);
+      delay(10);
+    } else {
+      // No host is active, so a slower loop is safe. The activity itself times
+      // out the raw-storage handoff rather than entering deep sleep detached.
+      powerManager.setPowerSaving(true);
+      delay(50);
+    }
     return;
   }
 
@@ -1591,37 +1583,27 @@ void loop() {
     return;
   }
 
+  const bool modalOwnsInput = activityManager.blocksGlobalInput();
+
   // Keep Power + Down screenshot-only. The configurable chord below uses Up,
-  // so it cannot replace or double-fire this one.
-  static bool screenshotButtonsReleased = true;
-  static bool screenshotComboActive = false;
-  // Consume both halves of the screenshot chord through their releases. In
-  // particular, releasing Power first must not let the later Down release
-  // navigate a newly opened overlay or reader page.
-  if (screenshotComboActive) {
-    if (gpio.isPressed(HalGPIO::BTN_POWER) || gpio.isPressed(HalGPIO::BTN_DOWN)) return;
-    screenshotButtonsReleased = true;
-    screenshotComboActive = false;
-    return;
+  // so it cannot replace or double-fire this one. The controller consumes both
+  // release orders even when an open modal blocks the screenshot itself.
+  const bool screenshotActionBlocked = modalOwnsInput || buttonShortcutController.isQuickLocked();
+  const auto screenshotChordResult = buttonShortcutController.updatePowerDown(
+      gpio.isPressed(HalGPIO::BTN_POWER), gpio.isPressed(HalGPIO::BTN_DOWN), screenshotActionBlocked);
+  if (screenshotChordResult.event == ButtonShortcutController::Event::Screenshot) {
+    RenderLock lock;
+    ScreenshotUtil::takeScreenshot(renderer);
   }
-  if (!buttonShortcutController.isQuickLocked() && gpio.isPressed(HalGPIO::BTN_POWER) &&
-      gpio.isPressed(HalGPIO::BTN_DOWN)) {
-    screenshotComboActive = true;
-    if (screenshotButtonsReleased) {
-      screenshotButtonsReleased = false;
-      screenshotComboHandled = true;
-      mappedInputManager.suppressNextPowerConfirmRelease();
-      RenderLock lock;
-      ScreenshotUtil::takeScreenshot(renderer);
-    }
+  if (screenshotChordResult.consumeInput) {
     return;
   }
 
   const bool touchscreenEscapeHatch =
-      gpio.hasTouch() && SETTINGS.disableReaderTouchscreen && activityManager.isReaderActivity();
+      !modalOwnsInput && gpio.hasTouch() && SETTINGS.disableReaderTouchscreen && activityManager.isReaderActivity();
   const auto sideButtonShortcutResult = buttonShortcutController.updateUpDown(
       millis(), gpio.isPressed(HalGPIO::BTN_UP), gpio.isPressed(HalGPIO::BTN_DOWN), configuredSideButtonChordAction(),
-      touchscreenEscapeHatch);
+      touchscreenEscapeHatch, modalOwnsInput);
   if (dispatchButtonShortcut(sideButtonShortcutResult) || sideButtonShortcutResult.consumeInput) {
     lastActivityTime = millis();
     return;
@@ -1633,8 +1615,9 @@ void loop() {
                                  gpio.getPowerButtonHeldTime() < SETTINGS.getPowerButtonLongPressDuration();
   const bool quickLockOnShortPower =
       shortPowerRelease && SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::QUICK_LOCK;
-  const auto shortcutResult = buttonShortcutController.update(
-      millis(), powerPressed, chordButtonPressed, shortPowerRelease, quickLockOnShortPower, configuredChordAction());
+  const auto shortcutResult =
+      buttonShortcutController.update(millis(), powerPressed, chordButtonPressed, shortPowerRelease,
+                                      quickLockOnShortPower, configuredChordAction(), modalOwnsInput);
   if (dispatchButtonShortcut(shortcutResult)) {
     lastActivityTime = millis();
     return;

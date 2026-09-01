@@ -36,6 +36,17 @@ void CrossPointState::clearRecentSleepHistory() {
   recentSleepFill = 0;
 }
 
+void CrossPointState::setPendingOverlayResume(PendingOverlayResume value) {
+  pendingOverlayResume = std::move(value);
+  saveToFile();
+}
+
+bool CrossPointState::consumePendingOverlayResume(PendingOverlayResume& value) {
+  if (!consumePendingOverlayResumeOnce(pendingOverlayResume, value)) return false;
+  saveToFile();
+  return true;
+}
+
 bool CrossPointState::saveToFile() const {
   std::lock_guard<std::mutex> storeLock(storeMutex);
   std::lock_guard<std::mutex> stateLock(_mutex);
@@ -89,6 +100,16 @@ void CrossPointState::toJson(JsonDocument& doc) const {
   doc["showBootScreen"] = showBootScreen;
   doc["quickLockResumePending"] = quickLockResumePending;
   doc["quickLockResumeTrigger"] = quickLockResumeTrigger;
+  doc["pendingOverlayOrigin"] = static_cast<uint8_t>(pendingOverlayResume.origin);
+  doc["pendingOverlayType"] = static_cast<uint8_t>(pendingOverlayResume.overlay);
+  doc["pendingOverlayTab"] = pendingOverlayResume.tab;
+  doc["pendingOverlayPane"] = pendingOverlayResume.pane;
+  doc["pendingOverlaySelection"] = pendingOverlayResume.selectedIndex;
+  doc["pendingOverlayScroll"] = pendingOverlayResume.scrollPosition;
+  doc["pendingOverlayBookPath"] = pendingOverlayResume.bookPath;
+  doc["pendingOverlayReturnHome"] = pendingOverlayResume.returnHomeAfterReaderFlow;
+  doc["pendingOverlayReaderOrientation"] = pendingOverlayResume.readerOrientation;
+  doc["pendingOverlayPreserveReaderOrientation"] = pendingOverlayResume.preserveReaderOrientation;
 }
 
 bool CrossPointState::fromJson(JsonVariantConst doc) {
@@ -119,6 +140,17 @@ bool CrossPointState::fromJson(JsonVariantConst doc) {
   showBootScreen = doc["showBootScreen"] | true;
   quickLockResumePending = doc["quickLockResumePending"] | false;
   quickLockResumeTrigger = doc["quickLockResumeTrigger"] | static_cast<uint8_t>(0);
+  pendingOverlayResume.origin =
+      static_cast<PendingOverlayOrigin>(doc["pendingOverlayOrigin"] | static_cast<uint8_t>(0));
+  pendingOverlayResume.overlay = static_cast<PendingOverlayType>(doc["pendingOverlayType"] | static_cast<uint8_t>(0));
+  pendingOverlayResume.tab = doc["pendingOverlayTab"] | static_cast<uint8_t>(0);
+  pendingOverlayResume.pane = doc["pendingOverlayPane"] | static_cast<uint8_t>(0);
+  pendingOverlayResume.selectedIndex = doc["pendingOverlaySelection"] | static_cast<int16_t>(0);
+  pendingOverlayResume.scrollPosition = doc["pendingOverlayScroll"] | static_cast<int16_t>(0);
+  pendingOverlayResume.bookPath = doc["pendingOverlayBookPath"] | "";
+  pendingOverlayResume.returnHomeAfterReaderFlow = doc["pendingOverlayReturnHome"] | false;
+  pendingOverlayResume.readerOrientation = doc["pendingOverlayReaderOrientation"] | static_cast<uint8_t>(0);
+  pendingOverlayResume.preserveReaderOrientation = doc["pendingOverlayPreserveReaderOrientation"] | false;
   return true;
 }
 

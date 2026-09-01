@@ -132,6 +132,11 @@ class HomeActivity final : public Activity {
   void render(RenderLock&&) override;
   bool isHomeActivity() const override { return true; }
   bool allowPowerAsConfirmInReaderMode() const override { return quickActionsPopup.isActive(); }
+  bool blocksGlobalInput() const override { return quickActionsPopup.isActive(); }
   bool handleShortcutAction(CrossPointSettings::SHORT_PWRBTN action) override;
   std::string getCurrentBookPath() const override;
+  std::string getCurrentBookTitle() const override;
+  std::unique_ptr<Activity> createFrontlightReadingStatsActivity() override;
+  void onFrontlightPanelClosed() override;
+  bool handleFrontlightPanelResult(const FrontlightPanelResult& result) override;
 };

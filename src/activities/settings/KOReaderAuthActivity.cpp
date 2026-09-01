@@ -27,6 +27,9 @@ void KOReaderAuthActivity::onWifiSelectionComplete(const bool success) {
     return;
   }
 
+  WiFi.setSleep(false);
+  LOG_DBG("KOAuth", "WiFi sleep disabled for authentication");
+
   sdFontSystem.releaseForNetwork(renderer);
 
   {

@@ -85,7 +85,7 @@ class CrossPointWebServer {
 
   // File scanning
   using FileVisitor = void (*)(const FileInfo& info, void* context);
-  void scanFiles(const char* path, FileVisitor visitor, void* context) const;
+  bool scanFiles(const char* path, FileVisitor visitor, void* context) const;
   String formatFileSize(size_t bytes) const;
   bool isEpubFile(const String& filename) const;
 

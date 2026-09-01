@@ -80,6 +80,28 @@ TEST(ButtonShortcutController, PageTurnChordEmitsPageTurn) {
   EXPECT_EQ(controller.update(1U, true, true, false, false, Action::PageTurn).event, Event::PageTurn);
 }
 
+TEST(ButtonShortcutController, UpDownChordWorksWithoutTouchscreenEscapeHatch) {
+  ButtonShortcutController controller;
+  using Action = ButtonShortcutController::ChordAction;
+  using Event = ButtonShortcutController::Event;
+
+  const auto result = controller.updateUpDown(1U, true, true, Action::QuickActions, false);
+  EXPECT_EQ(result.event, Event::ConfiguredAction);
+  EXPECT_TRUE(result.consumeInput);
+  EXPECT_EQ(result.action, Action::QuickActions);
+}
+
+TEST(ButtonShortcutController, IdleUpDownDoesNotPreemptReaderQuickLockUnlock) {
+  ButtonShortcutController controller;
+  controller.toggleQuickLock(1U, QuickLockTrigger::LongMenu);
+
+  const auto result = controller.updateUpDown(2U, false, false, ButtonShortcutController::ChordAction::Disabled, false);
+
+  EXPECT_EQ(result.event, ButtonShortcutController::Event::None);
+  EXPECT_FALSE(result.consumeInput);
+  EXPECT_TRUE(controller.isQuickLocked());
+}
+
 TEST(ButtonShortcutController, EveryChordActionConsumesBothReleaseOrders) {
   using Action = ButtonShortcutController::ChordAction;
   constexpr Action actions[] = {
@@ -108,5 +130,56 @@ TEST(ButtonShortcutController, EveryChordActionConsumesBothReleaseOrders) {
       const auto afterRelease = controller.update(4U, false, false, false, false, action);
       EXPECT_EQ(afterRelease.consumeInput, action == Action::QuickLock);
     }
+  }
+}
+
+TEST(ButtonShortcutController, ModalConsumesPowerUpChordThroughBothReleases) {
+  ButtonShortcutController controller;
+  using Action = ButtonShortcutController::ChordAction;
+
+  const auto started = controller.update(1U, true, true, false, false, Action::QuickLock, true);
+  EXPECT_EQ(started.event, ButtonShortcutController::Event::None);
+  EXPECT_TRUE(started.consumeInput);
+  EXPECT_FALSE(controller.isQuickLocked());
+  EXPECT_TRUE(controller.update(2U, false, true, false, false, Action::QuickLock, true).consumeInput);
+  EXPECT_TRUE(controller.update(3U, false, false, false, false, Action::QuickLock, true).consumeInput);
+  EXPECT_FALSE(controller.update(4U, false, false, false, false, Action::QuickLock, false).consumeInput);
+}
+
+TEST(ButtonShortcutController, ModalConsumesPowerDownScreenshotChordThroughBothReleaseOrders) {
+  for (const bool releasePowerFirst : {false, true}) {
+    ButtonShortcutController controller;
+    const auto started = controller.updatePowerDown(true, true, true);
+    EXPECT_EQ(started.event, ButtonShortcutController::Event::None);
+    EXPECT_TRUE(started.consumeInput);
+    EXPECT_TRUE(controller.updatePowerDown(!releasePowerFirst, releasePowerFirst, true).consumeInput);
+    EXPECT_TRUE(controller.updatePowerDown(false, false, true).consumeInput);
+    EXPECT_FALSE(controller.updatePowerDown(false, false, false).consumeInput);
+  }
+}
+
+TEST(ButtonShortcutController, QuickLockConsumesPowerDownScreenshotChord) {
+  ButtonShortcutController controller;
+  controller.toggleQuickLock(1U, QuickLockTrigger::ShortPower);
+
+  const auto result = controller.updatePowerDown(true, true, true);
+
+  EXPECT_EQ(result.event, ButtonShortcutController::Event::None);
+  EXPECT_TRUE(result.consumeInput);
+  EXPECT_TRUE(controller.isQuickLocked());
+}
+
+TEST(ButtonShortcutController, ModalConsumesUpDownChordThroughBothReleaseOrders) {
+  using Action = ButtonShortcutController::ChordAction;
+
+  for (const bool releaseUpFirst : {false, true}) {
+    ButtonShortcutController controller;
+    const auto started = controller.updateUpDown(1U, true, true, Action::QuickActions, false, true);
+    EXPECT_EQ(started.event, ButtonShortcutController::Event::None);
+    EXPECT_TRUE(started.consumeInput);
+    EXPECT_TRUE(
+        controller.updateUpDown(2U, !releaseUpFirst, releaseUpFirst, Action::QuickActions, false, true).consumeInput);
+    EXPECT_TRUE(controller.updateUpDown(3U, false, false, Action::QuickActions, false, true).consumeInput);
+    EXPECT_FALSE(controller.updateUpDown(4U, false, false, Action::QuickActions, false, false).consumeInput);
   }
 }

@@ -14,8 +14,7 @@
 
 class DictionaryWordSelectActivity final : public Activity {
  public:
-  using ReaderBackgroundRenderFn = void (*)(void* context);
-  using ReaderPageReloadFn = std::unique_ptr<Page> (*)(void* context);
+  using ReaderPageLoadFn = std::unique_ptr<Page> (*)(void* context, int pageOffset);
 
   // reservedBottomHeight is the post-bezel reserved space the caller (EpubReader)
   // left below the page text — status-bar height OR auto-page-turn indicator
@@ -24,17 +23,17 @@ class DictionaryWordSelectActivity final : public Activity {
   // path (no status bar, no auto-turn label visible during word-select).
   explicit DictionaryWordSelectActivity(
       GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Page> page, int marginLeft, int marginTop,
-      std::string cachePath, std::string nextPageFirstWord = "", bool framebufferContainsPage = false,
-      int reservedBottomHeight = 0, int initialTouchX = -1, int initialTouchY = -1, bool autoLookupInitialWord = false,
-      const char* dictionaryFontFamilyName = nullptr, uint8_t dictionaryFontPointSize = 0,
-      void* readerContext = nullptr, ReaderBackgroundRenderFn readerBackgroundRender = nullptr,
-      ReaderPageReloadFn readerPageReload = nullptr)
+      std::string cachePath, std::string nextPageFirstWord = "", bool hasNextReaderPage = false,
+      bool framebufferContainsPage = false, int reservedBottomHeight = 0, int initialTouchX = -1,
+      int initialTouchY = -1, bool autoLookupInitialWord = false, const char* dictionaryFontFamilyName = nullptr,
+      uint8_t dictionaryFontPointSize = 0, void* readerContext = nullptr, ReaderPageLoadFn readerPageLoad = nullptr)
       : Activity("DictionaryWordSelect", renderer, mappedInput),
         page(std::move(page)),
         marginLeft(marginLeft),
         marginTop(marginTop),
         cachePath(std::move(cachePath)),
         nextPageFirstWord(std::move(nextPageFirstWord)),
+        hasNextReaderPage_(hasNextReaderPage),
         // DictionaryLookupController borrows this activity-owned path.  Qualify
         // the member so it cannot instead bind to the constructor parameter,
         // which is destroyed as soon as construction completes.
@@ -46,8 +45,7 @@ class DictionaryWordSelectActivity final : public Activity {
         autoLookupInitialWord_(autoLookupInitialWord),
         dictionaryFontPointSize_(dictionaryFontPointSize),
         readerContext_(readerContext),
-        readerBackgroundRender_(readerBackgroundRender),
-        readerPageReload_(readerPageReload) {
+        readerPageLoad_(readerPageLoad) {
     if (dictionaryFontFamilyName) {
       std::strncpy(dictionaryFontFamilyName_, dictionaryFontFamilyName, sizeof(dictionaryFontFamilyName_) - 1);
     }
@@ -65,6 +63,7 @@ class DictionaryWordSelectActivity final : public Activity {
   int marginTop;
   std::string cachePath;
   std::string nextPageFirstWord;
+  bool hasNextReaderPage_ = false;
 
   struct WorkingSet {
     std::unique_ptr<WordSelectNavigator::WordInfo[]> words;
@@ -133,13 +132,22 @@ class DictionaryWordSelectActivity final : public Activity {
   char dictionaryFontFamilyName_[64] = "";
   uint8_t dictionaryFontPointSize_ = 0;
   bool touchDragLookup_ = false;
+  bool touchDragHasMoved_ = false;
+  int touchDragStartX_ = 0;
+  int touchDragStartY_ = 0;
   void* readerContext_ = nullptr;
-  ReaderBackgroundRenderFn readerBackgroundRender_ = nullptr;
-  ReaderPageReloadFn readerPageReload_ = nullptr;
+  ReaderPageLoadFn readerPageLoad_ = nullptr;
+  int activePageOffset_ = 0;
   bool workingSetSuspended_ = false;
   bool workingSetMemoryError_ = false;
   DictionaryClippingRequest pendingClippingRequest_{};
   bool hasPendingClippingRequest_ = false;
+  bool hasCrossPageSelection_ = false;
+  DictionaryClippingRequest crossPageFirstRequest_{};
+  std::string crossPageLookupPrefix_;
+  size_t crossPageLookupWordCount_ = 0;
+  std::string crossPageMergedFirstWord_;
+  bool crossPageFirstWordWasMerged_ = false;
   int suspendedSelectionX_ = -1;
   int suspendedSelectionY_ = -1;
 
@@ -179,7 +187,14 @@ class DictionaryWordSelectActivity final : public Activity {
   bool allocateWorkingSet();
   bool extractWords();
   bool mergeHyphenatedWords();
+  bool captureCurrentClippingRequest(DictionaryClippingRequest& request) const;
   bool captureClippingRequest();
+  bool continueTouchSelectionOnNextPage();
+  bool selectFirstWordForTouchDrag();
+  void finishTouchLookupOnCurrentPage(const std::string& phrase, size_t wordCount,
+                                      const DictionaryClippingRequest& request);
+  std::string finishTouchLookupPhrase();
+  void resetCrossPageSelection();
   void finishWithClippingRequest();
   bool appendText(const char* text, size_t length, uint16_t& offset);
   bool appendMergedText(const char* first, size_t firstLength, const char* second, size_t secondLength,

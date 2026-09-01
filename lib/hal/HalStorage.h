@@ -46,6 +46,7 @@ class HalStorage {
   void installDateTimeCallback(const uint8_t* utcOffsetQuarterHoursBiased);
 
   bool beginUsbDrive();
+  bool disconnectUsbDriveHost();
   void endUsbDrive();
   UsbDriveState usbDriveState() const;
 
@@ -69,12 +70,16 @@ class HalStorage {
   class StorageLock;  // private class, used internally
 
  private:
+#if FREEINK_CAP_USB_MSC
   class UsbDriveContext;
+#endif
   static HalStorage instance;
 
   bool initialized = false;
   SemaphoreHandle_t storageMutex = nullptr;
+#if FREEINK_CAP_USB_MSC
   std::unique_ptr<UsbDriveContext> usbDriveContext;
+#endif
 };
 
 #define Storage HalStorage::getInstance()
@@ -91,6 +96,9 @@ class HalFile : public Print {
   // Invalid handles otherwise represent both ordinary EOF/open failure and a
   // wrapper-allocation failure. Registry scans need to distinguish them.
   bool allocationFailed_ = false;
+  // SdFat returns an invalid child for both clean end-of-directory and a
+  // failed directory read. Preserve which case ended the latest iteration.
+  bool iterationFailed_ = false;
 
   explicit HalFile(ImplPtr impl);
   static void* allocateImplStorage();
@@ -125,6 +133,7 @@ class HalFile : public Print {
   bool close();
   HalFile openNextFile();
   bool allocationFailed() const { return allocationFailed_; }
+  bool iterationFailed() const { return iterationFailed_; }
   bool isOpen() const;
   operator bool() const;
 };

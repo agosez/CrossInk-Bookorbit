@@ -61,6 +61,7 @@ class ActivityManager {
   // Set when an overlay is closed specifically to hand control back to the
   // reader's menu. It must wait until the reader is current again.
   bool openReaderMenuAfterPop = false;
+  int16_t pendingReaderMenuAction = -1;
 
   // A one-shot Home selection to restore after Settings replaces Home. This
   // is intentionally not persisted as recent-book order.
@@ -84,8 +85,13 @@ class ActivityManager {
   // Whether to trigger a render after the current loop()
   // This variable must only be set by the main loop, to avoid race conditions
   std::atomic<bool> requestedUpdate{false};
+  // A popped full-screen child leaves its pixels in the framebuffer until the
+  // restored activity renders. Partial-screen overlays must not preserve that
+  // stale child as their backdrop.
+  std::atomic<bool> restoredActivityNeedsRender{false};
 
   bool handleGlobalHomeGesture();
+  bool restoreBackdropBehindCurrentOverlay();
 
  public:
   explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -109,7 +115,7 @@ class ActivityManager {
   void goToUsbDrive();
   bool resumeFileTransferFromNetworkBoot(uint32_t payload);
   void goToNearbyStatsSync();
-  void goToNearbyBookSend(std::string path, bool returnToReader);
+  bool goToNearbyBookSend(std::string path, bool returnToReader);
   void goToNearbyBookReceive();
   void goToSettings(bool dismissOnUpSwipe = false);
   void goToFileBrowser(std::string path = {});
@@ -120,6 +126,7 @@ class ActivityManager {
   void goToBookOrbitAuth();
   void goToReader(std::string path, bool suppressBackRelease = false, bool allowFastInitialRefresh = false,
                   bool cleanImageBaseOnEntry = false);
+  void goToReaderAndRunMenuAction(std::string path, uint8_t action);
   void goToSleep(bool fromTimeout = false);
   void goToBoot();
   void goToFullScreenMessage(std::string message, EpdFontFamily::Style style = EpdFontFamily::REGULAR);
@@ -135,6 +142,9 @@ class ActivityManager {
 
   bool preventAutoSleep() const;
   bool requiresExclusiveStorageLoop() const;
+  // The active activity has an open modal that owns all global shortcuts and
+  // gestures until it is dismissed.
+  bool blocksGlobalInput() const;
   bool isHomeActivity() const;
   bool isReaderActivity() const;
   bool openReaderSettingsForTouchscreenEscapeHatch();

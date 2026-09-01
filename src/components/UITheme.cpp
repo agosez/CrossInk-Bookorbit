@@ -270,7 +270,12 @@ int UITheme::getProgressBarHeight() {
 }
 
 int UITheme::getTopStatusBarInset(const GfxRenderer& renderer) {
-#if defined(FREEINK_DEVICE_X4PRO) && FREEINK_DEVICE_X4PRO
+#if defined(FREEINK_DEVICE_STICKY) && FREEINK_DEVICE_STICKY
+  // The Sticky panel remains usable closer to its top edge than the shared
+  // status-bar layout assumes. Keep the clock and battery in that space.
+  (void)renderer;
+  return -5;
+#elif defined(FREEINK_DEVICE_X4PRO) && FREEINK_DEVICE_X4PRO
   // The X4 Pro's panel sits slightly recessed behind the portrait top bezel.
   return renderer.getOrientation() == GfxRenderer::Orientation::Portrait ? 5 : 0;
 #endif

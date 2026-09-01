@@ -4,15 +4,11 @@ set -e
 
 cd "$(dirname "$0")"
 
-EMOJI_FONT="../builtinFonts/source/NotoEmoji/NotoEmoji-Regular.ttf"
 SYMBOLS_FONT="../builtinFonts/source/NotoSymbols/NotoSansSymbols-Regular.ttf"
 PHM_FONT="../builtinFonts/source/NotoSansCJKsc/NotoSansCJKsc-Regular.otf"
 
 # Additional Unicode intervals to include beyond the default Latin/Cyrillic/math set.
 # 0x2669-0x266F: Music notes and accidentals (♩♪♫♬♭♮♯)
-# Emoticons subset, excluding lower-value faces to keep firmware size down.
-# 0x1F44B-0x1F44F: Hand gesture emojis (👋👌👍👎👏)
-# 0x2764: Heart symbol (❤️)
 # 0x03BB: Greek lambda (λ)
 # 0x0410-0x0414, 0x0418, 0x041B, 0x041D-0x0423, 0x0425, 0x0427,
 # 0x042B-0x042C, 0x042E-0x0432, 0x0434-0x0435, 0x0437, 0x043A,
@@ -40,29 +36,16 @@ COMMON_FALLBACK_INTERVALS=(
   --additional-intervals 0x2113,0x2113
 )
 
-EMOJI_ONLY_INTERVALS=(
+MUSIC_SYMBOL_INTERVALS=(
   --additional-intervals 0x2669,0x266F
-  --additional-intervals 0x1F600,0x1F607
-  --additional-intervals 0x1F609,0x1F614
-  --additional-intervals 0x1F618,0x1F618
-  --additional-intervals 0x1F61A,0x1F61A
-  --additional-intervals 0x1F61C,0x1F61D
-  --additional-intervals 0x1F620,0x1F622
-  --additional-intervals 0x1F624,0x1F625
-  --additional-intervals 0x1F629,0x1F629
-  --additional-intervals 0x1F62C,0x1F62E
-  --additional-intervals 0x1F631,0x1F635
-  --additional-intervals 0x1F641,0x1F642
-  --additional-intervals 0x1F644,0x1F644
-  --additional-intervals 0x1F44B,0x1F44F
-  --additional-intervals 0x2764,0x2764
 )
 
-BASE_FALLBACK_INTERVALS=(
+READING_FALLBACK_INTERVALS=(
   "${COMMON_FALLBACK_INTERVALS[@]}"
-  "${EMOJI_ONLY_INTERVALS[@]}"
+  "${MUSIC_SYMBOL_INTERVALS[@]}"
 )
 
+# CJK for PHM
 PHM_INTERVALS=(
   --additional-intervals 0x4F1A,0x4F1A
   --additional-intervals 0x53BB,0x53BB
@@ -104,27 +87,11 @@ CHAREINK_FALLBACK_RANGES=(
   0x2113,0x2113
 )
 
-EMOJI_FALLBACK_RANGES=(
-  0x1F600,0x1F607
-  0x1F609,0x1F614
-  0x1F618,0x1F618
-  0x1F61A,0x1F61A
-  0x1F61C,0x1F61D
-  0x1F620,0x1F622
-  0x1F624,0x1F625
-  0x1F629,0x1F629
-  0x1F62C,0x1F62E
-  0x1F631,0x1F635
-  0x1F641,0x1F642
-  0x1F644,0x1F644
-  0x1F44B,0x1F44F
-  0x2764,0x2764
-)
-
 SYMBOL_FALLBACK_RANGES=(
   0x2669,0x266F
 )
 
+# CJK for PHM
 PHM_FALLBACK_RANGES=(
   0x4F1A,0x4F1A
   0x53BB,0x53BB
@@ -146,7 +113,7 @@ PHM_FALLBACK_RANGES=(
 
 READING_FONT_SIZES=(8 9 10 12 14 16 18 20)
 READING_FONT_STYLES=("Regular" "Bold" "Italic" "BoldItalic")
-READING_FONT_RENDER_ARGS=(--2bit --compress --pnum --darken-aa)
+READING_FONT_RENDER_ARGS=(--2bit --compress --pnum --darken-aa --zopfli)
 
 font_include_args() {
   local face_index="$1"
@@ -160,9 +127,7 @@ generate_family() {
   local family_name="$1"
   local source_dir="$2"
   local source_prefix="$3"
-  local output_dir="$4"
-  local include_fallbacks="$5"
-  local use_chareink_common_fallback="$6"
+  local use_chareink_common_fallback="$4"
 
   for size in ${READING_FONT_SIZES[@]}; do
     for style in ${READING_FONT_STYLES[@]}; do
@@ -170,27 +135,22 @@ generate_family() {
       style_lower="$(echo $style | tr '[:upper:]' '[:lower:]')"
       local font_name="${family_name}_${size}_${style_lower}"
       local font_path="../builtinFonts/source/${source_dir}/${source_prefix}-${style}.ttf"
-      local output_path="${output_dir}/${font_name}.h"
+      local output_path="../builtinFonts/${font_name}.h"
       local font_stack=("$font_path")
-      local interval_args=()
+      local interval_args=("${READING_FALLBACK_INTERVALS[@]}")
       local include_args=()
 
-      if [[ "$include_fallbacks" == "yes" ]]; then
-        interval_args+=("${BASE_FALLBACK_INTERVALS[@]}")
-        if [[ "$use_chareink_common_fallback" == "yes" ]]; then
-          font_stack+=("../builtinFonts/source/ChareInk7/ChareInk7-${style}.ttf")
-          include_args+=($(font_include_args $(( ${#font_stack[@]} - 1 )) "${CHAREINK_FALLBACK_RANGES[@]}"))
-        fi
-        font_stack+=("$EMOJI_FONT")
-        include_args+=($(font_include_args $(( ${#font_stack[@]} - 1 )) "${EMOJI_FALLBACK_RANGES[@]}"))
-        font_stack+=("$SYMBOLS_FONT")
-        include_args+=($(font_include_args $(( ${#font_stack[@]} - 1 )) "${SYMBOL_FALLBACK_RANGES[@]}"))
+      if [[ "$use_chareink_common_fallback" == "yes" ]]; then
+        font_stack+=("../builtinFonts/source/ChareInk7/ChareInk7-${style}.ttf")
+        include_args+=($(font_include_args $(( ${#font_stack[@]} - 1 )) "${CHAREINK_FALLBACK_RANGES[@]}"))
+      fi
+      font_stack+=("$SYMBOLS_FONT")
+      include_args+=($(font_include_args $(( ${#font_stack[@]} - 1 )) "${SYMBOL_FALLBACK_RANGES[@]}"))
 
-        if [[ "$style" == "Regular" ]]; then
-          interval_args+=("${PHM_INTERVALS[@]}")
-          font_stack+=("$PHM_FONT")
-          include_args+=($(font_include_args $(( ${#font_stack[@]} - 1 )) "${PHM_FALLBACK_RANGES[@]}"))
-        fi
+      if [[ "$style" == "Regular" ]]; then
+        interval_args+=("${PHM_INTERVALS[@]}")
+        font_stack+=("$PHM_FONT")
+        include_args+=($(font_include_args $(( ${#font_stack[@]} - 1 )) "${PHM_FALLBACK_RANGES[@]}"))
       fi
 
       python fontconvert.py $font_name $size "${font_stack[@]}" "${interval_args[@]}" "${include_args[@]}" "${READING_FONT_RENDER_ARGS[@]}" > $output_path
@@ -199,26 +159,18 @@ generate_family() {
   done
 }
 
-generate_reading_variant() {
-  local output_dir="$1"
-  local include_fallbacks="$2"
-  local label="$3"
-
-  mkdir -p "$output_dir"
-  echo "Generating ${label} font variants..."
-  generate_family lexenddeca LexendDeca LexendDeca "$output_dir" "$include_fallbacks" yes
-  generate_family bitter Bitter Bitter "$output_dir" "$include_fallbacks" yes
-  generate_family charein ChareInk7 ChareInk7 "$output_dir" "$include_fallbacks" no
+generate_reading_fonts() {
+  echo "Generating built-in reading fonts..."
+  generate_family lexenddeca LexendDeca LexendDeca yes
+  generate_family bitter Bitter Bitter yes
+  generate_family charein ChareInk7 ChareInk7 no
   echo ""
-  echo "${label} variants complete."
+  echo "Built-in reading fonts complete."
   echo ""
 }
 
-# Reading font variants:
-#   builtinFonts/             default: emoji/symbol fallback + PHM CJK fallback
-#   builtinFonts/noemoji/     OMIT_EMOJI_FONTS: primary fonts only, no emoji and no PHM CJK
-generate_reading_variant ../builtinFonts yes "default"
-generate_reading_variant ../builtinFonts/noemoji no "no-emoji"
+# Built-in reader fonts retain the PHM fallback ranges, but exclude emoticons.
+generate_reading_fonts
 
 # UI Font - Inter
 

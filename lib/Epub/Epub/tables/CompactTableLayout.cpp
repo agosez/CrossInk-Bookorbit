@@ -194,14 +194,17 @@ bool CompactTableLayout::emitLine(std::array<LineToken, MAX_ROW_TOKENS>& line, c
   std::vector<int16_t> xPositions;
   std::vector<EpdFontFamily::Style> styles;
   std::vector<uint8_t> flags;
+  std::vector<bool> hasSpaceBefore;
   words.reserve(lineCount);
   xPositions.reserve(lineCount);
   styles.reserve(lineCount);
+  hasSpaceBefore.reserve(lineCount);
   bool anyFlags = false;
   for (uint16_t i = 0; i < lineCount; ++i) {
     words.emplace_back(buffer_.get() + line[i].offset, line[i].length);
     styles.push_back(line[i].style);
     flags.push_back(line[i].flags);
+    hasSpaceBefore.push_back(i > 0 && !line[i].attachToPrevious);
     anyFlags = anyFlags || line[i].flags != 0;
   }
 
@@ -250,7 +253,7 @@ bool CompactTableLayout::emitLine(std::array<LineToken, MAX_ROW_TOKENS>& line, c
   }
 
   auto owned = std::unique_ptr<TextBlock>(new (std::nothrow) TextBlock(
-      words, xPositions, styles, {}, {}, {}, anyFlags ? flags : std::vector<uint8_t>{}, style));
+      words, xPositions, styles, {}, {}, {}, anyFlags ? flags : std::vector<uint8_t>{}, hasSpaceBefore, style));
   if (!owned || !owned->valid()) {
     LOG_ERR("EHP", "Compact table TextBlock allocation failed (%u words)", lineCount);
     allocationFailure_ = true;

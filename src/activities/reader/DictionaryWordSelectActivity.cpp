@@ -16,6 +16,7 @@
 #include <limits>
 
 #include "../settings/DictionarySelectActivity.h"
+#include "ClipSelectionPaging.h"
 #include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
 #include "MappedInputManager.h"
@@ -227,6 +228,8 @@ bool DictionaryWordSelectActivity::buildWorkingSet(const bool consumeInitialConf
       return false;
     }
     touchDragLookup_ = navigator.beginTouchMultiSelect();
+    touchDragStartX_ = initialTouchX_;
+    touchDragStartY_ = initialTouchY_;
   }
 #else
   navigator.setTouchDragCursorVisible(false);
@@ -235,7 +238,7 @@ bool DictionaryWordSelectActivity::buildWorkingSet(const bool consumeInitialConf
 }
 
 void DictionaryWordSelectActivity::suspendWorkingSet() {
-  if (workingSetSuspended_ || !readerPageReload_) return;
+  if (workingSetSuspended_ || !readerPageLoad_) return;
   if (const auto* selected = navigator.getSelected()) {
     suspendedSelectionX_ = selected->screenX + selected->width / 2;
     suspendedSelectionY_ = selected->screenY + renderer.getLineHeight(SETTINGS.getReaderFontId()) / 2;
@@ -249,7 +252,7 @@ void DictionaryWordSelectActivity::suspendWorkingSet() {
 
 bool DictionaryWordSelectActivity::restoreWorkingSet() {
   if (!workingSetSuspended_) return true;
-  page = readerPageReload_(readerContext_);
+  page = readerPageLoad_(readerContext_, activePageOffset_);
   if (!page) {
     LOG_ERR("DICT", "Failed to reload reader page after dictionary definition");
     return false;
@@ -364,7 +367,13 @@ void DictionaryWordSelectActivity::clearFrontButtonHintArea() {
 }
 
 void DictionaryWordSelectActivity::renderDefinitionBackground() {
-  if (!page) {
+  std::unique_ptr<Page> reloadedPage;
+  const Page* backgroundPage = page.get();
+  if (!backgroundPage && readerPageLoad_) {
+    reloadedPage = readerPageLoad_(readerContext_, activePageOffset_);
+    backgroundPage = reloadedPage.get();
+  }
+  if (!backgroundPage) {
     LOG_ERR("DICT", "Cannot redraw dictionary background without a reader page");
     return;
   }
@@ -376,9 +385,9 @@ void DictionaryWordSelectActivity::renderDefinitionBackground() {
   // table only preserves glyph widths, not the bitmaps themselves.
   auto* fcm = renderer.getFontCacheManager();
   auto scope = fcm->createPrewarmScope();
-  page->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop, foregroundBlack);  // scan pass
+  backgroundPage->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop, foregroundBlack);  // scan pass
   scope.endScanAndPrewarm();
-  page->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop, foregroundBlack);
+  backgroundPage->render(renderer, SETTINGS.getReaderFontId(), marginLeft, marginTop, foregroundBlack);
 }
 
 void DictionaryWordSelectActivity::renderDefinitionBackgroundCallback(void* context) {
@@ -743,7 +752,7 @@ bool DictionaryWordSelectActivity::extractWords() {
   return true;
 }
 
-bool DictionaryWordSelectActivity::captureClippingRequest() {
+bool DictionaryWordSelectActivity::captureCurrentClippingRequest(DictionaryClippingRequest& request) const {
   int firstIdx = -1;
   int lastIdx = -1;
   if (!navigator.getLookupSelectionRange(firstIdx, lastIdx)) {
@@ -767,14 +776,146 @@ bool DictionaryWordSelectActivity::captureClippingRequest() {
       (first->pageWordOrdinal == last->pageWordOrdinal && first->sourceWordByteOffset <= last->sourceWordByteOffset);
   const auto* rangeFirst = firstPrecedesLast ? first : last;
   const auto* rangeLast = firstPrecedesLast ? last : first;
-  pendingClippingRequest_.firstPageWordOrdinal = rangeFirst->pageWordOrdinal;
-  pendingClippingRequest_.lastPageWordOrdinal = rangeLast->pageWordOrdinal;
-  pendingClippingRequest_.firstWordByteOffset = rangeFirst->sourceWordByteOffset;
-  pendingClippingRequest_.lastWordByteEndOffset =
-      static_cast<uint16_t>(rangeLast->sourceWordByteOffset + rangeLast->textLen);
+  request.firstPageOffset = static_cast<uint8_t>(activePageOffset_);
+  request.firstPageWordOrdinal = rangeFirst->pageWordOrdinal;
+  request.lastPageOffset = static_cast<uint8_t>(activePageOffset_);
+  request.lastPageWordOrdinal = rangeLast->pageWordOrdinal;
+  request.firstWordByteOffset = rangeFirst->sourceWordByteOffset;
+  request.lastWordByteEndOffset = static_cast<uint16_t>(rangeLast->sourceWordByteOffset + rangeLast->textLen);
+  return true;
+}
+
+bool DictionaryWordSelectActivity::captureClippingRequest() {
+  DictionaryClippingRequest currentRequest;
+  if (!captureCurrentClippingRequest(currentRequest)) return false;
+
+  pendingClippingRequest_ = hasCrossPageSelection_ ? crossPageFirstRequest_ : currentRequest;
+  if (hasCrossPageSelection_) {
+    pendingClippingRequest_.lastPageOffset = currentRequest.lastPageOffset;
+    pendingClippingRequest_.lastPageWordOrdinal = currentRequest.lastPageWordOrdinal;
+    pendingClippingRequest_.lastWordByteEndOffset = currentRequest.lastWordByteEndOffset;
+  }
   hasPendingClippingRequest_ = true;
   navigator.clearCompletedSelection();
   return true;
+}
+
+bool DictionaryWordSelectActivity::selectFirstWordForTouchDrag() {
+  const auto* first = navigator.getWordAt(0);
+  if (!first) return false;
+  bool hit = false;
+  navigator.selectWordAtPoint(first->screenX + first->width / 2,
+                              first->screenY + renderer.getLineHeight(SETTINGS.getReaderFontId()) / 2,
+                              renderer.getLineHeight(SETTINGS.getReaderFontId()), &hit);
+  return hit && navigator.beginTouchMultiSelect();
+}
+
+void DictionaryWordSelectActivity::finishTouchLookupOnCurrentPage(const std::string& phrase, const size_t wordCount,
+                                                                  const DictionaryClippingRequest& request) {
+  pendingClippingRequest_ = request;
+  hasPendingClippingRequest_ = true;
+  touchDragLookup_ = false;
+  controller.lookupOrPopup(phrase, wordCount);
+}
+
+bool DictionaryWordSelectActivity::continueTouchSelectionOnNextPage() {
+  // Clipping preloads three pages, but dictionary lookup intentionally owns
+  // just one page working set. Retain the first endpoint and switch to page
+  // one only after a real drag reaches page zero's final word.
+  if (activePageOffset_ != 0 || !hasNextReaderPage_ || !readerPageLoad_) return false;
+
+  int firstIdx = -1;
+  int lastIdx = -1;
+  DictionaryClippingRequest currentRequest;
+  if (!navigator.getLookupSelectionRange(firstIdx, lastIdx) || !captureCurrentClippingRequest(currentRequest)) {
+    return false;
+  }
+  std::string prefix = navigator.buildPhrase(firstIdx, lastIdx);
+  if (prefix.empty()) return false;
+
+  const auto* finalSelectedWord = navigator.getWordAt(lastIdx);
+  const std::string mergedFirstWord = nextPageFirstWord;
+  const bool firstWordWasMerged =
+      finalSelectedWord && utf8EndsWithHyphen(navigator.getDisplay(*finalSelectedWord), finalSelectedWord->textLen) &&
+      !mergedFirstWord.empty();
+  const size_t prefixWordCount = navigator.getLookupSelectionWordCount();
+
+  bool nextPageLoaded = false;
+  bool nextPagePrepared = false;
+  {
+    // A highlight update for the last word may still be rendering on the other
+    // core. Keep that render from reading the page or navigator while their
+    // backing storage is replaced for the next page.
+    RenderLock lock(*this);
+    auto nextPage = readerPageLoad_(readerContext_, 1);
+    if (nextPage) {
+      nextPageLoaded = true;
+      navigator.releaseWorkingSet();
+      workingSet_.clear();
+      page.reset();
+      page = std::move(nextPage);
+      activePageOffset_ = 1;
+      nextPageFirstWord.clear();
+      nextPagePrepared = buildWorkingSet(/*consumeInitialConfirm=*/false) && selectFirstWordForTouchDrag();
+      if (!nextPagePrepared) {
+        // The fallback lookup is for the saved page-zero selection. Leave no
+        // page-one state behind for its definition background to render.
+        navigator.releaseWorkingSet();
+        workingSet_.clear();
+        page.reset();
+        activePageOffset_ = 0;
+      }
+    }
+  }
+  if (!nextPageLoaded) {
+    LOG_ERR("DICT", "Failed to load the next reader page for touch selection");
+    // Preserve the valid page-zero selection if the next page cannot be read.
+    finishTouchLookupOnCurrentPage(prefix, prefixWordCount, currentRequest);
+    return true;
+  }
+  if (!nextPagePrepared) {
+    LOG_ERR("DICT", "Failed to prepare next reader page for touch selection");
+    // We no longer have the page-zero working set, but its request and lookup
+    // text were captured before the switch. Finish that valid selection.
+    finishTouchLookupOnCurrentPage(prefix, prefixWordCount, currentRequest);
+    return true;
+  }
+
+  hasCrossPageSelection_ = true;
+  crossPageFirstRequest_ = currentRequest;
+  crossPageLookupPrefix_ = std::move(prefix);
+  crossPageLookupWordCount_ = prefixWordCount;
+  crossPageMergedFirstWord_ = std::move(mergedFirstWord);
+  crossPageFirstWordWasMerged_ = firstWordWasMerged;
+  requestUpdate();
+  return true;
+}
+
+std::string DictionaryWordSelectActivity::finishTouchLookupPhrase() {
+  std::string phrase = navigator.finishTouchMultiSelect();
+  if (!hasCrossPageSelection_) return phrase;
+
+  // Page zero may have already joined a final hyphenated word with page
+  // one's first word for ordinary dictionary lookup. That first word is now
+  // represented by the next-page selection too, so consume the overlap.
+  if (crossPageFirstWordWasMerged_ && !crossPageMergedFirstWord_.empty() &&
+      phrase.rfind(crossPageMergedFirstWord_, 0) == 0) {
+    phrase.erase(0, crossPageMergedFirstWord_.size());
+    if (!phrase.empty() && phrase.front() == ' ') phrase.erase(0, 1);
+  }
+  if (phrase.empty()) return crossPageLookupPrefix_;
+  if (!crossPageLookupPrefix_.empty()) crossPageLookupPrefix_ += ' ';
+  crossPageLookupPrefix_ += phrase;
+  return crossPageLookupPrefix_;
+}
+
+void DictionaryWordSelectActivity::resetCrossPageSelection() {
+  hasCrossPageSelection_ = false;
+  crossPageFirstRequest_ = {};
+  crossPageLookupPrefix_.clear();
+  crossPageLookupWordCount_ = 0;
+  crossPageMergedFirstWord_.clear();
+  crossPageFirstWordWasMerged_ = false;
 }
 
 void DictionaryWordSelectActivity::finishWithClippingRequest() {
@@ -880,12 +1021,10 @@ void DictionaryWordSelectActivity::loop() {
         auto definition = makeUniqueNoThrow<DictionaryDefinitionActivity>(
             renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
             controller.getRecordHistory(), controller.getLookupWord(),
-            DictionaryLookupController::toHistStatus(controller.getFoundStatus()),
-            readerBackgroundRender_ ? readerContext_ : this,
-            readerBackgroundRender_ ? readerBackgroundRender_
-                                    : &DictionaryWordSelectActivity::renderDefinitionBackgroundCallback,
-            dictionaryFontFamilyName_, dictionaryFontPointSize_, true,
-            hasPendingClippingRequest_ ? &pendingClippingRequest_ : nullptr, &highlightSnapshotStorage_);
+            DictionaryLookupController::toHistStatus(controller.getFoundStatus()), this,
+            &DictionaryWordSelectActivity::renderDefinitionBackgroundCallback, dictionaryFontFamilyName_,
+            dictionaryFontPointSize_, true, hasPendingClippingRequest_ ? &pendingClippingRequest_ : nullptr,
+            &highlightSnapshotStorage_);
         if (!definition) {
           LOG_ERR("DICT", "OOM allocating DictionaryDefinitionActivity (%u bytes)",
                   static_cast<unsigned>(sizeof(DictionaryDefinitionActivity)));
@@ -923,6 +1062,7 @@ void DictionaryWordSelectActivity::loop() {
         openDictionarySwitch();
         break;
       case DictionaryLookupController::LookupEvent::Cancelled:
+        resetCrossPageSelection();
         forceFullRepaintOnNextRender();
         requestUpdate();
         break;
@@ -948,14 +1088,22 @@ void DictionaryWordSelectActivity::loop() {
     int dragX = 0;
     int dragY = 0;
     if (mappedInput.isScreenTouchHeld(dragX, dragY)) {
-      if (navigator.selectWordAtPoint(dragX, dragY, renderer.getLineHeight(SETTINGS.getReaderFontId()))) {
+      touchDragHasMoved_ =
+          touchDragHasMoved_ || ClipSelectionPaging::hasDraggedFrom(touchDragStartX_, touchDragStartY_, dragX, dragY);
+      const int previousIdx = navigator.getCurrentFlatIndex();
+      bool hit = false;
+      if (navigator.selectWordAtPoint(dragX, dragY, renderer.getLineHeight(SETTINGS.getReaderFontId()), &hit)) {
         requestUpdate();
+      } else if (hit && touchDragHasMoved_ && navigator.getCurrentFlatIndex() == previousIdx &&
+                 navigator.getWordAt(previousIdx + 1) == nullptr && continueTouchSelectionOnNextPage()) {
+        return;
       }
       return;
     }
 
     touchDragLookup_ = false;
-    controller.lookupOrPopup(navigator.finishTouchMultiSelect(), navigator.getLookupSelectionWordCount());
+    const size_t wordCount = crossPageLookupWordCount_ + navigator.getLookupSelectionWordCount();
+    controller.lookupOrPopup(finishTouchLookupPhrase(), wordCount);
     if (controller.isLookingUp()) captureClippingRequest();
     return;
   }
@@ -963,10 +1111,14 @@ void DictionaryWordSelectActivity::loop() {
   int touchX = 0;
   int touchY = 0;
   if (mappedInput.wasScreenTouchDown(touchX, touchY)) {
+    resetCrossPageSelection();
     bool touchedWord = false;
     navigator.selectWordAtPoint(touchX, touchY, renderer.getLineHeight(SETTINGS.getReaderFontId()), &touchedWord);
     if (touchedWord && navigator.beginTouchMultiSelect()) {
       touchDragLookup_ = true;
+      touchDragHasMoved_ = false;
+      touchDragStartX_ = touchX;
+      touchDragStartY_ = touchY;
       // Finish this fast refresh before lookup can replace the screen, so the
       // touched word always provides visible press feedback on e-ink.
       requestUpdateAndWait();

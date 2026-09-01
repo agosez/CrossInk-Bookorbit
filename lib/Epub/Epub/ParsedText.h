@@ -67,6 +67,7 @@ class ParsedText {
   std::vector<uint16_t> lineWidthsScratch;
   std::vector<uint8_t> lineBionicBoundaryScratch;
   std::vector<bool> lineGuideDotBeforeScratch;
+  std::vector<bool> lineHasSpaceBeforeScratch;
   std::vector<uint8_t> lineBackgroundBlackScratch;
   std::vector<uint16_t> visualOrderScratch;
 

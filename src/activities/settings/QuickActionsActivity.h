@@ -22,3 +22,9 @@ class QuickActionsActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
 };
+
+#ifdef SIMULATOR
+namespace QuickActionsActivityTest {
+bool isTriggerAvailable(QuickActions::Trigger trigger);
+}
+#endif

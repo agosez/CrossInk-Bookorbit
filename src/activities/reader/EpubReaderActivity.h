@@ -24,6 +24,7 @@
 #include "components/OptionPopup.h"
 #if CROSSINK_APP_CAP_TOUCH
 #include "activities/reader/ReaderPinchGesture.h"
+#include "activities/reader/TouchReaderPreviewModel.h"
 #endif
 
 struct ToastRect {
@@ -50,7 +51,6 @@ class EpubReaderActivity final : public Activity {
     uint8_t embeddedStyle = 1;
     uint8_t hyphenationEnabled = 0;
     uint8_t textAntiAliasing = 1;
-    uint8_t readerDarkMode = 0;
     uint8_t imageRendering = 0;
     uint8_t extraParagraphSpacing = 1;
     uint8_t forceParagraphIndents = 0;
@@ -178,6 +178,11 @@ class EpubReaderActivity final : public Activity {
   // Normalized 0.0-1.0 progress within the target spine item, computed from book percentage.
   float pendingSpineProgress = 0.0f;
   uint16_t pendingParagraphIndex = UINT16_MAX;
+#if CROSSINK_APP_CAP_TOUCH
+  ReaderDrawerState touchReaderDrawerState{};
+  std::unique_ptr<TouchReaderPreviewModel> touchReaderPreviewModel;
+  bool touchReaderPreviewAllocationAttempted = false;
+#endif
   uint16_t pendingClippingIndex = UINT16_MAX;
   bool pendingScreenshot = false;
   bool pendingSyncSaveError = false;
@@ -353,7 +358,11 @@ class EpubReaderActivity final : public Activity {
   // (used after a settings change re-paginates a chapter). Returns true if currentPage moved.
   bool isRelayoutCatchUpComplete() const;
   bool applyDeferredReposition();
-  bool saveProgress(int spineIndex, int currentPage, int pageCount);
+  // Saves are suppressed while a footnote preview is on screen so the preview's own
+  // position cannot overwrite the reader's. Set allowDuringFootnotePreview for the
+  // deliberate on-exit save of the pre-footnote origin, which is the position the
+  // suppression exists to protect.
+  bool saveProgress(int spineIndex, int currentPage, int pageCount, bool allowDuringFootnotePreview = false);
   bool queueProgressSave(int spineIndex, int currentPage, int pageCount, bool forceSave = false);
   bool flushQueuedProgress();
 
@@ -410,10 +419,10 @@ class EpubReaderActivity final : public Activity {
   bool formatTimeLeftLabel(char* buf, size_t len) const;
   void refreshCachedTimeLeftEstimate();
   void applyBookStatsEditsFromDisk();
-  void handleBookStatsReturn();
+  void handleBookStatsReturn(bool returnToReaderMenu);
   void resetCurrentBookStatsAfterDelete();
   void openFileTransfer();
-  void openAutoPageTurnIntervalPicker(bool ignoreInitialConfirmRelease = false);
+  void openAutoPageTurnIntervalPicker(bool ignoreInitialConfirmRelease = false, bool returnToReaderMenu = false);
   void startClipSelection(const DictionaryClippingRequest* dictionaryRequest = nullptr);
   void resetReadingPaceData();
   void captureGlobalReaderSettings();
@@ -425,6 +434,7 @@ class EpubReaderActivity final : public Activity {
   void beginGlobalSettingsEdit();
   void endGlobalSettingsEdit();
   static void saveReaderOptionsForBook(void* ctx);
+  static void setAutoPageTurnIntervalForBookReader(void* ctx, uint16_t seconds);
   static void saveDictionaryFontForBookReader(void* ctx, const char* familyName, uint8_t pointSize);
   static void saveGlobalSettingsForBookReader(void* ctx);
   static void beginGlobalSettingsEditForBookReader(void* ctx);
@@ -456,11 +466,11 @@ class EpubReaderActivity final : public Activity {
   bool handleTouchDictionaryLookup();
   void openWordSelect(bool framebufferContainsPage, int initialTouchX = -1, int initialTouchY = -1,
                       bool autoLookupInitialWord = false);
-  std::unique_ptr<Page> reloadDictionaryLookupPage();
+  std::unique_ptr<Page> reloadDictionaryLookupPage(int pageOffset = 0);
   void renderDictionaryLookupBackground();
-  static std::unique_ptr<Page> reloadDictionaryLookupPageCallback(void* context);
-  static void renderDictionaryLookupBackgroundCallback(void* context);
-  void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);
+  static std::unique_ptr<Page> reloadDictionaryLookupPageCallback(void* context, int pageOffset);
+  void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action, bool returnToReaderMenu = false,
+                           const PendingOverlayResume* replacementResume = nullptr);
   // Opens the reader menu for the current position (short-press Confirm)
   void openReaderMenu();
   void applyOrientation(uint8_t orientation);
@@ -473,6 +483,8 @@ class EpubReaderActivity final : public Activity {
   void setBookCompleted(bool isCompleted);
   void showCompletedFeedback(bool isCompleted);
   void showTiltPageTurnFeedback(bool enabled);
+  // Shared dismissal rule for the transient bookmark/completed/tilt confirmations.
+  bool transientFeedbackDismissed(unsigned long showTimeMs) const;
   void toggleHomeButtonInReader();
   void showRenderModeToast(uint8_t renderMode);
   void showSafeModeToast();
@@ -523,6 +535,7 @@ class EpubReaderActivity final : public Activity {
            !backgroundBuildYieldForInput.load(std::memory_order_relaxed);
   }
   bool isReaderActivity() const override { return true; }
+  bool isEpubReaderActivity() const override { return true; }
   void onInputLockChanged(bool locked) override;
   bool handleQuickLockUnlock(QuickLockTrigger trigger) override;
   bool canSnapshotForSleepOverlay() const override { return true; }
@@ -538,6 +551,18 @@ class EpubReaderActivity final : public Activity {
   }
   bool handleShortcutAction(uint8_t action) override;
   std::string getCurrentBookPath() const override { return epub ? epub->getPath() : std::string{}; }
+  std::string getCurrentBookTitle() const override { return epub ? epub->getTitle() : std::string{}; }
+  bool getFrontlightPanelBookDetails(FrontlightPanelBookDetails& details) override;
+  std::unique_ptr<Activity> createFrontlightReadingStatsActivity() override;
+  void onFrontlightPanelOpened() override { pauseReadingPaceTimer("frontlight_panel"); }
+  void onFrontlightPanelClosed() override;
+  void onBackdropRenderedForOverlay() override { pageShownAtMs = 0UL; }
+  void persistFrontlightPanelSettings() override { saveGlobalSettingsPreservingBookOverrides(); }
+  void onFrontlightGlobalSettingsOpened() override { beginGlobalSettingsEdit(); }
+  void onFrontlightGlobalSettingsClosed() override { endGlobalSettingsEdit(); }
+  bool handleFrontlightPanelResult(const FrontlightPanelResult& result) override;
+  bool handleExternalReaderMenuAction(uint8_t action) override;
+  bool restorePendingOverlay(const PendingOverlayResume& resume) override;
   void setAutoPageTurnIntervalSeconds(uint16_t seconds);
   uint16_t getAutoPageTurnIntervalSeconds() const;
 

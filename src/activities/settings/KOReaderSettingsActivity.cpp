@@ -206,8 +206,6 @@ void KOReaderSettingsActivity::buildListScreen(UiApp::ScreenType& screen) {
       }
     } else if (i == 3) {
       values[i] = KOREADER_STORE.getMatchMethod() == DocumentMatchMethod::FILENAME ? tr(STR_FILENAME) : tr(STR_BINARY);
-    } else if (i == 4) {
-      values[i] = KOREADER_STORE.getSendMetadata() ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     } else if (i == 5) {
       values[i] =
           KOREADER_STORE.getSyncBehavior() == KOReaderSyncBehavior::SMART ? tr(STR_SMART_SYNC) : tr(STR_ASK_EVERY_TIME);
@@ -222,6 +220,8 @@ void KOReaderSettingsActivity::buildListScreen(UiApp::ScreenType& screen) {
     fui::ListItem item;
     item.label = I18N.get(menuNames[i]);
     if (!values[i].empty()) item.value = values[i].c_str();
+    item.toggle = i == 4;
+    item.toggleChecked = KOREADER_STORE.getSendMetadata();
     item.actionValue = static_cast<int16_t>(i);
     items.push_back(item);
   }

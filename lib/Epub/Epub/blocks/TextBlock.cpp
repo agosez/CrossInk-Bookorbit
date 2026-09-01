@@ -55,7 +55,7 @@ bool hasSyntheticIndentPrefix(const char* word, const uint16_t len) {
 }  // namespace
 
 size_t TextBlock::arenaSize(const uint16_t wordCount, const bool hasBionic, const bool hasGuideDots,
-                            const bool hasWordFlags, const uint16_t textBytes) {
+                            const bool hasWordFlags, const bool hasWordSpaces, const uint16_t textBytes) {
   // 16-bit arrays first so direct loads stay aligned on RISC-V, then byte arrays, then text.
   size_t size = static_cast<size_t>(wordCount) * (sizeof(uint16_t) + sizeof(int16_t) + sizeof(uint8_t));
   if (hasBionic) {
@@ -66,6 +66,9 @@ size_t TextBlock::arenaSize(const uint16_t wordCount, const bool hasBionic, cons
   }
   if (hasWordFlags) {
     size += static_cast<size_t>(wordCount) * sizeof(uint8_t);
+  }
+  if (hasWordSpaces) {
+    size += wordSpacesBytes(wordCount);
   }
   return size + textBytes;
 }
@@ -94,14 +97,18 @@ void TextBlock::bindArenaPointers() {
     wordFlagsArr = base + off;
     off += wc;
   }
+  if (wordSpacesPresent) {
+    wordSpacesArr = base + off;
+    off += wordSpacesBytes(numWords);
+  }
   textArr = reinterpret_cast<const char*>(base + off);
 }
 
 TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<int16_t>& wordXpos,
                      const std::vector<EpdFontFamily::Style>& wordStyles, const std::vector<uint8_t>& bionicBoundary,
                      const std::vector<uint16_t>& bionicRunOffset, const std::vector<uint16_t>& guideDotXOffset,
-                     const std::vector<uint8_t>& wordFlags, const BlockStyle& blockStyle,
-                     std::vector<std::string> rubyTexts)
+                     const std::vector<uint8_t>& wordFlags, const std::vector<bool>& wordHasSpaceBefore,
+                     const BlockStyle& blockStyle, std::vector<std::string> rubyTexts)
     : blockStyle(blockStyle), rubyTexts(std::move(rubyTexts)) {
   // A ruby-less line needs no per-word ruby vector. ParsedText passes one for
   // every extracted line once a book contains any ruby, so free all-empty
@@ -113,18 +120,20 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
   const bool hasBionic = !bionicBoundary.empty();
   const bool hasGuideDots = !guideDotXOffset.empty();
   const bool hasWordFlags = !wordFlags.empty();
+  const bool hasWordSpaces = !wordHasSpaceBefore.empty();
   if (words.size() != wordXpos.size() || words.size() != wordStyles.size() || words.size() > MAX_WORDS_PER_TEXT_BLOCK ||
       (hasBionic && (words.size() != bionicBoundary.size() || words.size() != bionicRunOffset.size())) ||
       (!hasBionic && !bionicRunOffset.empty()) || (hasGuideDots && words.size() != guideDotXOffset.size()) ||
       (hasWordFlags && words.size() != wordFlags.size()) ||
+      (hasWordSpaces && words.size() != wordHasSpaceBefore.size()) ||
       (!this->rubyTexts.empty() && words.size() != this->rubyTexts.size())) {
     LOG_ERR("TXB",
             "Construction failed: size mismatch (words=%u, xpos=%u, styles=%u, boundary=%u, runOffset=%u, "
-            "dotX=%u, flags=%u)",
+            "dotX=%u, flags=%u, spaces=%u)",
             static_cast<uint32_t>(words.size()), static_cast<uint32_t>(wordXpos.size()),
             static_cast<uint32_t>(wordStyles.size()), static_cast<uint32_t>(bionicBoundary.size()),
             static_cast<uint32_t>(bionicRunOffset.size()), static_cast<uint32_t>(guideDotXOffset.size()),
-            static_cast<uint32_t>(wordFlags.size()));
+            static_cast<uint32_t>(wordFlags.size()), static_cast<uint32_t>(wordHasSpaceBefore.size()));
     isValid = false;
     return;
   }
@@ -133,6 +142,7 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
   bionicPresent = hasBionic;
   guideDotsPresent = hasGuideDots;
   wordFlagsPresent = hasWordFlags;
+  wordSpacesPresent = hasWordSpaces;
   if (numWords == 0) {
     return;
   }
@@ -147,12 +157,14 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
     bionicPresent = false;
     guideDotsPresent = false;
     wordFlagsPresent = false;
+    wordSpacesPresent = false;
     isValid = false;
     return;
   }
   textBytes = static_cast<uint16_t>(totalText);
 
-  const size_t size = arenaSize(numWords, bionicPresent, guideDotsPresent, wordFlagsPresent, textBytes);
+  const size_t size =
+      arenaSize(numWords, bionicPresent, guideDotsPresent, wordFlagsPresent, wordSpacesPresent, textBytes);
   arena = makeUniqueNoThrow<uint8_t[]>(size);
   if (!arena) {
     LOG_ERR("TXB", "OOM: arena %u bytes", static_cast<uint32_t>(size));
@@ -161,6 +173,7 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
     bionicPresent = false;
     guideDotsPresent = false;
     wordFlagsPresent = false;
+    wordSpacesPresent = false;
     isValid = false;
     return;
   }
@@ -197,6 +210,15 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
     auto* flags = const_cast<uint8_t*>(wordFlagsArr);
     for (uint16_t i = 0; i < numWords; i++) {
       flags[i] = wordFlags[i];
+    }
+  }
+  if (wordSpacesPresent) {
+    auto* spaces = const_cast<uint8_t*>(wordSpacesArr);
+    std::memset(spaces, 0, wordSpacesBytes(numWords));
+    for (uint16_t i = 0; i < numWords; i++) {
+      if (wordHasSpaceBefore[i]) {
+        spaces[i / 8U] |= static_cast<uint8_t>(1U << (i % 8U));
+      }
     }
   }
 }
@@ -355,12 +377,14 @@ bool TextBlock::serialize(HalFile& file) const {
       !serialization::tryWritePod(file, static_cast<uint8_t>(bionicPresent ? 1 : 0)) ||
       !serialization::tryWritePod(file, static_cast<uint8_t>(guideDotsPresent ? 1 : 0)) ||
       !serialization::tryWritePod(file, static_cast<uint8_t>(wordFlagsPresent ? 1 : 0)) ||
+      !serialization::tryWritePod(file, static_cast<uint8_t>(wordSpacesPresent ? 1 : 0)) ||
       !serialization::tryWritePod(file, textBytes)) {
     LOG_ERR("TXB", "Serialization failed: could not write block header");
     return false;
   }
   if (numWords > 0) {
-    const size_t size = arenaSize(numWords, bionicPresent, guideDotsPresent, wordFlagsPresent, textBytes);
+    const size_t size =
+        arenaSize(numWords, bionicPresent, guideDotsPresent, wordFlagsPresent, wordSpacesPresent, textBytes);
     if (file.write(arena.get(), size) != static_cast<int>(size)) {
       LOG_ERR("TXB", "Serialization failed: arena write (%u bytes)", static_cast<uint32_t>(size));
       return false;
@@ -398,10 +422,11 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   uint8_t hasBionic = 0;
   uint8_t hasGuideDots = 0;
   uint8_t hasWordFlags = 0;
+  uint8_t hasWordSpaces = 0;
   uint16_t textBytes = 0;
   if (!serialization::tryReadPod(file, wc) || !serialization::tryReadPod(file, hasBionic) ||
       !serialization::tryReadPod(file, hasGuideDots) || !serialization::tryReadPod(file, hasWordFlags) ||
-      !serialization::tryReadPod(file, textBytes)) {
+      !serialization::tryReadPod(file, hasWordSpaces) || !serialization::tryReadPod(file, textBytes)) {
     LOG_ERR("TXB", "Deserialization failed: could not read block header");
     return nullptr;
   }
@@ -410,7 +435,7 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
     LOG_ERR("TXB", "Deserialization failed: word count %u exceeds maximum", wc);
     return nullptr;
   }
-  if (hasBionic > 1 || hasGuideDots > 1 || hasWordFlags > 1) {
+  if (hasBionic > 1 || hasGuideDots > 1 || hasWordFlags > 1 || hasWordSpaces > 1) {
     LOG_ERR("TXB", "Deserialization failed: invalid metadata flags");
     return nullptr;
   }
@@ -429,10 +454,11 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   block->bionicPresent = hasBionic != 0;
   block->guideDotsPresent = hasGuideDots != 0;
   block->wordFlagsPresent = hasWordFlags != 0;
+  block->wordSpacesPresent = hasWordSpaces != 0;
 
   if (wc > 0) {
-    const size_t size =
-        arenaSize(wc, block->bionicPresent, block->guideDotsPresent, block->wordFlagsPresent, textBytes);
+    const size_t size = arenaSize(wc, block->bionicPresent, block->guideDotsPresent, block->wordFlagsPresent,
+                                  block->wordSpacesPresent, textBytes);
     const int remaining = file.available();
     if (remaining < 0 || static_cast<size_t>(remaining) < size) {
       LOG_ERR("TXB", "Deserialization failed: truncated arena (%u bytes needed, %d available)",

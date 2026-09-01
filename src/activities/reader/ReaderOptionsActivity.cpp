@@ -409,12 +409,32 @@ void ReaderOptionsActivity::openScreenMarginPicker(const SettingInfo& setting) {
           CrossPointSettings::MAX_SCREEN_MARGIN, CrossPointSettings::SCREEN_MARGIN_SMALL_STEP,
           CrossPointSettings::SCREEN_MARGIN_LARGE_STEP, StrId::STR_NONE_OPT, /*readerActivity=*/true,
           /*allowPowerAsConfirm=*/true, /*ignoreInitialConfirmRelease=*/false, /*showPercentValue=*/false,
-          StrId::STR_NONE_OPT, /*overrideDisabledReaderTouchscreen=*/false, /*showTouchHeaderBackButton=*/true),
+          StrId::STR_NONE_OPT, /*overrideDisabledReaderTouchscreen=*/false, /*showTouchHeaderBackButton=*/true,
+          /*valueFormatter=*/nullptr, /*tapStep=*/5, /*useReaderSlider=*/true),
       [this, selectedSetting](const ActivityResult& result) {
         if (!result.isCancelled) {
           SETTINGS.*(selectedSetting.valuePtr) = static_cast<uint8_t>(std::clamp(
               std::get<IntervalResult>(result.data).value, static_cast<uint32_t>(CrossPointSettings::MIN_SCREEN_MARGIN),
               static_cast<uint32_t>(CrossPointSettings::MAX_SCREEN_MARGIN)));
+          persistReaderSettings();
+        }
+        requestUpdate();
+      });
+}
+
+void ReaderOptionsActivity::openWordSpacingPicker() {
+  startActivityForResult(
+      std::make_unique<IntervalSelectionActivity>(
+          renderer, mappedInput, "ReaderOptionsWordSpacingInterval", StrId::STR_WORD_SPACING, SETTINGS.wordSpacing, 0,
+          CrossPointSettings::MAX_WORD_SPACING, 1, 1, StrId::STR_NONE_OPT, /*readerActivity=*/true,
+          /*allowPowerAsConfirm=*/true, /*ignoreInitialConfirmRelease=*/false, /*showPercentValue=*/false,
+          StrId::STR_NONE_OPT, /*overrideDisabledReaderTouchscreen=*/false, /*showTouchHeaderBackButton=*/true,
+          /*valueFormatter=*/nullptr, /*tapStep=*/1, /*useReaderSlider=*/true),
+      [this](const ActivityResult& result) {
+        if (!result.isCancelled) {
+          SETTINGS.wordSpacing =
+              static_cast<uint8_t>(std::clamp(std::get<IntervalResult>(result.data).value, static_cast<uint32_t>(0),
+                                              static_cast<uint32_t>(CrossPointSettings::MAX_WORD_SPACING)));
           persistReaderSettings();
         }
         requestUpdate();
@@ -480,6 +500,10 @@ void ReaderOptionsActivity::toggleCurrentSetting() {
       openLineHeightPicker();
       return;
     }
+    if (setting.valuePtr == &CrossPointSettings::wordSpacing) {
+      openWordSpacingPicker();
+      return;
+    }
     if (setting.valuePtr == &CrossPointSettings::screenMarginVertical ||
         setting.valuePtr == &CrossPointSettings::screenMarginHorizontal) {
       openScreenMarginPicker(setting);
@@ -528,7 +552,8 @@ void ReaderOptionsActivity::openLineHeightPicker() {
           CrossPointSettings::MIN_LINE_HEIGHT_PERCENT, CrossPointSettings::MAX_LINE_HEIGHT_PERCENT, 1, 5,
           StrId::STR_NONE_OPT, /*readerActivity=*/true,
           /*allowPowerAsConfirm=*/true, /*ignoreInitialConfirmRelease=*/false, /*showPercentValue=*/true,
-          StrId::STR_NONE_OPT, /*overrideDisabledReaderTouchscreen=*/false, /*showTouchHeaderBackButton=*/true),
+          StrId::STR_NONE_OPT, /*overrideDisabledReaderTouchscreen=*/false, /*showTouchHeaderBackButton=*/true,
+          /*valueFormatter=*/nullptr, /*tapStep=*/5, /*useReaderSlider=*/true),
       [this](const ActivityResult& result) {
         if (!result.isCancelled) {
           SETTINGS.lineHeightPercent = CrossPointSettings::clampedLineHeightPercent(
@@ -715,6 +740,11 @@ void ReaderOptionsActivity::buildOptionsScreen(UiApp::ScreenType& screen) {
         isSectionHeader ? uiListSectionHeaderLabel(values[i], I18N.get(setting.nameId)) : I18N.get(setting.nameId);
     if (!isSectionHeader && !values[i].empty()) item.value = values[i].c_str();
     item.isHeader = isSectionHeader;
+    item.toggle = !isSectionHeader && setting.type == SettingType::TOGGLE;
+    if (item.toggle) {
+      item.toggleChecked = setting.valuePtr != nullptr && SETTINGS.*(setting.valuePtr) != 0;
+      item.value = nullptr;
+    }
     item.actionValue = static_cast<int16_t>(i);
     items.push_back(item);
   }

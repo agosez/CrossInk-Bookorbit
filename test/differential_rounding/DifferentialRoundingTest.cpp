@@ -221,6 +221,85 @@ void testKernLookup() {
   PASS();
 }
 
+namespace {
+const uint16_t kKernRowOffsetsFull[] = {0, 2, 4};
+const uint8_t kKernSparseColsFull[] = {0, 1, 0, 1};
+const int8_t kKernSparseValuesFull[] = {-5, -7, -2, -3};
+const uint16_t kKernRowOffsetsWithHoles[] = {0, 1, 2};
+const uint8_t kKernSparseColsWithHoles[] = {1, 0};
+const int8_t kKernSparseValuesWithHoles[] = {-7, -2};
+const uint16_t kKernLeftCodepoints[] = {0x54, 0x6F};
+const uint8_t kKernLeftClassIds[] = {1, 2};
+const uint16_t kKernRightCodepoints[] = {0x61, 0x6F};
+const uint8_t kKernRightClassIds[] = {1, 2};
+
+EpdFontData makeSparseFontData(const uint16_t* rowOffsets, const uint8_t* columns, const int8_t* values,
+                               const bool splitClasses) {
+  EpdFontData data = kTestFontData;
+  data.kernMatrix = nullptr;
+  data.kernRowOffsets = rowOffsets;
+  data.kernSparseCols = columns;
+  data.kernSparseValues = values;
+  if (splitClasses) {
+    data.kernLeftClasses = nullptr;
+    data.kernRightClasses = nullptr;
+    data.kernLeftCodepoints = kKernLeftCodepoints;
+    data.kernLeftClassIds = kKernLeftClassIds;
+    data.kernRightCodepoints = kKernRightCodepoints;
+    data.kernRightClassIds = kKernRightClassIds;
+  }
+  return data;
+}
+}  // namespace
+
+void testSparseKernLookupMatchesDense() {
+  printf("testSparseKernLookupMatchesDense...\n");
+  EpdFontData sparseData = makeSparseFontData(kKernRowOffsetsFull, kKernSparseColsFull, kKernSparseValuesFull, true);
+  EpdFont sparseFont(&sparseData);
+
+  for (const uint32_t left : {'T', 'a', 'o', 'x'}) {
+    for (const uint32_t right : {'T', 'a', 'o', 'x'}) {
+      ASSERT_EQ(sparseFont.getKerning(left, right), testFont.getKerning(left, right));
+    }
+  }
+
+  printf("  Sparse split kerning matches dense packed kerning\n");
+  PASS();
+}
+
+void testSparseKernLookupHandlesMissingEntries() {
+  printf("testSparseKernLookupHandlesMissingEntries...\n");
+  EpdFontData sparseData =
+      makeSparseFontData(kKernRowOffsetsWithHoles, kKernSparseColsWithHoles, kKernSparseValuesWithHoles, true);
+  EpdFont sparseFont(&sparseData);
+
+  ASSERT_EQ(sparseFont.getKerning('T', 'o'), -7);
+  ASSERT_EQ(sparseFont.getKerning('o', 'a'), -2);
+  ASSERT_EQ(sparseFont.getKerning('T', 'a'), 0);
+  ASSERT_EQ(sparseFont.getKerning('o', 'o'), 0);
+  ASSERT_EQ(sparseFont.getKerning('a', 'o'), 0);
+  ASSERT_EQ(sparseFont.getKerning('T', 'x'), 0);
+
+  printf("  Missing sparse entries resolve to zero\n");
+  PASS();
+}
+
+void testSparseKernLookupHandlesEmptyRow() {
+  printf("testSparseKernLookupHandlesEmptyRow...\n");
+  static const uint16_t rowOffsets[] = {0, 0, 1};
+  static const uint8_t columns[] = {0};
+  static const int8_t values[] = {-2};
+  EpdFontData sparseData = makeSparseFontData(rowOffsets, columns, values, true);
+  EpdFont sparseFont(&sparseData);
+
+  ASSERT_EQ(sparseFont.getKerning('T', 'a'), 0);
+  ASSERT_EQ(sparseFont.getKerning('T', 'o'), 0);
+  ASSERT_EQ(sparseFont.getKerning('o', 'a'), -2);
+
+  printf("  Empty sparse rows stay within bounds\n");
+  PASS();
+}
+
 void testGlyphLookup() {
   printf("testGlyphLookup...\n");
 
@@ -417,6 +496,9 @@ int main() {
 
   // Part 2: Integration tests against real EpdFont
   testKernLookup();
+  testSparseKernLookupMatchesDense();
+  testSparseKernLookupHandlesMissingEntries();
+  testSparseKernLookupHandlesEmptyRow();
   testGlyphLookup();
   testKnownWidths();
   testPairConsistencyViaFont();

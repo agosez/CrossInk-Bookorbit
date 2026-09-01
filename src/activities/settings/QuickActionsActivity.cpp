@@ -20,7 +20,9 @@ constexpr StrId triggerLabels[] = {
 std::vector<QuickActions::Trigger> availableTriggers() {
   std::vector<QuickActions::Trigger> triggers = {QuickActions::Trigger::None, QuickActions::Trigger::ShortPower,
                                                  QuickActions::Trigger::LongPower, QuickActions::Trigger::PowerUp};
-  if (gpio.hasTouch()) triggers.push_back(QuickActions::Trigger::UpDown);
+  if (gpio.hasTouch()) {
+    triggers.push_back(QuickActions::Trigger::UpDown);
+  }
   if (gpio.hasHomeKey()) {
     triggers.push_back(QuickActions::Trigger::TapHome);
     triggers.push_back(QuickActions::Trigger::LongPressHome);
@@ -48,6 +50,15 @@ std::vector<uint8_t> availableActions() {
   return actions;
 }
 }  // namespace
+
+#ifdef SIMULATOR
+namespace QuickActionsActivityTest {
+bool isTriggerAvailable(const QuickActions::Trigger trigger) {
+  const auto triggers = availableTriggers();
+  return std::find(triggers.begin(), triggers.end(), trigger) != triggers.end();
+}
+}  // namespace QuickActionsActivityTest
+#endif
 
 void QuickActionsActivity::onEnter() {
   Activity::onEnter();

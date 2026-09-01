@@ -472,7 +472,7 @@ void renderPerBookStatsPage(GfxRenderer& renderer, const MappedInputManager* map
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto& layout = getStatsLayout(renderer, mappedInput, false, showButtonHints, showRtcStats);
   if (mappedInput && mappedInput->hasTouchHardware()) {
-    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), true, true);
+    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), false, true);
   } else {
     CompactHeader::drawTitle(renderer, tr(STR_READING_STATS), true);
   }
@@ -543,7 +543,7 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto& layout = getStatsLayout(renderer, mappedInput, true, showButtonHints, showRtcStats);
   if (mappedInput && mappedInput->hasTouchHardware()) {
-    TouchHeaderBackButton::drawCompact(renderer, screenTitle, true);
+    TouchHeaderBackButton::drawCompact(renderer, screenTitle, false);
   } else {
     CompactHeader::drawTitle(renderer, screenTitle);
   }
@@ -606,7 +606,7 @@ void renderNoRtcCombinedStatsPage(GfxRenderer& renderer, const MappedInputManage
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto& layout = getNoRtcCombinedLayout(renderer, mappedInput, showButtonHints, allDevicesStats != nullptr);
   if (mappedInput && mappedInput->hasTouchHardware()) {
-    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), true);
+    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), false);
   } else {
     CompactHeader::drawTitle(renderer, tr(STR_READING_STATS));
   }
@@ -652,7 +652,7 @@ void renderEditBookDatesPage(GfxRenderer& renderer, const MappedInputManager* ma
                              const BookReadingStats& stats, const int selectedField, const bool showButtonHints) {
   renderer.clearScreen();
   if (mappedInput && mappedInput->hasTouchHardware()) {
-    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), true);
+    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), false);
   } else {
     CompactHeader::drawTitle(renderer, tr(STR_READING_STATS));
   }

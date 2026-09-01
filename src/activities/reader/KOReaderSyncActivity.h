@@ -111,6 +111,7 @@ class KOReaderSyncActivity final : public Activity {
   // which makes WiFi.getMode() return WIFI_MODE_NULL.
   bool wifiActivated = false;
   bool lockInitialConfirmRelease = false;
+  bool touchOverrideActive = false;
 
   void onWifiSelectionComplete(bool success);
   void performSync();
