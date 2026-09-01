@@ -832,6 +832,7 @@ void TxtReaderActivity::renderPage() {
 
   ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
 
+  // cppcheck-suppress knownConditionTrueFalse  // constant via ReaderUtils compatibility helper
   if (SETTINGS.textAntiAliasing && ReaderUtils::readerForegroundBlack()) {
     ReaderUtils::renderAntiAliased(renderer, [&renderLines]() { renderLines(); });
   }

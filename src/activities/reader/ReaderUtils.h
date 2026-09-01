@@ -63,6 +63,7 @@ inline bool readerDarkModeEnabled() { return false; }
 
 inline uint8_t readerBackgroundColor() { return readerDarkModeEnabled() ? 0x00 : 0xFF; }
 
+// cppcheck-suppress knownConditionTrueFalse  // compatibility constant, see above
 inline bool readerForegroundBlack() { return !readerDarkModeEnabled(); }
 
 inline int getTopClockStatusBarHeight() {

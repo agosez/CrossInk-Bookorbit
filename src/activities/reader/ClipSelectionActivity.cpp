@@ -535,6 +535,7 @@ void ClipSelectionActivity::applyWordStyle(const WordRef& word, const ClipWordSt
         renderer.drawPixel(x, y, foregroundBlack);
       }
     }
+    // cppcheck-suppress knownConditionTrueFalse  // constant via ReaderUtils compatibility helper
     if (!foregroundBlack) {
       // Dark mode starts with white text on black. Inverting after adding the
       // dither produces black text on a light-gray highlight.

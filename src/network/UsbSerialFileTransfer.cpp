@@ -377,6 +377,7 @@ void handleMkdir() {
     return;
   }
 
+  // cppcheck-suppress shadowFunction
   const std::string parentPath = FsHelpers::extractFolderPath(path);
   std::string rollbackBoundary = parentPath;
   while (rollbackBoundary != "/" && !Storage.exists(rollbackBoundary.c_str())) {

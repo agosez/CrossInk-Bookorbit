@@ -229,6 +229,7 @@ void FrontlightPanelActivity::openSyncDialog() {
     std::vector<std::string> disabledOptions;
     disabledOptions.reserve(OPTIONS.size());
     for (const StrId option : OPTIONS) {
+      // cppcheck-suppress useStlAlgorithm
       disabledOptions.emplace_back(std::string(I18N.get(option)) + " - " + tr(STR_UNAVAILABLE));
     }
     optionPopup.show(StrId::STR_SYNC_AND_TRANSFER, disabledOptions, 0, [this](const int) { openSyncDialog(); });

@@ -251,7 +251,7 @@ class TouchReaderPreviewModel {
     const auto* cursor = reinterpret_cast<const unsigned char*>(value);
     while (true) {
       const uint32_t codepoint = utf8NextCodepoint(&cursor);
-      if (codepoint == 0 || codepoint != 0x00AD) return codepoint;
+      if (codepoint != 0x00AD) return codepoint;  // 0 (end of string) also returns here
     }
   }
 

@@ -1320,10 +1320,12 @@ void EpubReaderTouchMenuActivity::showEnumOptions(const RowId row) {
           CrossPointSettings::TINY, CrossPointSettings::SMALL, CrossPointSettings::MEDIUM, CrossPointSettings::LARGE};
       raw.reserve(BUILTIN_SIZES.size());
       for (const auto size : BUILTIN_SIZES) {
+        // cppcheck-suppress useStlAlgorithm
         raw.push_back(CrossPointSettings::getReaderFontPointSize(size));
       }
     }
     labels.reserve(raw.size());
+    // cppcheck-suppress useStlAlgorithm
     for (const uint8_t size : raw) labels.push_back(fontSizePointLabel(size));
     const auto it = std::find(raw.begin(), raw.end(), draft.readerFontPointSize);
     const int current = it == raw.end() ? 0 : static_cast<int>(std::distance(raw.begin(), it));

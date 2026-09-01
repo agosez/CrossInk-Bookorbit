@@ -83,6 +83,7 @@ FrontlightPanelContext buildFrontlightPanelContext(Activity& activity, GfxRender
     context.bookTitle = activity.getCurrentBookTitle();
     context.bookPath = currentPath;
     context.showReaderDetails = hasStickyReaderDetailsPanel() && !Frontlight.present();
+    // cppcheck-suppress knownConditionTrueFalse  // constant per board capabilities
     if (context.showReaderDetails && activity.getFrontlightPanelBookDetails(context.bookDetails)) {
       context.bookTitle = context.bookDetails.title;
     }
