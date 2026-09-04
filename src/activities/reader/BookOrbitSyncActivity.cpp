@@ -36,6 +36,7 @@
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/BookContentId.h"
 
 // This file mirrors src/activities/reader/KOReaderSyncActivity.cpp; see that file's
 // comments for the rationale behind the heap/TLS-related steps. Kept as a separate,
@@ -108,6 +109,7 @@ constexpr char SYNC_MARKER_FILE[] = "/bookorbit_sync.bin";
 constexpr uint32_t SYNC_MARKER_MAGIC = 0x424F5359;  // "BOSY"
 
 int64_t readLastSyncMarker(const std::string& bookCachePath) {
+  if (bookCachePath.empty()) return 0;  // book not hashable: no history is the honest answer
   const std::string path = bookCachePath + SYNC_MARKER_FILE;
   FsFile file;
   if (!Storage.openFileForRead("BookOrbit", path.c_str(), file)) return 0;
@@ -120,7 +122,8 @@ int64_t readLastSyncMarker(const std::string& bookCachePath) {
 }
 
 void writeLastSyncMarker(const std::string& bookCachePath, const int64_t timestamp) {
-  if (timestamp <= 0) return;  // nothing learned; keep whatever history exists
+  if (timestamp <= 0) return;         // nothing learned; keep whatever history exists
+  if (bookCachePath.empty()) return;  // book not hashable: nowhere safe to write
   const std::string path = bookCachePath + SYNC_MARKER_FILE;
   FsFile file = Storage.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
   if (!file) {
@@ -217,7 +220,7 @@ void BookOrbitSyncActivity::saveProgressAndReturn(const CrossPointPosition& posi
   RecentBookProgress::saveCachedEpubPercent(*epub, position.spineIndex, position.pageNumber, pageCount);
   // Manual applies record the marker too, so the history smart sync reads is
   // already there the day the option gets switched on.
-  writeLastSyncMarker(Epub::cachePathForFilePath(epubPath, "/.crosspoint"), remoteProgress.timestamp);
+  writeLastSyncMarker(BookContentId::bookStateDir(epubPath), remoteProgress.timestamp);
   returnToReader();
 }
 
@@ -380,9 +383,9 @@ void BookOrbitSyncActivity::performSync() {
     // estimation, and a sweep already on file is what suppresses it (and retires the
     // duplicate estimates earlier syncs may have left). A failure never fails the sync —
     // the next sync records another one, and the server's sweep window spans many syncs.
-    const auto sweepResult = BookOrbitSyncClient::completeSweep(SETTINGS.getEffectiveDeviceName(),
-                                                                documentUnmatched ? 0 : 1,
-                                                                static_cast<uint32_t>(statsAccepted), annotationsSent);
+    const auto sweepResult =
+        BookOrbitSyncClient::completeSweep(SETTINGS.getEffectiveDeviceName(), documentUnmatched ? 0 : 1,
+                                           static_cast<uint32_t>(statsAccepted), annotationsSent);
     if (sweepResult != BookOrbitSyncClient::OK) {
       const int httpCode = BookOrbitSyncClient::lastHttpCode;
       if (httpCode == 404 || httpCode == 405 || httpCode == 501) {
@@ -500,15 +503,15 @@ void BookOrbitSyncActivity::performSync() {
   const bool localAhead = spineDelta > 0 || (spineDelta == 0 && pageDelta > 1);
 
   if (smartSyncEnabled()) {
-    const std::string cachePath = Epub::cachePathForFilePath(epubPath, "/.crosspoint");
-    const int64_t lastSync = readLastSyncMarker(cachePath);
+    const std::string stateDir = BookContentId::bookStateDir(epubPath);
+    const int64_t lastSync = readLastSyncMarker(stateDir);
     LOG_DBG("BookOrbit", "Smart decision: local spine=%d page=%d, remote spine=%d page=%d, serverTs=%lld lastSync=%lld",
             currentSpineIndex, currentPage, remotePosition.spineIndex, remotePosition.pageNumber,
             (long long)remoteProgress.timestamp, (long long)lastSync);
     if (samePosition) {
       // Both sides agree; refresh the marker so the next visit still knows
       // whether the server moved in the meantime.
-      writeLastSyncMarker(cachePath, remoteProgress.timestamp);
+      writeLastSyncMarker(stateDir, remoteProgress.timestamp);
       completeAlreadySynced();
       return;
     }
@@ -541,11 +544,13 @@ void BookOrbitSyncActivity::prepareAnnotationBatch() {
   pendingAnnotations.clear();
   pendingAnnotationWatermark = 0;
 
-  const std::string cachePath = Epub::cachePathForFilePath(epubPath, "/.crosspoint");
+  const std::string stateDir = BookContentId::bookStateDir(epubPath);
   std::vector<BookOrbitAnnotationRecord> records;
-  BookOrbitAnnotationStore::readAll(cachePath, records);
+  // A readable store is the proof this book has synced highlights before, even one holding
+  // zero records (see the completeness rule below).
+  const bool syncedHereBefore = BookOrbitAnnotationStore::readAll(stateDir, records);
 
-  const uint32_t watermark = BookOrbitAnnotationStore::readWatermark(cachePath);
+  const uint32_t watermark = BookOrbitAnnotationStore::readWatermark(stateDir);
   // The store is loaded only for as long as it takes to copy the batch out, and unloaded
   // before returning: only the small batch stays resident beside the open TLS session.
   if (!CLIPPINGS.loadForBook(epubPath, "", "", "epub")) {
@@ -565,7 +570,7 @@ void BookOrbitSyncActivity::prepareAnnotationBatch() {
       liveClippings.push_back({clipping->timestamp, clipping->spineIndex, clipping->paragraphIndex});
     }
   }
-  if (BookOrbitAnnotationStore::retain(cachePath, liveClippings)) {
+  if (BookOrbitAnnotationStore::retain(stateDir, liveClippings)) {
     records.erase(
         std::remove_if(records.begin(), records.end(),
                        [&](const BookOrbitAnnotationRecord& record) {
@@ -630,8 +635,21 @@ void BookOrbitSyncActivity::prepareAnnotationBatch() {
   // it is safe because the server scopes deletion detection to this device's own sync states
   // (findStatesForDeviceBook) -- an empty set deletes exactly what this device provably held,
   // never a web highlight it was yet to receive. The reference plugin reports empty-complete too.
+  //
+  // ...but only once a readable store proves this book has synced highlights before. The
+  // store is keyed by the book's content hash, so a moved or renamed file keeps it; a missing
+  // or unreadable store means "never synced this book" or "history lost" (a wiped card, a
+  // fresh device), never "the user deleted everything" -- deleting a highlight requires
+  // holding it, which requires the store. Claiming completeness over a lost store would have
+  // the server erase every highlight this device ever acked. The guard only makes the loss
+  // non-destructive; it cannot bring highlights back: the server's push-down
+  // (findAddCandidates) re-offers an annotation only to a device id it holds no sync state
+  // for, so recovery from real loss stays a server-side action. Deletion reporting resumes
+  // on its own once highlights sync again.
   const bool everyClippingHasAPosition = records.size() >= localClippingCount;
-  if (records.size() <= MAX_KEYS_PER_SYNC && everyClippingHasAPosition) {
+  if (!syncedHereBefore) {
+    LOG_INF("BookOrbit", "No highlight sync history for this book; deletions will not propagate this sync");
+  } else if (records.size() <= MAX_KEYS_PER_SYNC && everyClippingHasAPosition) {
     pendingAnnotationKeys.reserve(records.size());
     bool allBuilt = true;
     for (const BookOrbitAnnotationRecord& record : records) {
@@ -696,9 +714,9 @@ void BookOrbitSyncActivity::uploadAnnotationBatch() {
     LOG_INF("BookOrbit", "Pulled again: %u change(s) total", (unsigned)incomingAnnotations.size());
   }
 
-  const std::string cachePath = Epub::cachePathForFilePath(epubPath, "/.crosspoint");
+  const std::string stateDir = BookContentId::bookStateDir(epubPath);
   if (pendingAnnotationWatermark > 0 &&
-      !BookOrbitAnnotationStore::advanceWatermark(cachePath, pendingAnnotationWatermark)) {
+      !BookOrbitAnnotationStore::advanceWatermark(stateDir, pendingAnnotationWatermark)) {
     LOG_ERR("BookOrbit", "Highlights uploaded but the watermark did not advance; they will be re-sent");
   }
   annotationsSent = static_cast<uint16_t>(pendingAnnotations.size());
@@ -720,10 +738,12 @@ void BookOrbitSyncActivity::prepareBookmarkBatch() {
   pendingBookmarkKeys.clear();
   pendingBookmarkKeysComplete = false;
 
-  const std::string cachePath = Epub::cachePathForFilePath(epubPath, "/.crosspoint");
+  const std::string stateDir = BookContentId::bookStateDir(epubPath);
   std::vector<BookOrbitBookmarkRecord> records;
-  BookOrbitBookmarkStore::readAll(cachePath, records);
-  const uint32_t watermark = BookOrbitBookmarkStore::readWatermark(cachePath);
+  // Same guard as highlights: only a readable store proves this book has synced bookmarks
+  // before, so a missing or unreadable one must suppress deletion propagation, not feed it.
+  const bool syncedHereBefore = BookOrbitBookmarkStore::readAll(stateDir, records);
+  const uint32_t watermark = BookOrbitBookmarkStore::readWatermark(stateDir);
 
   if (!BOOKMARKS.loadForBook(epubPath, "", "", "epub")) {
     LOG_ERR("BookOrbit", "Could not read bookmarks; they will not sync");
@@ -742,7 +762,7 @@ void BookOrbitSyncActivity::prepareBookmarkBatch() {
     syncableCount++;
     liveTimestamps.push_back(bookmark.timestamp);
   }
-  if (BookOrbitBookmarkStore::retain(cachePath, liveTimestamps)) {
+  if (BookOrbitBookmarkStore::retain(stateDir, liveTimestamps)) {
     records.erase(std::remove_if(records.begin(), records.end(),
                                  [&](const BookOrbitBookmarkRecord& record) {
                                    return std::find(liveTimestamps.begin(), liveTimestamps.end(), record.timestamp) ==
@@ -776,9 +796,13 @@ void BookOrbitSyncActivity::prepareBookmarkBatch() {
 
   // An empty set IS complete: deleting the last bookmark must propagate, and it is safe for
   // the same reason as annotations -- the server diffs the key set against this device's own
-  // sync states only. The reference plugin reports empty-complete too.
+  // sync states only. The reference plugin reports empty-complete too. And as with
+  // annotations, only once a readable store proves this book has synced bookmarks before: a
+  // lost store must not read as "every bookmark deleted" (see prepareAnnotationBatch).
   const bool everyBookmarkHasAPosition = records.size() >= syncableCount;
-  if (records.size() <= MAX_KEYS_PER_SYNC && everyBookmarkHasAPosition) {
+  if (!syncedHereBefore) {
+    LOG_INF("BookOrbit", "No bookmark sync history for this book; deletions will not propagate this sync");
+  } else if (records.size() <= MAX_KEYS_PER_SYNC && everyBookmarkHasAPosition) {
     pendingBookmarkKeys.reserve(records.size());
     bool allBuilt = true;
     for (const BookOrbitBookmarkRecord& record : records) {
@@ -837,8 +861,8 @@ void BookOrbitSyncActivity::uploadBookmarkBatch() {
     }
   }
 
-  const std::string cachePath = Epub::cachePathForFilePath(epubPath, "/.crosspoint");
-  if (pendingBookmarkWatermark > 0 && !BookOrbitBookmarkStore::advanceWatermark(cachePath, pendingBookmarkWatermark)) {
+  const std::string stateDir = BookContentId::bookStateDir(epubPath);
+  if (pendingBookmarkWatermark > 0 && !BookOrbitBookmarkStore::advanceWatermark(stateDir, pendingBookmarkWatermark)) {
     LOG_ERR("BookOrbit", "Bookmarks uploaded but the watermark did not advance; they will be re-sent");
   }
   bookmarksSent = static_cast<uint16_t>(pendingBookmarks.size());
@@ -855,9 +879,9 @@ void BookOrbitSyncActivity::applyIncomingBookmarks() {
     return;
   }
 
-  const std::string cachePath = Epub::cachePathForFilePath(epubPath, "/.crosspoint");
+  const std::string stateDir = BookContentId::bookStateDir(epubPath);
   std::vector<BookOrbitBookmarkRecord> records;
-  BookOrbitBookmarkStore::readAll(cachePath, records);
+  BookOrbitBookmarkStore::readAll(stateDir, records);
 
   uint32_t newestMintedIdentity = 0;
   const auto keyOfRecord = [](const BookOrbitBookmarkRecord& record,
@@ -959,7 +983,7 @@ void BookOrbitSyncActivity::applyIncomingBookmarks() {
     record.identityEpoch = stored.timestamp;
     record.spineIndex = static_cast<uint16_t>(spineIndex);
     record.pos = incoming.pos;  // the server's pos verbatim, so both sides hash the same string
-    BookOrbitBookmarkStore::put(cachePath, record);
+    BookOrbitBookmarkStore::put(stateDir, record);
     newestMintedIdentity = std::max(newestMintedIdentity, record.identityEpoch);
 
     BookOrbitBookmarkAck ack;
@@ -976,7 +1000,7 @@ void BookOrbitSyncActivity::applyIncomingBookmarks() {
   // the next sync; the server just told us about them, so cover them -- unless older local
   // records still wait to upload.
   if (newestMintedIdentity > 0) {
-    const uint32_t watermark = BookOrbitBookmarkStore::readWatermark(cachePath);
+    const uint32_t watermark = BookOrbitBookmarkStore::readWatermark(stateDir);
     bool localStillPending = false;
     for (const BookOrbitBookmarkRecord& record : records) {
       if (record.identityEpoch > watermark) {
@@ -985,7 +1009,7 @@ void BookOrbitSyncActivity::applyIncomingBookmarks() {
       }
     }
     if (!localStillPending) {
-      BookOrbitBookmarkStore::advanceWatermark(cachePath, newestMintedIdentity);
+      BookOrbitBookmarkStore::advanceWatermark(stateDir, newestMintedIdentity);
     }
   }
 
@@ -1015,9 +1039,9 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
     return;
   }
 
-  const std::string cachePath = Epub::cachePathForFilePath(epubPath, "/.crosspoint");
+  const std::string stateDir = BookContentId::bookStateDir(epubPath);
   std::vector<BookOrbitAnnotationRecord> records;
-  BookOrbitAnnotationStore::readAll(cachePath, records);
+  BookOrbitAnnotationStore::readAll(stateDir, records);
 
   bool storeChanged = false;
   uint32_t newestReceivedIdentity = 0;
@@ -1144,7 +1168,7 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
       // offered back to us on every sync.
       record.pos0 = incoming.pos0;
       record.pos1 = incoming.pos0;
-      BookOrbitAnnotationStore::put(cachePath, record);
+      BookOrbitAnnotationStore::put(stateDir, record);
       if (record.identityEpoch != stored->timestamp) {  // a parsed server datetime, not the fallback
         newestReceivedIdentity = std::max(newestReceivedIdentity, record.identityEpoch);
       }
@@ -1165,7 +1189,7 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
   // Skipped while older local records are still waiting to upload -- moving the watermark past
   // them would silence them forever, and one redundant push is the cheaper failure.
   if (newestReceivedIdentity > 0) {
-    const uint32_t watermark = BookOrbitAnnotationStore::readWatermark(cachePath);
+    const uint32_t watermark = BookOrbitAnnotationStore::readWatermark(stateDir);
     bool localStillPending = false;
     for (const BookOrbitAnnotationRecord& record : records) {
       if (record.identityEpoch > watermark) {
@@ -1174,7 +1198,7 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
       }
     }
     if (!localStillPending) {
-      BookOrbitAnnotationStore::advanceWatermark(cachePath, newestReceivedIdentity);
+      BookOrbitAnnotationStore::advanceWatermark(stateDir, newestReceivedIdentity);
     }
   }
 
@@ -1192,12 +1216,12 @@ size_t BookOrbitSyncActivity::uploadQueuedStats() {
   // Reading-session events queued by the reader (see BookOrbitStatsQueue), pushed
   // while WiFi is already up for the progress sync. Upload-only: BookOrbit has no
   // stats download API, so stats flow CrossInk -> BookOrbit.
-  const std::string cachePath = Epub::cachePathForFilePath(epubPath, "/.crosspoint");
+  const std::string stateDir = BookContentId::bookStateDir(epubPath);
   // The queue is drained one upload batch at a time. Reading it whole cost 16 bytes
   // per event -- 32KB for a full queue -- and held them for the length of the upload,
   // beside the TLS session and every body built for it; a long backlog left too
   // little for the batch that was supposed to clear it.
-  const size_t total = std::min(BookOrbitStatsQueue::queuedCount(cachePath), BookOrbitStatsQueue::MAX_QUEUED_EVENTS);
+  const size_t total = std::min(BookOrbitStatsQueue::queuedCount(stateDir), BookOrbitStatsQueue::MAX_QUEUED_EVENTS);
   if (total == 0) {
     LOG_INF("BookOrbit", "No queued reading stats for this book");
     return 0;
@@ -1248,7 +1272,7 @@ size_t BookOrbitSyncActivity::uploadQueuedStats() {
   size_t shownTenth = 0;
 
   for (size_t offset = 0; offset < total; offset += BATCH_SIZE) {
-    if (!BookOrbitStatsQueue::readRange(cachePath, offset, BATCH_SIZE, batch)) {
+    if (!BookOrbitStatsQueue::readRange(stateDir, offset, BATCH_SIZE, batch)) {
       LOG_ERR("BookOrbit", "Failed to read queued stats at event %u; keeping the queue", (unsigned)offset);
       return uploaded;
     }
@@ -1307,7 +1331,7 @@ size_t BookOrbitSyncActivity::uploadQueuedStats() {
         // the queue instead of re-firing a doomed upload on every future sync;
         // progress sync is unaffected. Updating the server starts buffering fresh.
         LOG_INF("BookOrbit", "Server has no page-stats endpoint (http=%d); discarding queued stats", httpCode);
-        BookOrbitStatsQueue::clear(cachePath);
+        BookOrbitStatsQueue::clear(stateDir);
         return uploaded;
       }
       // Transient failure: keep the whole queue for a later attempt; re-sending an
@@ -1335,7 +1359,7 @@ size_t BookOrbitSyncActivity::uploadQueuedStats() {
     LOG_ERR("BookOrbit", "Dropped %u stat events with unresolvable timestamps", (unsigned)dropped);
   }
   LOG_INF("BookOrbit", "Uploaded %u reading-session events", (unsigned)uploaded);
-  BookOrbitStatsQueue::clear(cachePath);
+  BookOrbitStatsQueue::clear(stateDir);
   return uploaded;
 }
 
@@ -1385,7 +1409,7 @@ void BookOrbitSyncActivity::performUpload() {
     return;
   }
 
-  writeLastSyncMarker(Epub::cachePathForFilePath(epubPath, "/.crosspoint"), progress.timestamp);
+  writeLastSyncMarker(BookContentId::bookStateDir(epubPath), progress.timestamp);
   {
     RenderLock lock(*this);
     state = UPLOAD_COMPLETE;

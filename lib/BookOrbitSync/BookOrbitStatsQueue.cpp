@@ -63,6 +63,10 @@ bool BookOrbitStatsQueue::appendBatch(const std::string& bookCachePath, const st
   if (events.empty()) {
     return true;
   }
+  if (bookCachePath.empty()) {
+    LOG_ERR("BOQ", "No state directory for this book; dropping %u event(s)", (unsigned)events.size());
+    return false;
+  }
   const std::string path = queuePath(bookCachePath);
 
   // Never append onto a queue with an old/foreign header: readAll() would discard

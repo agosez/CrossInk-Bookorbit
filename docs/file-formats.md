@@ -187,7 +187,7 @@ struct ReaderSettingsBin {
 };
 ```
 
-## `/.crosspoint/clippings/<bookType>_<crc32(path)>.bin`
+## `/.crosspoint/clippings/<bookType>_<contentHash>.bin`
 
 ### Versions 1-3
 
@@ -198,11 +198,18 @@ of the EPUB render-cache directory so clearing/rebuilding layout cache does not
 delete user clippings.
 
 The current implementation only writes EPUB clipping files, so `bookType` is
-`epub`. The numeric suffix is `uzlib_crc32()` of the book's SD-card path, for
-example:
+`epub`. The suffix is the book's 32-hex partial-MD5 content hash — the same
+identity BookOrbit sync reports to the server — so the file follows the book
+through moves and renames. Files written by earlier releases used
+`uzlib_crc32()` of the book's SD-card path as a decimal suffix; `loadForBook`
+renames such a file to the content-keyed name the first time the book is
+loaded, and keeps using the path-keyed name only when the book file itself
+cannot be read. The same applies to bookmark files under
+`/.crosspoint/bookmarks/`, which additionally retain their older
+`std::hash`-suffixed tier as a merged-in legacy. Example:
 
 ```text
-/.crosspoint/clippings/epub_1234567890.bin
+/.crosspoint/clippings/epub_8f14e45fceea167a5a36dedd4bea2543.bin
 ```
 
 Binary layout:
@@ -297,9 +304,13 @@ Binary layout:
 
 ### Version 1
 
-`bookorbit_annotations.bin` sits beside a book's clipping file in the book's cache
-directory and holds what BookOrbit needs to identify each highlight: the KOReader
-xpointer the server keys on, plus the upload watermark.
+`bookorbit_annotations.bin` lives in the book's content-keyed state directory,
+`/.crosspoint/book_<contentHash>/`, together with `bookorbit_bookmarks.bin`,
+`bookorbit_stats.bin` and `bookorbit_sync.bin`, so all of it follows the book through
+moves and renames. Earlier releases kept these files in the book's path-keyed render
+cache directory; the first sync or position mint after the update moves them over. The
+file holds what BookOrbit needs to identify each highlight: the KOReader xpointer the
+server keys on, plus the upload watermark.
 
 The xpointers are minted when the highlight is created, not when it is synced. Building
 them streams and parses the whole chapter (`ChapterXPathResolver`), which is nearly free
@@ -363,9 +374,10 @@ Binary layout (all little-endian):
 
 ### Version 1
 
-`bookorbit_bookmarks.bin` sits beside a book's bookmark file in the book's cache directory
-and holds what BookOrbit needs to identify each bookmark: the KOReader xpointer the server
-keys on (`md5(datetime | pos)`), plus the upload watermark. Positions are minted when the
+`bookorbit_bookmarks.bin` lives beside `bookorbit_annotations.bin` in the book's
+content-keyed state directory (`/.crosspoint/book_<contentHash>/`) and holds what BookOrbit
+needs to identify each bookmark: the KOReader xpointer the server keys on
+(`md5(datetime | pos)`), plus the upload watermark. Positions are minted when the
 bookmark is created, from the page's first visible codepoint (the layout-independent
 coordinate the section cache stores per page), and never recomputed.
 
@@ -388,42 +400,13 @@ Binary layout (all little-endian):
   - `[10-11]` `posLength` (`uint16_t`, 1-512)
   - `[12…]` `pos` (`posLength` bytes, KOReader xpointer, not null-terminated)
 
-## `bookorbit_bookmarks.bin`
-
-### Version 1
-
-Sits beside a book's cache like `bookorbit_annotations.bin` and plays the same role for
-bookmarks: the KOReader xpointer the server keys each bookmark by, plus the upload watermark.
-Positions are minted when the bookmark is created (the reader has the section and its page
-offsets open) from the bookmarked page's first visible codepoint, and never recomputed.
-
-Records join back to their `Bookmark` by `timestamp` plus `spineIndex`. Bookmark timestamps
-are real UTC epochs stamped by `BookmarkStore::addBookmark` from `wallclock.bin`; bookmarks
-from before that stamping carry 0, are invisible to sync, and gain a timestamp through the
-reader's backfill (one per chapter visit).
-
-`identityEpoch` follows the INVERSE of the annotation convention for server-created entries:
-the device mints a local identity when it applies a web bookmark and reports
-`{key, datetime, pos}` in the acknowledgment -- the server has nothing else to link its copy
-to. For bookmarks made on the device the two fields are equal.
-
-Binary layout (all little-endian):
-
-- `[0-3]` magic + version: ASCII `BOB1`
-- `[4-7]` `watermark` (`uint32_t`, newest identityEpoch the server has accepted)
-- Repeated variable-length records:
-  - `[0-3]` `timestamp` (`uint32_t`, the bookmark's creation epoch; part of the join key)
-  - `[4-7]` `identityEpoch` (`uint32_t`, the datetime the server keys on)
-  - `[8-9]` `spineIndex` (`uint16_t`)
-  - `[10-11]` `posLength` (`uint16_t`, 1-512)
-  - `[12…]` `pos` (`posLength` bytes, KOReader xpointer, not null-terminated)
-
 ## `bookorbit_stats.bin`
 
 ### Version 1
 
-`bookorbit_stats.bin` is a queue of per-page reading events in a book's cache
-directory, waiting to be uploaded to a BookOrbit server's page-stats endpoint
+`bookorbit_stats.bin` is a queue of per-page reading events in a book's
+content-keyed state directory (`/.crosspoint/book_<contentHash>/`), waiting to
+be uploaded to a BookOrbit server's page-stats endpoint
 (the server clusters raw page events into the reading sessions that power its
 time/streak/pace stats). The reader buffers one record per qualifying forward
 page read in RAM and appends them as a single batch when the session ends;

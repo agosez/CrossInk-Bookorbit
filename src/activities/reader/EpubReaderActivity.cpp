@@ -72,6 +72,7 @@
 #endif
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
+#include "util/BookContentId.h"
 #include "util/BookMoveUtils.h"
 #include "util/Dictionary.h"
 #include "util/ScreenshotUtil.h"
@@ -2386,7 +2387,7 @@ void EpubReaderActivity::onEnter() {
     // Diagnostic breadcrumb: shows whether previously queued sessions survived to
     // this open — the key evidence when sessions go missing before a sync.
     LOG_INF("BookOrbit", "Stats queue holds %u events at book open",
-            (unsigned)BookOrbitStatsQueue::queuedCount(epub->getCachePath()));
+            (unsigned)BookOrbitStatsQueue::queuedCount(BookContentId::bookStateDir(epub->getPath())));
   }
 
   globalStats = GlobalReadingStats::load();
@@ -2464,7 +2465,7 @@ void EpubReaderActivity::onExit() {
       // Flush the session's buffered per-page BookOrbit events in one batch (never
       // once per page turn); drained on the next BookOrbit sync of this book.
       if (!pendingBookOrbitEvents.empty()) {
-        BookOrbitStatsQueue::appendBatch(epub->getCachePath(), pendingBookOrbitEvents);
+        BookOrbitStatsQueue::appendBatch(BookContentId::bookStateDir(epub->getPath()), pendingBookOrbitEvents);
         pendingBookOrbitEvents.clear();
       } else if (BOOKORBIT_STORE.hasCredentials()) {
         // A "vanished" session often never produced events at all: page turns only
@@ -6540,7 +6541,7 @@ bool EpubReaderActivity::backfillBookmarkPositions() {
   {
     // Scoped so the whole store is released before the mint, which needs the heap it took.
     std::vector<BookOrbitBookmarkRecord> records;
-    BookOrbitBookmarkStore::readAll(epub->getCachePath(), records);
+    BookOrbitBookmarkStore::readAll(BookContentId::bookStateDir(epub->getPath()), records);
     for (size_t i = 0; i < bookmarks.size(); i++) {
       if (bookmarks[i].spineIndex != static_cast<uint16_t>(currentSpineIndex)) continue;
 
@@ -6584,7 +6585,7 @@ bool EpubReaderActivity::backfillAnnotationPositions() {
     // Scoped so the whole store -- two xpointers per highlight in the book -- is released before
     // the mint, which needs the heap it took.
     std::vector<BookOrbitAnnotationRecord> records;
-    BookOrbitAnnotationStore::readAll(epub->getCachePath(), records);
+    BookOrbitAnnotationStore::readAll(BookContentId::bookStateDir(epub->getPath()), records);
     for (size_t i = 0; i < CLIPPINGS.clippingCount(); i++) {
       const Clipping* clipping = CLIPPINGS.clippingAt(i);
       if (!clipping || clipping->spineIndex != currentSpineIndex || clipping->timestamp == 0) continue;
@@ -6678,7 +6679,7 @@ EpubReaderActivity::PositionMint EpubReaderActivity::recordBookmarkPosition(cons
   record.identityEpoch = bookmark.timestamp;  // made here, so identity and join key coincide
   record.spineIndex = static_cast<uint16_t>(currentSpineIndex);
   record.pos = std::move(pos);
-  BookOrbitBookmarkStore::put(epub->getCachePath(), record);
+  BookOrbitBookmarkStore::put(BookContentId::bookStateDir(epub->getPath()), record);
   return PositionMint::Done;
 }
 
@@ -6735,7 +6736,7 @@ EpubReaderActivity::PositionMint EpubReaderActivity::recordAnnotationPosition(co
   }
   record.spineIndex = static_cast<uint16_t>(currentSpineIndex);
   record.paragraphIndex = paragraphIndex;
-  if (BookOrbitAnnotationStore::put(epub->getCachePath(), record)) {
+  if (BookOrbitAnnotationStore::put(BookContentId::bookStateDir(epub->getPath()), record)) {
     LOG_DBG("BOA", "Stored highlight position %s", record.pos0.c_str());
   }
   return PositionMint::Done;
