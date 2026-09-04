@@ -29,6 +29,7 @@ The main data directory is `.crosspoint` on the SD card. It stores render caches
 ├── bookmarks/              # Bookmark files, one per book, named by content hash
 ├── clippings/              # EPUB clipping/highlight files, one per book, named by content hash
 ├── book_<contenthash>/     # Per-book BookOrbit sync state and reading-progress copy; follows the book through moves
+├── bookorbit_downloads.bin # Where BookOrbit catalog downloads landed, for the catalog's on-device marker
 ├── home_carousel_cache.bin # Lyra Carousel home-screen snapshot cache
 ├── sleep_frame.bin         # Temporary sleep overlay framebuffer, when used
 ├── epub_12471232/          # Each EPUB is cached to epub_<hash>

@@ -22,11 +22,25 @@
 namespace fui = freeink::ui;
 
 namespace {
-constexpr int MENU_ITEMS = 6;
+constexpr int MENU_ITEMS = 7;
+// The folder row reuses the OPDS strings: "Download Folder" and "SD Root" are
+// generic and already translated in every language file.
 const StrId menuNames[MENU_ITEMS] = {
     StrId::STR_USERNAME,     StrId::STR_PASSWORD,          StrId::STR_BOOKORBIT_SERVER_URL,
-    StrId::STR_AUTHENTICATE, StrId::STR_BOOKORBIT_CATALOG, StrId::STR_SYNC_BEHAVIOR};
+    StrId::STR_AUTHENTICATE, StrId::STR_BOOKORBIT_CATALOG, StrId::STR_OPDS_DOWNLOAD_FOLDER,
+    StrId::STR_SYNC_BEHAVIOR};
 constexpr fui::ActionId ACTION_ROW = 1;
+
+// Mirrors OpdsServerListActivity's normalizeDownloadFolder: "" for the SD root,
+// otherwise a leading and no trailing slash, so folder + "/file.epub" is a path.
+std::string normalizeDownloadFolder(std::string folder) {
+  while (!folder.empty() && (folder.front() == ' ' || folder.front() == '\t')) folder.erase(folder.begin());
+  while (!folder.empty() && (folder.back() == ' ' || folder.back() == '\t')) folder.pop_back();
+  if (folder.empty() || folder == "/") return "";
+  if (folder.front() != '/') folder.insert(folder.begin(), '/');
+  while (folder.size() > 1 && folder.back() == '/') folder.pop_back();
+  return folder;
+}
 }  // namespace
 
 BookOrbitSettingsActivity::BookOrbitSettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -152,6 +166,18 @@ void BookOrbitSettingsActivity::handleSelection() {
     }
     activityManager.goToBookOrbitCatalog();
   } else if (selectedIndex == 5) {
+    // Catalog download folder ("" = SD root); created on first download.
+    startActivityForResult(
+        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_OPDS_DOWNLOAD_FOLDER),
+                                                BOOKORBIT_STORE.getDownloadFolder(), 64, InputType::Text),
+        [this](const ActivityResult& result) {
+          if (!result.isCancelled) {
+            const auto& kb = std::get<KeyboardResult>(result.data);
+            BOOKORBIT_STORE.setDownloadFolder(normalizeDownloadFolder(kb.text));
+            BOOKORBIT_STORE.saveToFile();
+          }
+        });
+  } else if (selectedIndex == 6) {
     const auto current = BOOKORBIT_STORE.getSyncBehavior();
     BOOKORBIT_STORE.setSyncBehavior(current == BookOrbitSyncBehavior::ASK_EVERY_TIME
                                         ? BookOrbitSyncBehavior::SMART
@@ -186,6 +212,9 @@ void BookOrbitSettingsActivity::buildListScreen(UiApp::ScreenType& screen) {
       const auto serverUrl = BOOKORBIT_STORE.getServerUrl();
       values[i] = serverUrl.empty() ? tr(STR_NOT_SET) : serverUrl;
     } else if (i == 5) {
+      const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
+      values[i] = folder.empty() ? tr(STR_OPDS_SD_ROOT) : folder;
+    } else if (i == 6) {
       values[i] = BOOKORBIT_STORE.getSyncBehavior() == BookOrbitSyncBehavior::SMART ? tr(STR_SMART_SYNC)
                                                                                     : tr(STR_ASK_EVERY_TIME);
     } else {

@@ -432,6 +432,32 @@ Binary layout (all little-endian):
   - `[14]` `flags` (`uint8_t`, bit0 = clock was approximate / not NTP-confirmed)
   - `[15]` reserved
 
+## `/.crosspoint/bookorbit_downloads.bin`
+
+### Version 1
+
+Remembers where BookOrbit catalog downloads landed on the SD card, keyed by the
+server's book id, so the catalog can mark a book as already on the device even
+when the download folder setting has since changed or the file was renamed
+through a supported flow. It is a best-effort convenience cache: entries are
+verified on lookup (the file must still exist with its recorded size) and
+dropped when stale, and a missing or discarded index only costs the marker, with
+the filename heuristic as fallback. Capped at 128 entries, oldest evicted first.
+
+Book ids are only meaningful on the server that issued them, so the header
+records a CRC32 of the configured server URL; the whole file is discarded when
+it no longer matches, as it is when the magic is unreadable.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `BOD1`
+- `[4-7]` `serverCrc` (`uint32_t`, CRC32 of the configured BookOrbit server URL)
+- Repeated variable-length records:
+  - `[0-7]` `bookId` (`int64_t`, the server's book id)
+  - `[8-11]` `fileSize` (`uint32_t`, size of the downloaded file, for the replacement check)
+  - `[12-13]` `pathLength` (`uint16_t`, 1-256)
+  - `[14…]` `path` (`pathLength` bytes, absolute SD path, not null-terminated)
+
 ## `/.crosspoint/wallclock.bin`
 
 ### Version 1

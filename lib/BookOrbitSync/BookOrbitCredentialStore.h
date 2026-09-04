@@ -26,6 +26,7 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
   std::string username;
   std::string password;
   std::string serverUrl;
+  std::string downloadFolder;  // catalog download folder, normalized ("" = SD root)
   BookOrbitSyncBehavior syncBehavior = BookOrbitSyncBehavior::ASK_EVERY_TIME;
 
   BookOrbitCredentialStore() = default;
@@ -51,6 +52,12 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
 
   void setSyncBehavior(BookOrbitSyncBehavior behavior) { syncBehavior = behavior; }
   BookOrbitSyncBehavior getSyncBehavior() const { return syncBehavior; }
+
+  // Catalog download folder. Callers must pass a normalized value: "" for the SD
+  // root, otherwise "/Folder" with a leading and no trailing slash, so paths can
+  // be built as folder + "/file.epub" without special-casing the root.
+  void setDownloadFolder(const std::string& folder) { downloadFolder = folder; }
+  const std::string& getDownloadFolder() const { return downloadFolder; }
 
   // Clear credentials
   void clearCredentials();

@@ -177,7 +177,7 @@ inline bool writeProgressFileAtomic(const std::string& progressPath, const uint8
 
 // Persists reader progress for an EPUB to both of its homes (see loadProgress). Returns
 // true when every attempted write succeeded.
-inline bool saveProgress(Epub& epub, int spineIndex, int pageNumber, int pageCount,
+inline bool saveProgress(const Epub& epub, int spineIndex, int pageNumber, int pageCount,
                          const std::optional<uint32_t> visibleTextOffset = std::nullopt) {
   if (spineIndex < 0 || spineIndex > 0xFFFF || pageNumber < 0 || pageNumber > 0xFFFF || pageCount < 0 ||
       pageCount > 0xFFFF) {
