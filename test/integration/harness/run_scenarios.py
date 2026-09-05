@@ -30,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 INTEGRATION = ROOT / "test" / "integration"
 sys.path.insert(0, str(INTEGRATION / "seed"))
-from kosync import BASE_URL, KosyncDevice, partial_md5  # noqa: E402
+from kosync import BASE_URL, KosyncDevice, kodatetime, partial_md5  # noqa: E402
 
 PROGRAM = ROOT / ".pio" / "build" / "simulator" / "program"
 
@@ -85,6 +85,169 @@ def read_progress_bin(path: Path) -> dict | None:
     return out
 
 
+# --- reader-store serialization (formats mirror src/ClippingStore.cpp,
+# src/BookmarkStore.cpp and lib/BookOrbitSync/BookOrbit*Store.cpp) ----------------
+
+CHAPTER_TITLE_MAX = 48
+SNIPPET_MAX = 64
+
+
+def _pack_str(s: str) -> bytes:
+    data = s.encode()
+    return struct.pack("<I", len(data)) + data
+
+
+def _read_str(raw: bytes, offset: int) -> tuple[str, int]:
+    (length,) = struct.unpack_from("<I", raw, offset)
+    offset += 4
+    return raw[offset:offset + length].decode(errors="replace"), offset + length
+
+
+def _fixed_str(s: str, size: int) -> bytes:
+    return s.encode()[:size - 1].ljust(size, b"\0")
+
+
+def write_clipping_store(path: Path, title: str, author: str, book_path: str,
+                         clippings: list[dict]) -> None:
+    """Clipping store v3: header then per record 8×u16, u32 timestamp,
+    u32 layoutSignature, char[48] chapter, u16 textLen, text."""
+    blob = struct.pack("<BH", 3, len(clippings))
+    blob += _pack_str(title) + _pack_str(author) + _pack_str(book_path)
+    for c in clippings:
+        text = c["text"].encode()
+        blob += struct.pack("<8H", c["spine"], c.get("startPage", 0), c.get("endPage", 0),
+                            c.get("pageCount", 0), 0, 0, 0, c.get("paragraph", 0xFFFF))
+        blob += struct.pack("<II", c["timestamp"], c.get("layoutSignature", 0))
+        blob += _fixed_str(c.get("chapter", ""), CHAPTER_TITLE_MAX)
+        blob += struct.pack("<H", len(text)) + text
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(blob)
+
+
+def read_clipping_store(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    raw = path.read_bytes()
+    version, count = struct.unpack_from("<BH", raw, 0)
+    assert version == 3, f"unexpected clipping store version {version} in {path}"
+    offset = 3
+    title, offset = _read_str(raw, offset)
+    author, offset = _read_str(raw, offset)
+    book_path, offset = _read_str(raw, offset)
+    out = []
+    for _ in range(count):
+        spine, _sp, _ep, _pc, _sw, _ew, _wc, paragraph = struct.unpack_from("<8H", raw, offset)
+        offset += 16
+        timestamp, _sig = struct.unpack_from("<II", raw, offset)
+        offset += 8
+        chapter = raw[offset:offset + CHAPTER_TITLE_MAX].split(b"\0", 1)[0].decode(errors="replace")
+        offset += CHAPTER_TITLE_MAX
+        (text_len,) = struct.unpack_from("<H", raw, offset)
+        offset += 2
+        text = raw[offset:offset + text_len].decode(errors="replace")
+        offset += text_len
+        out.append({"spine": spine, "paragraph": paragraph, "timestamp": timestamp,
+                    "chapter": chapter, "text": text})
+    return out
+
+
+def write_bookmark_store(path: Path, title: str, author: str, book_path: str,
+                         bookmarks: list[dict]) -> None:
+    """Bookmark store v5: header then per record u16 spine, f32 progress,
+    u32 timestamp, char[48] chapter, u16 paragraph, char[64] snippet."""
+    blob = struct.pack("<BH", 5, len(bookmarks))
+    blob += _pack_str(title) + _pack_str(author) + _pack_str(book_path)
+    for b in bookmarks:
+        blob += struct.pack("<HfI", b["spine"], b.get("progress", 0.0), b["timestamp"])
+        blob += _fixed_str(b.get("chapter", ""), CHAPTER_TITLE_MAX)
+        blob += struct.pack("<H", b.get("paragraph", 0xFFFF))
+        blob += _fixed_str(b.get("snippet", ""), SNIPPET_MAX)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(blob)
+
+
+def read_bookmark_store(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    raw = path.read_bytes()
+    version, count = struct.unpack_from("<BH", raw, 0)
+    assert version == 5, f"unexpected bookmark store version {version} in {path}"
+    offset = 3
+    for _ in range(3):  # title, author, path
+        _, offset = _read_str(raw, offset)
+    out = []
+    for _ in range(count):
+        spine, progress, timestamp = struct.unpack_from("<HfI", raw, offset)
+        offset += 10
+        chapter = raw[offset:offset + CHAPTER_TITLE_MAX].split(b"\0", 1)[0].decode(errors="replace")
+        offset += CHAPTER_TITLE_MAX
+        (paragraph,) = struct.unpack_from("<H", raw, offset)
+        offset += 2
+        snippet = raw[offset:offset + SNIPPET_MAX].split(b"\0", 1)[0].decode(errors="replace")
+        offset += SNIPPET_MAX
+        out.append({"spine": spine, "progress": progress, "timestamp": timestamp,
+                    "chapter": chapter, "paragraph": paragraph, "snippet": snippet})
+    return out
+
+
+def write_boa_store(path: Path, watermark: int, records: list[dict]) -> None:
+    """BookOrbit annotation sync-state store ("BOA1")."""
+    blob = b"BOA1" + struct.pack("<I", watermark)
+    for r in records:
+        pos0, pos1 = r["pos0"].encode(), r["pos1"].encode()
+        blob += struct.pack("<IIHHHH", r["timestamp"], r["identityEpoch"], r["spine"],
+                            r.get("paragraph", 0xFFFF), len(pos0), len(pos1))
+        blob += pos0 + pos1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(blob)
+
+
+def read_boa_store(path: Path) -> tuple[int, list[dict]]:
+    if not path.exists():
+        return 0, []
+    raw = path.read_bytes()
+    assert raw[:4] == b"BOA1", f"unexpected annotation store magic in {path}"
+    (watermark,) = struct.unpack_from("<I", raw, 4)
+    offset, out = 8, []
+    while offset < len(raw):
+        ts, epoch, spine, paragraph, len0, len1 = struct.unpack_from("<IIHHHH", raw, offset)
+        offset += 16
+        pos0 = raw[offset:offset + len0].decode(errors="replace")
+        offset += len0
+        pos1 = raw[offset:offset + len1].decode(errors="replace")
+        offset += len1
+        out.append({"timestamp": ts, "identityEpoch": epoch, "spine": spine,
+                    "paragraph": paragraph, "pos0": pos0, "pos1": pos1})
+    return watermark, out
+
+
+def write_bob_store(path: Path, watermark: int, records: list[dict]) -> None:
+    """BookOrbit bookmark sync-state store ("BOB1")."""
+    blob = b"BOB1" + struct.pack("<I", watermark)
+    for r in records:
+        pos = r["pos"].encode()
+        blob += struct.pack("<IIHH", r["timestamp"], r["identityEpoch"], r["spine"], len(pos))
+        blob += pos
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(blob)
+
+
+def read_bob_store(path: Path) -> tuple[int, list[dict]]:
+    if not path.exists():
+        return 0, []
+    raw = path.read_bytes()
+    assert raw[:4] == b"BOB1", f"unexpected bookmark store magic in {path}"
+    (watermark,) = struct.unpack_from("<I", raw, 4)
+    offset, out = 8, []
+    while offset < len(raw):
+        ts, epoch, spine, pos_len = struct.unpack_from("<IIHH", raw, offset)
+        offset += 12
+        pos = raw[offset:offset + pos_len].decode(errors="replace")
+        offset += pos_len
+        out.append({"timestamp": ts, "identityEpoch": epoch, "spine": spine, "pos": pos})
+    return watermark, out
+
+
 class SimFs:
     """One scenario's isolated SD card."""
 
@@ -131,6 +294,17 @@ class SimFs:
     def book_state_dir(self, host_path: Path) -> Path:
         return self.crosspoint / f"book_{partial_md5(host_path)}"
 
+    # The clipping/bookmark stores and the BookOrbit sync-state dir are all keyed by the
+    # book's content hash — the "hash" field library.json already carries.
+    def state_dir(self, book_hash: str) -> Path:
+        return self.crosspoint / f"book_{book_hash}"
+
+    def clippings_store(self, book_hash: str) -> Path:
+        return self.crosspoint / "clippings" / f"epub_{book_hash}.bin"
+
+    def bookmarks_store(self, book_hash: str) -> Path:
+        return self.crosspoint / "bookmarks" / f"epub_{book_hash}.bin"
+
 
 def run_simulator(fs: SimFs, input_script: str, choice: str, timeout_s: int,
                   verbose: bool) -> str:
@@ -165,10 +339,88 @@ def run_simulator(fs: SimFs, input_script: str, choice: str, timeout_s: int,
 # --- scenarios ------------------------------------------------------------------
 
 
-def load_seed() -> tuple[dict, dict]:
+def load_seed() -> tuple[dict, list[dict]]:
     manifest = json.loads((INTEGRATION / "seed-manifest.json").read_text())
-    library = {b["hash"]: b for b in json.loads((INTEGRATION / "library.json").read_text())}
+    library = json.loads((INTEGRATION / "library.json").read_text())
     return manifest, library
+
+
+# Library indices for scenarios that need a book with NO seeded server state,
+# outside every seeded range in seed/seed.py (progress 0-9, highlights 10-19,
+# bookmarks 20-24). One book per scenario so runs never contaminate each other.
+FRESH_BOOK = {
+    "highlight_push": 30,
+    "bookmark_push": 31,
+    "highlight_delete": 32,
+    "highlight_delete_guard": 33,
+    "bookmark_pull": 34,
+}
+
+# Bookmarks dedupe server-side on their converted location (paragraph precision), so a
+# re-run "new" bookmark lands on the SAME server row. A row's identity key (datetime+pos)
+# must therefore stay fixed across runs, exactly as a real device keeps a bookmark's
+# minted datetime for life — re-minting one is what tombstones the row through the
+# complete-key-set diff.
+BOOKMARK_PUSH_EPOCH = 1_756_100_000
+
+ANNOTATION_STORE = "bookorbit_annotations.bin"
+BOOKMARK_STORE = "bookorbit_bookmarks.bin"
+
+
+def peer_device(manifest: dict) -> KosyncDevice:
+    """The synthetic 'other reader' that seeded the server-side state."""
+    dev = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                       manifest["kosync"]["password"], manifest["peer_device_id"])
+    dev.auth()
+    return dev
+
+
+def verify_device(manifest: dict, tag: str) -> KosyncDevice:
+    """A never-seen device id: the server offers it everything it has no sync
+    state for, which makes it an honest view of what exists server-side."""
+    dev = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                       manifest["kosync"]["password"], f"crossink-verify-{tag}-{int(time.time())}")
+    dev.auth()
+    return dev
+
+
+def annotation_adds(device: KosyncDevice, book_hash: str) -> list[dict]:
+    resp = device.exchange_annotations(book_hash, keys=[], keys_complete=False, changes=[])
+    assert not resp.get("unmatched"), f"server does not know book {book_hash}: {resp}"
+    return resp["results"][0]["toApply"]["add"]
+
+
+def bookmark_adds(device: KosyncDevice, book_hash: str) -> list[dict]:
+    resp = device.exchange_bookmarks(book_hash, keys=[], keys_complete=False, changes=[])
+    assert not resp.get("unmatched"), f"server does not know book {book_hash}: {resp}"
+    return resp["results"][0]["toApply"]["add"]
+
+
+def reset_sim_bookmarks(manifest: dict, book_hash: str) -> None:
+    """Detach the simulator's fixed device id from every bookmark on this book, so the
+    next peer bookmark is offered to it again (the server offers a bookmark only to
+    devices holding no link for it). Impersonates the simulator: an empty-complete key
+    set tombstones what it held and drops those links; acking the returned deletion
+    offers drops any stale links on already-tombstoned rows."""
+    sim = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                       manifest["kosync"]["password"], SIM_DEVICE_ID)
+    sim.auth()
+    resp = sim.exchange_bookmarks(book_hash, keys=[], keys_complete=True, changes=[])
+    deletes = resp["results"][0]["toApply"]["delete"]
+    if deletes:
+        sim.exchange_bookmarks_ack(book_hash, deleted=[
+            {"serverId": d["serverId"], "status": "applied"} for d in deletes])
+
+
+def make_fs(tmp: str, manifest: dict, book: dict) -> tuple[SimFs, str, Path]:
+    """The common setup: isolated SD, the book installed and open, local progress
+    at the very beginning."""
+    fs = SimFs(Path(tmp), manifest["kosync"])
+    source = INTEGRATION / "library" / book["file"]
+    sim_path = fs.add_book(source)
+    fs.set_open_book(sim_path)
+    write_progress_bin(fs.epub_cache_dir(sim_path) / "progress.bin", 0, 0, 10)
+    return fs, sim_path, source
 
 
 def scenario_sync_progress_pull(verbose: bool) -> None:
@@ -227,9 +479,223 @@ def scenario_sync_progress_push(verbose: bool) -> None:
     assert remote.get("device_id") == SIM_DEVICE_ID, f"unexpected device id: {remote}"
 
 
+def scenario_highlight_pull(verbose: bool) -> None:
+    """A highlight created by another device reaches the simulator's clipping
+    store, and its position is recorded for future syncs. A fresh peer highlight
+    per run keeps this repeatable: the simulator's device id has already
+    acknowledged older ones on previous runs."""
+    manifest, _ = load_seed()
+    book = manifest["highlights"][0]
+    now = int(time.time())
+    text = f"Peer highlight {now}"
+    peer = peer_device(manifest)
+    peer.exchange_annotations(book["hash"], keys=[], keys_complete=False, changes=[{
+        "datetime": kodatetime(now),
+        "pos0": "/body/DocFragment[3]/body/p[2]/text().0",
+        "pos1": f"/body/DocFragment[3]/body/p[2]/text().{len(text)}",
+        "text": text,
+        "chapter": "Chapter",
+    }])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, _, _ = make_fs(tmp, manifest, book)
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "sync never reached its end marker"
+
+        clippings = read_clipping_store(fs.clippings_store(book["hash"]))
+        mine = [c for c in clippings if c["text"] == text]
+        assert mine, f"peer highlight missing locally; texts={[c['text'] for c in clippings]}"
+        assert mine[0]["spine"] == 2, f"highlight landed in the wrong chapter: {mine[0]}"
+        _, records = read_boa_store(fs.state_dir(book["hash"]) / ANNOTATION_STORE)
+        assert any(r["pos0"].startswith("/body/DocFragment[3]") for r in records), \
+            f"no position record for the received highlight: {records}"
+
+
+def scenario_highlight_push(verbose: bool) -> None:
+    """A local highlight (clipping + minted position record, exactly what the
+    reader persists on creation) reaches the server and is offered to a device
+    that has never seen it."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["highlight_push"]]
+    now = int(time.time())
+    text = f"Local highlight {now}"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        # timestamp is the reader's millis()/1000 uptime stamp (any nonzero joins
+        # the two stores); identityEpoch is the WallClock date the server validates.
+        write_clipping_store(fs.clippings_store(book["hash"]), book.get("title", ""),
+                             book.get("author", ""), sim_path,
+                             [{"spine": 1, "paragraph": 2, "timestamp": 4242,
+                               "text": text, "chapter": "Chapter"}])
+        write_boa_store(fs.state_dir(book["hash"]) / ANNOTATION_STORE, 0, [{
+            "timestamp": 4242, "identityEpoch": now, "spine": 1, "paragraph": 2,
+            "pos0": "/body/DocFragment[2]/body/p[2]/text().0",
+            "pos1": f"/body/DocFragment[2]/body/p[2]/text().{len(text)}",
+        }])
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "sync never reached its end marker"
+        watermark, _ = read_boa_store(fs.state_dir(book["hash"]) / ANNOTATION_STORE)
+        assert watermark >= now, f"upload watermark did not advance: {watermark} < {now}"
+
+    adds = annotation_adds(verify_device(manifest, "hlpush"), book["hash"])
+    assert any(a["text"] == text for a in adds), \
+        f"pushed highlight not on server; offered texts={[a['text'] for a in adds]}"
+
+
+def scenario_highlight_delete_propagates(verbose: bool) -> None:
+    """Deleting a synced highlight locally deletes it on the server: the second
+    sync's complete key set no longer names it. Two simulator runs on one SD."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["highlight_delete"]]
+    now = int(time.time())
+    text = f"Doomed highlight {now}"
+    peer = peer_device(manifest)
+    peer.exchange_annotations(book["hash"], keys=[], keys_complete=False, changes=[{
+        "datetime": kodatetime(now),
+        "pos0": "/body/DocFragment[3]/body/p[2]/text().0",
+        "pos1": f"/body/DocFragment[3]/body/p[2]/text().{len(text)}",
+        "text": text,
+        "chapter": "Chapter",
+    }])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "first sync never finished"
+        clippings = read_clipping_store(fs.clippings_store(book["hash"]))
+        assert any(c["text"] == text for c in clippings), "setup: highlight never arrived"
+
+        # The user deletes the highlight: the clipping goes, the position record
+        # stays behind (the next sync drops the orphan and reports the shrunken set).
+        write_clipping_store(fs.clippings_store(book["hash"]), "", "", sim_path,
+                             [c for c in clippings if c["text"] != text])
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "second sync never finished"
+
+    adds = annotation_adds(verify_device(manifest, "hldel"), book["hash"])
+    assert not any(a["text"] == text for a in adds), \
+        f"deleted highlight still on server: {[a['text'] for a in adds]}"
+
+
+def scenario_highlight_delete_guard(verbose: bool) -> None:
+    """A lost sync-state store must NOT read as 'every highlight deleted': with
+    the store gone, the sync reports no key set and the server keeps everything.
+    This is the destructive-wipe guard in prepareAnnotationBatch."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["highlight_delete_guard"]]
+    now = int(time.time())
+    text = f"Survivor highlight {now}"
+    peer = peer_device(manifest)
+    peer.exchange_annotations(book["hash"], keys=[], keys_complete=False, changes=[{
+        "datetime": kodatetime(now),
+        "pos0": "/body/DocFragment[3]/body/p[2]/text().0",
+        "pos1": f"/body/DocFragment[3]/body/p[2]/text().{len(text)}",
+        "text": text,
+        "chapter": "Chapter",
+    }])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "first sync never finished"
+        clippings = read_clipping_store(fs.clippings_store(book["hash"]))
+        assert any(c["text"] == text for c in clippings), "setup: highlight never arrived"
+
+        # History lost (wiped card, fresh device) AND the clippings gone: without
+        # the guard, the empty-complete key set would erase the server's copy.
+        (fs.state_dir(book["hash"]) / ANNOTATION_STORE).unlink()
+        write_clipping_store(fs.clippings_store(book["hash"]), "", "", sim_path, [])
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "second sync never finished"
+        assert "No highlight sync history" in output, \
+            "guard log missing: deletions may have been reported over a lost store"
+
+    adds = annotation_adds(verify_device(manifest, "hlguard"), book["hash"])
+    assert any(a["text"] == text for a in adds), \
+        "server highlight was erased despite the lost local store"
+
+
+def scenario_bookmark_pull(verbose: bool) -> None:
+    """A bookmark created by another device reaches the simulator's bookmark
+    store, with a position record minted for future syncs. The simulator's fixed
+    device id keeps its server-side link across runs, so the scenario first
+    detaches it, then has the peer re-mint the bookmark (fresh datetime = fresh
+    key, restoring the tombstoned row for everyone but the simulator)."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["bookmark_pull"]]
+    now = int(time.time())
+    pos = "/body/DocFragment[2]/body/p[1]/text().0"
+    reset_sim_bookmarks(manifest, book["hash"])
+    peer = peer_device(manifest)
+    peer.exchange_bookmarks(book["hash"], keys=[], keys_complete=False,
+                            changes=[{"datetime": kodatetime(now), "pos": pos}])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, _, _ = make_fs(tmp, manifest, book)
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "sync never reached its end marker"
+
+        _, records = read_bob_store(fs.state_dir(book["hash"]) / BOOKMARK_STORE)
+        assert any(r["pos"] == pos for r in records), \
+            f"no position record for the received bookmark: {records}"
+        bookmarks = read_bookmark_store(fs.bookmarks_store(book["hash"]))
+        assert any(b["spine"] == 1 for b in bookmarks), \
+            f"bookmark did not land in chapter 2: {bookmarks}"
+
+
+def scenario_bookmark_push(verbose: bool) -> None:
+    """A local bookmark (store entry + minted position record) reaches the
+    server and is offered to a device that has never seen it."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["bookmark_push"]]
+    # Fixed identity across runs (see BOOKMARK_PUSH_EPOCH): re-runs upload the same
+    # key and the server treats it as the same bookmark, as with a real device.
+    epoch = BOOKMARK_PUSH_EPOCH
+    pos = "/body/DocFragment[3]/body/p[1]/text().0"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        # Unlike clippings, bookmark timestamps are real WallClock epochs and
+        # double as the sync identity.
+        write_bookmark_store(fs.bookmarks_store(book["hash"]), book.get("title", ""),
+                             book.get("author", ""), sim_path,
+                             [{"spine": 2, "progress": 0.25, "timestamp": epoch,
+                               "chapter": "Chapter", "paragraph": 1, "snippet": "Local bookmark"}])
+        write_bob_store(fs.state_dir(book["hash"]) / BOOKMARK_STORE, 0, [{
+            "timestamp": epoch, "identityEpoch": epoch, "spine": 2, "pos": pos,
+        }])
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "sync never reached its end marker"
+        watermark, _ = read_bob_store(fs.state_dir(book["hash"]) / BOOKMARK_STORE)
+        assert watermark >= epoch, f"upload watermark did not advance: {watermark} < {epoch}"
+
+    adds = bookmark_adds(verify_device(manifest, "bmpush"), book["hash"])
+    assert any(a["pos"] == pos for a in adds), \
+        f"pushed bookmark not on server; offered={[a['pos'] for a in adds]}"
+
+
 SCENARIOS = {
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,
+    "highlight_pull": scenario_highlight_pull,
+    "highlight_push": scenario_highlight_push,
+    "highlight_delete_propagates": scenario_highlight_delete_propagates,
+    "highlight_delete_guard": scenario_highlight_delete_guard,
+    "bookmark_pull": scenario_bookmark_pull,
+    "bookmark_push": scenario_bookmark_push,
 }
 
 

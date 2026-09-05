@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kosync import BASE_URL, SETUP_TOKEN, AdminClient, KosyncDevice, SeedManifest  # noqa: E402
+from kosync import BASE_URL, SETUP_TOKEN, AdminClient, KosyncDevice, SeedManifest, kodatetime  # noqa: E402
 
 INTEGRATION = Path(__file__).resolve().parents[1]
 
@@ -38,11 +38,6 @@ WITH_PROGRESS = range(0, 10)     # server progress at ~40%
 WITH_HIGHLIGHTS = range(10, 20)  # two highlights each
 WITH_BOOKMARKS = range(20, 25)   # one bookmark each
 SEED_EPOCH = 1_756_000_000       # fixed timestamps keep reruns idempotent
-
-
-def kodatetime(epoch: int) -> str:
-    """KOReader's annotation datetime format, what the exchange endpoints validate."""
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(epoch))
 
 
 def main() -> int:
@@ -138,21 +133,10 @@ def main() -> int:
 
     for n, i in enumerate(WITH_BOOKMARKS):
         book = books[i]
-        payload = {
-            "deviceId": OTHER_DEVICE_ID,
-            "deviceModel": "integration-suite",
-            "pluginVersion": "crossink-bo-1",
-            "books": [{
-                "hash": book["hash"],
-                "keysComplete": False,
-                "keys": [],
-                "changes": [{
-                    "datetime": kodatetime(SEED_EPOCH + 3600 + n),
-                    "pos": "/body/DocFragment[5]/body/p[1]/text().0",
-                }],
-            }],
-        }
-        peer.exchange_bookmarks(payload)
+        peer.exchange_bookmarks(book["hash"], keys=[], keys_complete=False, changes=[{
+            "datetime": kodatetime(SEED_EPOCH + 3600 + n),
+            "pos": "/body/DocFragment[5]/body/p[1]/text().0",
+        }])
         manifest.data["bookmarks"].append({**book, "count": 1})
 
     manifest.save()

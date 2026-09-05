@@ -48,6 +48,11 @@ BASE_URL = ENV["APP_URL"]
 SETUP_TOKEN = ENV["SETUP_BOOTSTRAP_TOKEN"]
 
 
+def kodatetime(epoch: int) -> str:
+    """KOReader's annotation datetime format, what the exchange endpoints validate."""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(epoch))
+
+
 # --- KOReader partial MD5 (mirrors lib/KOReaderSync/KOReaderDocumentId.cpp) ---
 
 _CHUNK = 1024
@@ -279,8 +284,39 @@ class KosyncDevice:
         return request_json("POST", self.api("/plugin/annotations/exchange-ack"),
                             self._headers(), payload)
 
-    def exchange_bookmarks(self, payload: dict) -> dict:
+    def exchange_bookmarks(self, document_hash: str, keys: list[dict], keys_complete: bool,
+                           changes: list[dict]) -> dict:
+        """Mirror of BookOrbitSyncClient::exchangeBookmarks. ``changes`` entries carry
+        datetime/pos only — the bookmark DTO rejects posFormat."""
+        payload = {
+            "deviceId": self.device_id,
+            "deviceModel": self.device_model,
+            "pluginVersion": self.plugin_version,
+            "books": [{
+                "hash": document_hash,
+                "keysComplete": keys_complete,
+                "keys": keys,
+                "changes": changes,
+            }],
+        }
         return request_json("POST", self.api("/plugin/bookmarks/exchange"),
+                            self._headers(), payload)
+
+    def exchange_bookmarks_ack(self, document_hash: str, applied: list[dict] = (),
+                               deleted: list[dict] = ()) -> dict:
+        """``applied`` entries are {serverId, status, key|datetime+pos}; ``deleted``
+        entries are {serverId, status}. status is 'applied' or 'failed'."""
+        payload = {
+            "deviceId": self.device_id,
+            "deviceModel": self.device_model,
+            "pluginVersion": self.plugin_version,
+            "books": [{
+                "hash": document_hash,
+                "applied": list(applied),
+                "deleted": list(deleted),
+            }],
+        }
+        return request_json("POST", self.api("/plugin/bookmarks/exchange-ack"),
                             self._headers(), payload)
 
 
