@@ -10,35 +10,46 @@ nav_order: 2
 - Xteink X3, X4
 - Seeed Studio Sticky
 
+## Firmware Files
+
+Every path below starts from a `firmware-*.bin` downloaded from **this fork's**
+[releases page](https://github.com/agosez/CrossInk-Bookorbit/releases) — one file per
+device model. CrossInk's own web installer and update feeds only carry upstream builds,
+which have no BookOrbit support. Once this fork is installed,
+`Settings > System > Check for Updates` follows this fork's releases, so later versions
+arrive over the air.
+
 ## Web Installation via USB
 
 #### For new installs and updates.
 
-1. Navigate to [https://inky.crossink.dev/#flash-tools](https://inky.crossink.dev/#flash-tools) and select your device model.
-2. The latest version will be automatically selected, but if you ever want to revert to an earlier build, you can select it from the dropdown.
-3. Choose the firmware option you want to install.
-4. Click on the "Flash Firmware" button
+1. Download the `firmware-*.bin` for your device from the releases page.
+2. Open the [CrossPoint flash tools](https://crosspointreader.com/#flash-tools), select
+   your device model and choose the custom-firmware option.
+3. Give it the downloaded `firmware-*.bin` and start the flash, keeping the reader
+   connected through the download-mode and flashing steps.
 
 ## SD Card Firmware Update
 
-#### For installing newer versions of CrossInk. Can be used by USB locked devices.
+#### For a device that already runs CrossInk (upstream or this fork). Works on USB-locked devices.
 
-1. Follow the same steps from the Web Installation method above. There will be an option to download the firmware instead of USB flashing.
-2. Place the downloaded `firmware-*.bin` file on your SD card. You can place this file anywhere.
-3. Go to `Settings > System > SD Card Firmware Update` and navigate to the `.bin` file and update.
+1. Download the `firmware-*.bin` for your device from the releases page.
+2. Place it anywhere on the SD card.
+3. Go to `Settings > System > SD Card Firmware Update`, navigate to the `.bin` file and
+   update.
 
-## USB Locked Devices
+## Reverting to upstream CrossInk
 
-If your device has USB data transfer disabled:
-
-1. Navigate to [https://inky.crossink.dev/#flash-tools](https://inky.crossink.dev/#flash-tools) and check the box for "I have a locked device" at the top.
-2. The latest version will be automatically selected, but if you ever want to revert to an earlier build, you can select it from the dropdown.
-3. Choose the firmware option you want to download.
-4. Click on the "Download update.bin" button and follow the instructions.
+Flash an upstream build with CrossInk's own
+[web installer](https://inky.crossink.dev/#flash-tools), or place an upstream
+`firmware-*.bin` on the SD card and use the SD Card Firmware Update above. Settings,
+books, reading progress, highlights and bookmarks live on the SD card and survive the
+swap in both directions.
 
 ## Command Line
 
-These instructions are for macOS and Linux. Windows users should use the web installer.
+These instructions are for macOS and Linux, and for the ESP32-C3 devices (X3 and X4);
+for the other devices, use the web installer.
 
 Install `esptool`:
 
@@ -46,7 +57,9 @@ Install `esptool`:
 pip3 install esptool
 ```
 
-Download the `firmware-*.bin` file from the [releases page](https://github.com/uxjulia/CrossInk/releases), then connect your device with USB-C.
+Download the `firmware-*.bin` file from the
+[releases page](https://github.com/agosez/CrossInk-Bookorbit/releases), then connect
+your device with USB-C.
 
 Find the device port:
 
