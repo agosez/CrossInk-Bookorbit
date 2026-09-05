@@ -138,7 +138,9 @@ void TxtReaderActivity::onEnter() {
   APP_STATE.saveToFile();
   SleepCoverAssets::prepareTxt(*txt);
   const std::string coverBmpPath = Storage.exists(txt->getCoverBmpPath().c_str()) ? txt->getCoverBmpPath() : "";
-  RECENT_BOOKS.addOrUpdateBook(filePath, fileName, "", coverBmpPath);
+  if (!skipRecentBookUpdateOnEntry) {
+    RECENT_BOOKS.addOrUpdateBook(filePath, fileName, "", coverBmpPath);
+  }
 
   // Trigger first update
   requestUpdate();
@@ -242,7 +244,7 @@ void TxtReaderActivity::loop() {
   }
 
   // Short press BACK goes directly to home
-  if (mappedInput.wasReleased(MappedInputManager::Button::Back) &&
+  if (!touch.prev && !touch.next && mappedInput.wasReleased(MappedInputManager::Button::Back) &&
       mappedInput.getHeldTime() < ReaderUtils::GO_HOME_MS) {
     onGoHome();
     return;

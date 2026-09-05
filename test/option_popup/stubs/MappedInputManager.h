@@ -64,9 +64,7 @@ class MappedInputManager {
   }
   bool wasReleased(const Button button) const {
     if (button != Button::Power || !powerReleased) return false;
-    powerReleased = false;
     if (powerReleaseSuppressed) {
-      powerReleaseSuppressed = false;
       return false;
     }
     return true;
@@ -104,6 +102,11 @@ class MappedInputManager {
   void injectPowerConfirmRelease() {
     powerPressed = false;
     powerReleased = true;
+  }
+
+  void advanceInputFrame() {
+    powerReleased = false;
+    if (!powerPressed) powerReleaseSuppressed = false;
   }
 
   bool isPowerReleaseSuppressed() const { return powerReleaseSuppressed; }

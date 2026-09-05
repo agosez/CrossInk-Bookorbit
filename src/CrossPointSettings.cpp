@@ -475,6 +475,7 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   }
   doc["quickActionsTrigger"] = quickActionsTrigger;
   doc["language"] = (language < getLanguageCount()) ? LANGUAGE_CODES[language] : "EN";
+  if (keyboardLayouts != 0) doc["keyboardLayouts"] = keyboardLayouts;
   doc["tiltPageTurnDirectionSchema"] = TILT_DIRECTION_SCHEMA_CURRENT;
   doc["clockDateHasBeenSynced"] = clockDateHasBeenSynced;
   doc["screenInverted"] = screenInverted;
@@ -738,6 +739,9 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   }
   if (doc["language"].is<const char*>()) {
     language = static_cast<uint8_t>(I18n::languageFromCode(doc["language"].as<const char*>()));
+  }
+  if (doc["keyboardLayouts"].is<uint16_t>()) {
+    keyboardLayouts = doc["keyboardLayouts"].as<uint16_t>();
   }
   clockDateHasBeenSynced = clamp(doc["clockDateHasBeenSynced"] | static_cast<uint8_t>(0), 2, 0);
 

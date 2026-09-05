@@ -9,6 +9,11 @@
 #include "MappedInputManager.h"
 #include "TextPool.h"
 
+namespace {
+constexpr unsigned long WORD_REPEAT_START_MS = 500;
+constexpr unsigned long WORD_REPEAT_INTERVAL_MS = 500;
+}  // namespace
+
 void WordSelectNavigator::load(std::vector<WordInfo> w, std::vector<Row> r, std::string pool,
                                bool consumeInitialConfirm) {
   ownedWords = std::move(w);
@@ -21,6 +26,8 @@ void WordSelectNavigator::load(std::vector<WordInfo> w, std::vector<Row> r, std:
   currentWordInRow =
       (!rows.empty() && rows[currentRow].wordCount > 0) ? static_cast<int>(rows[currentRow].wordCount) / 2 : 0;
   confirmReleaseConsumed = consumeInitialConfirm;
+  lastWordRepeatTime = 0;
+  wordRepeatActive = false;
 }
 
 void WordSelectNavigator::loadView(WordInfo* w, const size_t wordCount, Row* r, const size_t rowCount, const char* pool,
@@ -35,6 +42,8 @@ void WordSelectNavigator::loadView(WordInfo* w, const size_t wordCount, Row* r, 
   currentWordInRow =
       (!rows.empty() && rows[currentRow].wordCount > 0) ? static_cast<int>(rows[currentRow].wordCount) / 2 : 0;
   confirmReleaseConsumed = consumeInitialConfirm;
+  lastWordRepeatTime = 0;
+  wordRepeatActive = false;
 }
 
 void WordSelectNavigator::organizeIntoRows(std::vector<WordInfo>& words, std::vector<Row>& rows) {
@@ -100,6 +109,8 @@ void WordSelectNavigator::reset() {
   anchorFlatIndex = -1;
   completedSelectionStart = -1;
   completedSelectionEnd = -1;
+  lastWordRepeatTime = 0;
+  wordRepeatActive = false;
   pendingSnapIdx = -1;
   snapshot_.clear();
 }
@@ -214,12 +225,15 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
   const bool landscape = isLandscapeCw || isLandscapeCcw;
 
   bool rowPrevPressed, rowNextPressed, wordPrevPressed, wordNextPressed;
+  bool wordPrevHeld, wordNextHeld;
 
   if (isLandscapeCw) {
     rowPrevPressed = input.wasReleased(MappedInputManager::Button::Left);
     rowNextPressed = input.wasReleased(MappedInputManager::Button::Right);
     wordPrevPressed = input.wasReleased(MappedInputManager::Button::Down);
     wordNextPressed = input.wasReleased(MappedInputManager::Button::Up);
+    wordPrevHeld = input.isPressed(MappedInputManager::Button::Down);
+    wordNextHeld = input.isPressed(MappedInputManager::Button::Up);
   } else if (landscape) {
     const bool frontNavSwapped = input.isFrontNavButtonSwapActive();
     rowPrevPressed =
@@ -228,16 +242,40 @@ bool WordSelectNavigator::handleNavigation(const MappedInputManager& input, cons
         input.wasReleased(frontNavSwapped ? MappedInputManager::Button::Right : MappedInputManager::Button::Left);
     wordPrevPressed = input.wasReleased(MappedInputManager::Button::Up);
     wordNextPressed = input.wasReleased(MappedInputManager::Button::Down);
+    wordPrevHeld = input.isPressed(MappedInputManager::Button::Up);
+    wordNextHeld = input.isPressed(MappedInputManager::Button::Down);
   } else if (isInverted) {
     rowPrevPressed = input.wasReleased(MappedInputManager::Button::Down);
     rowNextPressed = input.wasReleased(MappedInputManager::Button::Up);
     wordPrevPressed = input.wasReleased(MappedInputManager::Button::Right);
     wordNextPressed = input.wasReleased(MappedInputManager::Button::Left);
+    wordPrevHeld = input.isPressed(MappedInputManager::Button::Right);
+    wordNextHeld = input.isPressed(MappedInputManager::Button::Left);
   } else {
     rowPrevPressed = input.wasReleased(MappedInputManager::Button::Up);
     rowNextPressed = input.wasReleased(MappedInputManager::Button::Down);
     wordPrevPressed = input.wasReleased(MappedInputManager::Button::Left);
     wordNextPressed = input.wasReleased(MappedInputManager::Button::Right);
+    wordPrevHeld = input.isPressed(MappedInputManager::Button::Left);
+    wordNextHeld = input.isPressed(MappedInputManager::Button::Right);
+  }
+
+  const unsigned long now = millis();
+  const bool repeatDue = (wordPrevHeld || wordNextHeld) && input.getHeldTime() >= WORD_REPEAT_START_MS &&
+                         (!wordRepeatActive || now - lastWordRepeatTime >= WORD_REPEAT_INTERVAL_MS);
+  if (repeatDue) {
+    wordPrevPressed = wordPrevHeld;
+    wordNextPressed = wordNextHeld;
+    wordRepeatActive = true;
+    lastWordRepeatTime = now;
+  } else if (wordRepeatActive && (wordPrevPressed || wordNextPressed)) {
+    // A repeated hold already moved at the threshold; do not add one more
+    // step when that same button is released.
+    wordPrevPressed = false;
+    wordNextPressed = false;
+    wordRepeatActive = false;
+  } else if (!wordPrevHeld && !wordNextHeld) {
+    wordRepeatActive = false;
   }
 
   const int rowCount = static_cast<int>(rows.size());

@@ -594,13 +594,18 @@ void KOReaderSyncActivity::onEnter() {
   // The reader uses this activity as a tiny handoff so ActivityManager can run
   // reader onExit() before rebooting. Network boot uses the other constructor.
   if (restartBeforeNetwork) {
-    silentRestartToNetwork(NetworkBootTarget::KOREADER_SYNC);
+    const bool hasReaderOrientation = readerOrientation < CrossPointSettings::ORIENTATION_COUNT;
+    if (hasReaderOrientation) ReaderUtils::applyOrientation(renderer, readerOrientation);
+    // Zero means no reader override; valid orientations are encoded one-based.
+    const uint32_t orientationPayload = hasReaderOrientation ? static_cast<uint32_t>(readerOrientation) + 1 : 0;
+    silentRestartToNetwork(NetworkBootTarget::KOREADER_SYNC, orientationPayload);
     return;
   }
 
   LOG_INF("KOSync", "network entry free=%u maxAlloc=%u stack=%u", ESP.getFreeHeap(), ESP.getMaxAllocHeap(),
           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
-  uint8_t syncOrientation = SETTINGS.orientation;
+  uint8_t syncOrientation =
+      readerOrientation < CrossPointSettings::ORIENTATION_COUNT ? readerOrientation : SETTINGS.orientation;
   const PendingOverlayResume& resume = APP_STATE.pendingOverlayResume;
   if (resume.origin == PendingOverlayOrigin::Reader && resume.overlay == PendingOverlayType::FrontlightDrawer &&
       resume.preserveReaderOrientation && resume.readerOrientation < CrossPointSettings::ORIENTATION_COUNT) {
@@ -650,7 +655,7 @@ void KOReaderSyncActivity::onExit() {
 
   if (wifiActivated) {
     wifiOff();
-    silentRestartToReader(true);
+    silentRestartToReaderAfterNetwork(true);
   }
 }
 

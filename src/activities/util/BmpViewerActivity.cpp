@@ -113,6 +113,7 @@ bool BmpViewerActivity::renderPngImage() {
     drawImageError(renderer, mappedInput, "Invalid PNG File");
     return false;
   }
+  renderer.preserveImagePolarity(x, y, drawWidth, drawHeight);
 
   bool hasPrevious = (siblingImages.size() > 1 && currentImageIndex > 0);
   bool hasNext = (siblingImages.size() > 1 && currentImageIndex != -1 &&

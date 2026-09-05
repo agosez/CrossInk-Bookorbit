@@ -83,21 +83,6 @@ struct ReaderLayoutSettingsSnapshot {
   // Indexing method is a build policy, not a layout input. A mode-only change
   // keeps the live section/parser and takes effect when the next chapter opens.
   char sdFontFamilyName[sizeof(SETTINGS.sdFontFamilyName)] = {};
-
-  bool operator==(const ReaderLayoutSettingsSnapshot& other) const {
-    return fontFamily == other.fontFamily && readerFontPointSize == other.readerFontPointSize &&
-           lineHeightPercent == other.lineHeightPercent && wordSpacing == other.wordSpacing &&
-           orientation == other.orientation && screenMarginVertical == other.screenMarginVertical &&
-           screenMarginHorizontal == other.screenMarginHorizontal &&
-           publisherPageNumbers == other.publisherPageNumbers && paragraphAlignment == other.paragraphAlignment &&
-           embeddedStyle == other.embeddedStyle && hyphenationEnabled == other.hyphenationEnabled &&
-           textAntiAliasing == other.textAntiAliasing && imageRendering == other.imageRendering &&
-           extraParagraphSpacing == other.extraParagraphSpacing &&
-           forceParagraphIndents == other.forceParagraphIndents && bionicReadingEnabled == other.bionicReadingEnabled &&
-           guideReadingEnabled == other.guideReadingEnabled && epubRenderMode == other.epubRenderMode &&
-           std::strncmp(sdFontFamilyName, other.sdFontFamilyName, sizeof(sdFontFamilyName)) == 0;
-  }
-  bool operator!=(const ReaderLayoutSettingsSnapshot& other) const { return !(*this == other); }
 };
 
 ReaderLayoutSettingsSnapshot captureReaderLayoutSettings() {
@@ -126,8 +111,32 @@ ReaderLayoutSettingsSnapshot captureReaderLayoutSettings() {
   return snapshot;
 }
 
-bool haveReaderLayoutSettingsChanged(const ReaderLayoutSettingsSnapshot& before) {
-  return before != captureReaderLayoutSettings();
+ReaderSettingsChangeMask classifyReaderSettingsChange(const ReaderLayoutSettingsSnapshot& before,
+                                                      const ReaderLayoutSettingsSnapshot& after) {
+  ReaderSettingsChangeMask changeMask = ReaderSettingsChangeMask::None;
+
+  if (before.textAntiAliasing != after.textAntiAliasing) {
+    changeMask = changeMask | ReaderSettingsChangeMask::NonLayout;
+  }
+  if (before.orientation != after.orientation) {
+    changeMask = changeMask | ReaderSettingsChangeMask::Orientation;
+  }
+  if (before.fontFamily != after.fontFamily || before.readerFontPointSize != after.readerFontPointSize ||
+      before.lineHeightPercent != after.lineHeightPercent || before.wordSpacing != after.wordSpacing ||
+      before.screenMarginVertical != after.screenMarginVertical ||
+      before.screenMarginHorizontal != after.screenMarginHorizontal ||
+      before.publisherPageNumbers != after.publisherPageNumbers ||
+      before.paragraphAlignment != after.paragraphAlignment || before.embeddedStyle != after.embeddedStyle ||
+      before.hyphenationEnabled != after.hyphenationEnabled ||
+      before.extraParagraphSpacing != after.extraParagraphSpacing ||
+      before.forceParagraphIndents != after.forceParagraphIndents ||
+      before.bionicReadingEnabled != after.bionicReadingEnabled ||
+      before.guideReadingEnabled != after.guideReadingEnabled || before.imageRendering != after.imageRendering ||
+      before.epubRenderMode != after.epubRenderMode ||
+      std::strncmp(before.sdFontFamilyName, after.sdFontFamilyName, sizeof(before.sdFontFamilyName)) != 0) {
+    changeMask = changeMask | ReaderSettingsChangeMask::Relayout;
+  }
+  return changeMask;
 }
 
 void drawBookmarkTabIcon(const GfxRenderer& renderer, int x, int y, const bool foregroundBlack = true) {
@@ -319,9 +328,15 @@ void EpubReaderMenuActivity::moveActiveTab(const bool forward) {
 void EpubReaderMenuActivity::finishCancelled() {
   ActivityResult result;
   result.isCancelled = true;
-  result.data = MenuResult{-1, pendingOrientation, settingsChanged};
+  result.data = makeMenuResult(-1);
   setResult(std::move(result));
   finish();
+}
+
+MenuResult EpubReaderMenuActivity::makeMenuResult(const int action) const {
+  MenuResult result{action, pendingOrientation, settingsChanged};
+  result.changeMask = changeMask;
+  return result;
 }
 
 bool EpubReaderMenuActivity::activateSelectedItem() {
@@ -361,7 +376,12 @@ bool EpubReaderMenuActivity::activateSelectedItem() {
                                endGlobalSettingsEditContext, stablePageNumbersAvailable, dictionaryFontFamilyName,
                                dictionaryFontPointSize, hasDictionaryFontOverride, dictionaryFontChangedForMenu, this),
                            [this, before](const ActivityResult& result) {
-                             settingsChanged = settingsChanged || haveReaderLayoutSettingsChanged(before);
+                             const ReaderSettingsChangeMask changed =
+                                 classifyReaderSettingsChange(before, captureReaderLayoutSettings());
+                             if (changed != ReaderSettingsChangeMask::None) {
+                               settingsChanged = true;
+                               changeMask = changeMask | changed;
+                             }
                              pendingOrientation = SETTINGS.orientation;  // sync in case orientation changed
                              if (result.isCancelled) {
                                finishCancelled();
@@ -377,7 +397,7 @@ bool EpubReaderMenuActivity::activateSelectedItem() {
                            [this](const ActivityResult&) {
                              ActivityResult result;
                              result.isCancelled = true;
-                             result.data = MenuResult{-1, pendingOrientation, settingsChanged};
+                             result.data = makeMenuResult(-1);
                              setResult(std::move(result));
                              finish();
                            });
@@ -407,7 +427,7 @@ bool EpubReaderMenuActivity::activateSelectedItem() {
     return true;
   }
 
-  setResult(MenuResult{static_cast<int>(selectedAction), pendingOrientation, settingsChanged});
+  setResult(makeMenuResult(static_cast<int>(selectedAction)));
   finish();
   return true;
 }
@@ -422,7 +442,7 @@ bool EpubReaderMenuActivity::handleTouchInput() {
       return true;
     }
     if (mappedInput.hasTouchHardware() && tabIndex == static_cast<int>(TOUCH_HOME_ICON_INDEX)) {
-      setResult(MenuResult{static_cast<int>(MenuAction::GO_HOME), pendingOrientation, settingsChanged});
+      setResult(makeMenuResult(static_cast<int>(MenuAction::GO_HOME)));
       finish();
       return true;
     }

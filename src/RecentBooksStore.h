@@ -72,10 +72,16 @@ class RecentBooksStore : public PersistableStore<RecentBooksStore> {
   bool pruneMissing();
 
   // Get the list of recent books (most recent first)
-  const std::vector<RecentBook>& getBooks() const { return recentBooks; }
+  const std::vector<RecentBook>& getBooks() const {
+    ensureLoaded();
+    return recentBooks;
+  }
 
   // Get the count of recent books
-  int getCount() const { return static_cast<int>(recentBooks.size()); }
+  int getCount() const {
+    ensureLoaded();
+    return static_cast<int>(recentBooks.size());
+  }
 
   RecentBook getDataFromBook(std::string path) const;
 };

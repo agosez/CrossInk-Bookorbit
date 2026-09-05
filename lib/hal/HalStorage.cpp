@@ -215,6 +215,11 @@ class HalStorage::StorageLock {
   HalStorage::StorageLock lock;               \
   return SDCard.method(__VA_ARGS__);
 
+void HalStorage::shutdown() {
+  StorageLock lock;
+  SDCard.shutdown();
+}
+
 uint64_t HalStorage::totalBytes() const { return SDCard.sdTotalBytes(); }
 
 uint64_t HalStorage::usedBytes() { HAL_STORAGE_WRAPPED_CALL(sdUsedBytes); }

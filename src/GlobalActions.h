@@ -61,7 +61,8 @@ void enterDeepSleep(bool fromTimeout = false);
 bool handleGlobalPowerButtonAction(CrossPointSettings::SHORT_PWRBTN action,
                                    QuickLockTrigger quickLockTrigger = QuickLockTrigger::None);
 bool dispatchShortcutAction(CrossPointSettings::SHORT_PWRBTN action);
-bool startGlobalSyncProgress(bool networkBootReady = false);
+bool startGlobalSyncProgress(bool networkBootReady = false,
+                             uint8_t readerOrientation = CrossPointSettings::ORIENTATION_COUNT);
 // This fork's provider. The payload is the BOOKORBIT_SYNC restart payload
 // (paragraph anchor); callers outside the restart flow leave it at 0.
 bool startGlobalBookOrbitSync(bool networkBootReady = false, uint32_t payload = 0);

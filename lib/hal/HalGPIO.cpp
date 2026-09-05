@@ -23,6 +23,9 @@ HalGPIO gpio;
 
 namespace {
 constexpr unsigned long BUTTON_DEBOUNCE_REPOLL_MS = 6;
+// Poll cadence adapted from Sichroteph/YACP commit
+// 6d1f10f4bae52d282a088f9b2e45aaac96da8377 (MIT).
+constexpr unsigned long X3_USB_POLL_MS = 1000;
 
 // The X3-vs-X4 fingerprint (freeink::detectXteinkVerdict) only makes sense on
 // Xteink hardware; other boards keep their compile-time BoardConfig profile.
@@ -180,9 +183,18 @@ void HalGPIO::update() {
     delay(BUTTON_DEBOUNCE_REPOLL_MS);
     inputMgr.update();
   }
+
+  usbStateChanged = false;
+  const unsigned long now = millis();
+  if (deviceIsX3() && usbStateSampled && now - lastUsbPollMs < X3_USB_POLL_MS) {
+    return;
+  }
+
   const bool connected = isUsbConnected();
   usbStateChanged = (connected != lastUsbConnected);
   lastUsbConnected = connected;
+  lastUsbPollMs = now;
+  usbStateSampled = true;
 }
 
 bool HalGPIO::wasUsbStateChanged() const { return usbStateChanged; }
@@ -276,15 +288,17 @@ void HalGPIO::setSharedConfirmPowerShortPressEmitsPower(const bool enabled) {
 bool HalGPIO::isXteinkDevice() const {
   return BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX3 ||
          BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX3Uc8279 ||
-         BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4;
+         BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4 ||
+         BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4Classic;
 }
 
 bool HalGPIO::hasEdgeSideButtons() const {
   return BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX3 ||
-         BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4Pro;
+         BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4Pro ||
+         BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4Classic;
 }
 
-bool HalGPIO::verifyPowerButtonWakeup() {
+bool HalGPIO::verifyPowerButtonWakeup(const bool shortPressWakes) {
   // M5Paper v1.1 reaches setup after a normal wheel click has already been
   // released. Its hardware pull-ups make this ghost-wake debounce unnecessary.
   if (BoardConfig::isPaperMono() || BoardConfig::isM5PaperV11() || BoardConfig::ACTIVE.input.power < 0) {
@@ -299,7 +313,7 @@ bool HalGPIO::verifyPowerButtonWakeup() {
     delay(1);
     inputMgr.update();
   }
-  return heldAtFirstSample && inputMgr.isPowerButtonPhysicallyPressed();
+  return shortPressWakes || (heldAtFirstSample && inputMgr.isPowerButtonPhysicallyPressed());
 }
 
 #if FREEINK_MCU_S3
@@ -371,6 +385,8 @@ bool HalGPIO::isUsbConnected() const {
   return false;
 #endif
 }
+
+bool HalGPIO::isUsbConnectedCached() const { return usbStateSampled ? lastUsbConnected : isUsbConnected(); }
 
 bool HalGPIO::coldBootImpliesPowerButton() const {
   // These boards use a button-energized or otherwise known latch topology, so

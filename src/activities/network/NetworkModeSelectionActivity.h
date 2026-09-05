@@ -40,6 +40,7 @@ class NetworkModeSelectionActivity final : public Activity {
   UiHost ui;
   int visibleRows = 1;  // rows per page at the current scale; set by the screen builder
   int topIndex = 0;     // viewport scroll position, decoupled from the selection
+  freeink::ui::ListNav listNav;
   ScreenTransitionRefresh screenTransitionRefresh;
 
   static void listScreen(UiApp::ScreenType& screen, void* user);

@@ -194,26 +194,6 @@ ClippingStore::AddResult ClippingStore::addClipping(const uint16_t spineIndex, c
   return AddResult::Added;
 }
 
-bool ClippingStore::stampMissingLayoutSignature(const uint32_t layoutSignature) {
-  if (layoutSignature == 0) return true;
-
-  bool changed = false;
-  for (Clipping& clipping : clippings) {
-    if (clipping.layoutSignature == 0) {
-      clipping.layoutSignature = layoutSignature;
-      changed = true;
-    }
-  }
-  if (!changed) return true;
-
-  dirty = true;
-  if (writeToFile()) {
-    dirty = false;
-    return true;
-  }
-  return false;
-}
-
 bool ClippingStore::replaceClippingText(const size_t index, const std::string& text) {
   if (index >= clippings.size() || text.empty()) return false;
   if (!writeToFile(&text, index)) {
@@ -245,6 +225,16 @@ bool ClippingStore::hasClippingForPage(const uint16_t spineIndex, const uint16_t
 const Clipping* ClippingStore::clippingAt(const size_t index) const {
   if (index >= clippings.size()) return nullptr;
   return &clippings[index];
+}
+
+bool ClippingStore::cacheResolvedLayoutRange(const size_t index, const uint16_t page, const uint16_t startWord,
+                                             const uint16_t endWord, const uint32_t layoutSignature) {
+  if (index >= clippings.size()) return false;
+  if (!cacheClippingResolvedLayoutRange(clippings[index], page, startWord, endWord, layoutSignature)) {
+    return false;
+  }
+  dirty = true;
+  return true;
 }
 
 bool ClippingStore::readClippingText(const size_t index, std::string& out) const {

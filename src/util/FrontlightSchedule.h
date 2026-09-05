@@ -22,9 +22,20 @@ constexpr bool hasCompleteWindow(const bool enabled, const uint16_t startTimeOfD
          startTimeOfDay != endTimeOfDay;
 }
 
-constexpr bool shouldApplyOnWakeSchedule(const bool isSilentReboot, const bool restoreOnWake,
+// Network transitions are silent restarts for memory recovery, but their
+// frontlight should still follow the user's wake preference.
+constexpr bool shouldPreserveLightAcrossRestart(const bool isSilentReboot, const bool followsWakeLightPolicy) {
+  return isSilentReboot && !followsWakeLightPolicy;
+}
+
+constexpr bool shouldRestoreLightOnStart(const bool preserveLightAcrossRestart, const bool restoreOnWake,
                                          const bool wasLightOnBeforeSleep) {
-  return !isSilentReboot && (!restoreOnWake || !wasLightOnBeforeSleep);
+  return wasLightOnBeforeSleep && (preserveLightAcrossRestart || restoreOnWake);
+}
+
+constexpr bool shouldApplyOnWakeSchedule(const bool preserveLightAcrossRestart, const bool restoreOnWake,
+                                         const bool wasLightOnBeforeSleep) {
+  return !preserveLightAcrossRestart && (!restoreOnWake || !wasLightOnBeforeSleep);
 }
 
 constexpr TimeOfDay timeOfDayFromMinutes(const uint16_t timeOfDay) {

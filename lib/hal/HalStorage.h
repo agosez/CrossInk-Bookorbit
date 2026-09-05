@@ -26,6 +26,9 @@ class HalStorage {
   ~HalStorage();
   bool begin();
   bool ready() const;
+  // Flush and stop the SD backend before deep sleep. Call only after all file
+  // users have stopped; deep-sleep wake mounts the card again through begin().
+  void shutdown();
   uint64_t totalBytes() const;
   uint64_t usedBytes();
   std::vector<String> listFiles(const char* path = "/", int maxFiles = 200);

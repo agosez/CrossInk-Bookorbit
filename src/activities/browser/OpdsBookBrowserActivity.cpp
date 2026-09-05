@@ -109,7 +109,7 @@ void OpdsBookBrowserActivity::onExit() {
   }
   // OPDS launches from minimal network boot, so restore the full app state
   // even if setup failed before WiFi was started.
-  silentRestart();
+  silentRestartAfterNetwork();
 #endif
 }
 

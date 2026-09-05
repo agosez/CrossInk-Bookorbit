@@ -29,6 +29,9 @@ class BookStatsActivity final : public Activity {
   GlobalReadingStats dateEditGlobalStatsSnapshot;
   bool dateEditSnapshotValid = false;
   bool didChangeStatsBeforeDateEdit = false;
+  bool ignoreInitialBackRelease = false;
+  bool ignoreInitialConfirmRelease = false;
+  bool ignoreInitialPowerRelease = false;
 
   bool hasEditableBook() const { return !bookCachePath.empty() && halClock.isAvailable(); }
   bool usesNoRtcSingleScreenLayout() const { return !halClock.isAvailable(); }

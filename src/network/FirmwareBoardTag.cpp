@@ -9,6 +9,8 @@
 // X3/X4 share one ESP32-C3 compatibility binary and one tag.
 #if FREEINK_DEVICE_X4PRO
 #define CROSSINK_BOARD_NAME "x4pro"
+#elif FREEINK_DEVICE_X4CLASSIC
+#define CROSSINK_BOARD_NAME "x4c"
 #elif FREEINK_DEVICE_X4 || FREEINK_DEVICE_X3
 #define CROSSINK_BOARD_NAME "x4"
 #elif FREEINK_DEVICE_STICKY

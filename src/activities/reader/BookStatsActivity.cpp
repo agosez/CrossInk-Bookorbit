@@ -6,6 +6,7 @@
 #include "MappedInputManager.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
+#include "util/InputReleaseGuard.h"
 
 namespace {
 
@@ -268,6 +269,9 @@ void BookStatsActivity::adjustSelectedDateField(const int delta) {
 
 void BookStatsActivity::onEnter() {
   Activity::onEnter();
+  ignoreInitialBackRelease = mappedInput.isPressed(MappedInputManager::Button::Back);
+  ignoreInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
+  ignoreInitialPowerRelease = mappedInput.isPressed(MappedInputManager::Button::Power);
   if (bookCachePath.empty()) page = Page::ThisDevice;
   previousOrientation = renderer.getOrientation();
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
@@ -336,6 +340,15 @@ bool BookStatsActivity::selectEditFieldFromTouchTarget(const int touchTarget) {
 }
 
 void BookStatsActivity::loop() {
+  if (InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Back,
+                                               ignoreInitialBackRelease) ||
+      InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Power,
+                                               ignoreInitialPowerRelease) ||
+      InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Confirm,
+                                               ignoreInitialConfirmRelease)) {
+    return;
+  }
+
   if (TouchHeaderBackButton::wasTapped(mappedInput, TouchHeaderBackButton::compactHeaderRect(renderer))) {
     if (page == Page::EditDates) {
       finishDateEditing(true);

@@ -659,6 +659,11 @@ action can be assigned to only one direction; choosing it again moves it to the
 new direction. See [Two-finger Swipe Actions](./controls.md#two-finger-swipe-actions)
 for the complete list and reader-specific limitations.
 
+### Slider Controls
+
+For sliders with five-unit increments in the Reader Menu and Settings, tapping
+the slider track rounds the selected value to the nearest multiple of five.
+
 ### Footnote Navigation
 
 When reading an EPUB that contains footnotes, you can navigate to the footnote text by selecting the footnote reference in the book. From the footnote, you can return to your original reading position.

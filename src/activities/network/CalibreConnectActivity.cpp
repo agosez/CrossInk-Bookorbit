@@ -61,9 +61,9 @@ void CalibreConnectActivity::onExit() {
     WiFi.disconnect(false);
     delay(30);
     if (returnToReader) {
-      silentRestartToReader();
+      silentRestartToReaderAfterNetwork();
     } else {
-      silentRestart();
+      silentRestartAfterNetwork();
     }
   }
 }
@@ -192,10 +192,15 @@ void CalibreConnectActivity::render(RenderLock&&) {
     renderer.drawCenteredText(UI_12_FONT_ID, top, tr(STR_CONNECTION_FAILED), true, EpdFontFamily::BOLD);
   } else if (state == CalibreConnectState::SERVER_RUNNING) {
     const int subHeaderTop = CompactHeader::contentTop(metrics);
-    GUI.drawSubHeader(renderer, Rect{0, subHeaderTop, pageWidth, metrics.tabBarHeight}, connectedSSID.c_str(),
-                      (std::string(tr(STR_IP_ADDRESS_PREFIX)) + connectedIP).c_str());
+    GUI.drawSubHeader(renderer, Rect{0, subHeaderTop, pageWidth, metrics.tabBarHeight}, connectedSSID.c_str());
 
-    int y = subHeaderTop + metrics.tabBarHeight + metrics.verticalSpacing * 4;
+    // Keep the network name and full address independently readable on narrow
+    // screens. Sharing one subheader row forces one of them to be truncated.
+    const std::string ipLabel = std::string(tr(STR_IP_ADDRESS_PREFIX)) + connectedIP;
+    const int ipTop = subHeaderTop + metrics.tabBarHeight + metrics.verticalSpacing;
+    renderer.drawText(SMALL_FONT_ID, metrics.contentSidePadding, ipTop, ipLabel.c_str());
+
+    int y = ipTop + height + metrics.verticalSpacing * 3;
     const auto heightText12 = renderer.getTextHeight(UI_12_FONT_ID);
     renderer.drawText(UI_12_FONT_ID, metrics.contentSidePadding, y, tr(STR_CALIBRE_SETUP), true, EpdFontFamily::BOLD);
     y += heightText12 + metrics.verticalSpacing * 2;

@@ -5,6 +5,7 @@
 #include <Serialization.h>
 
 #include "tables/TableColumnLayout.h"
+#include "tables/TableTextLineOrder.h"
 
 namespace {
 
@@ -330,6 +331,61 @@ void PageTableFragment::render(GfxRenderer& renderer, const int fontId, const in
       renderer.drawLine(drawX, drawY + currentY, drawX + width - 1, drawY + currentY, lineWidth, foregroundBlack);
     }
   }
+}
+
+bool Page::forEachTextLine(const PageTextLineVisitor visitor, void* context) const {
+  if (!visitor) return false;
+
+  for (const auto& element : elements) {
+    if (!element) continue;
+
+    if (element->getTag() == TAG_PageLine) {
+      const auto& line = static_cast<const PageLine&>(*element);
+      if (line.getBlock() && !visitor({line.getBlock().get(), line.xPos, line.yPos}, context)) {
+        return false;
+      }
+      continue;
+    }
+
+    if (element->getTag() != TAG_PageTableFragment) continue;
+    const auto& fragment = static_cast<const PageTableFragment&>(*element);
+    if (fragment.columnCount == 0 || fragment.rows.empty() || fragment.width < 2) continue;
+
+    int currentY = 0;
+    for (const auto& row : fragment.rows) {
+      const bool visited =
+          TableTextLineOrder::forEachCellLineInVisualOrder(row, [&](const size_t cellIndex, const size_t lineIndex) {
+            uint8_t logicalColumn = 0;
+            for (size_t precedingCell = 0; precedingCell < cellIndex; ++precedingCell) {
+              if (logicalColumn >= fragment.columnCount) return true;
+              const auto& cell = row.cells[precedingCell];
+              logicalColumn = static_cast<uint8_t>(
+                  logicalColumn + std::min<uint8_t>(cell.colSpan == 0 ? 1 : cell.colSpan,
+                                                    static_cast<uint8_t>(fragment.columnCount - logicalColumn)));
+            }
+            if (logicalColumn >= fragment.columnCount) return true;
+
+            const auto& cell = row.cells[cellIndex];
+            if (!cell.lines[lineIndex]) return true;
+            const uint8_t span = std::min<uint8_t>(cell.colSpan == 0 ? 1 : cell.colSpan,
+                                                   static_cast<uint8_t>(fragment.columnCount - logicalColumn));
+            const int cellX = fragment.xPos +
+                              TableColumnLayout::columnStart(fragment.width, fragment.columnCount, logicalColumn) +
+                              fragment.cellPadding;
+            const int cellY = fragment.yPos + currentY + fragment.cellPadding;
+            const int cellWidth = TableColumnLayout::innerWidth(fragment.width, fragment.columnCount, logicalColumn,
+                                                                span, fragment.cellPadding);
+            const int cellHeight = std::max(0, static_cast<int>(row.height) - fragment.cellPadding * 2);
+            const int lineY = cellY + static_cast<int>(lineIndex) * fragment.lineHeight;
+            const PageTextLine line{cell.lines[lineIndex].get(), cellX, lineY, cellX, cellY, cellWidth, cellHeight,
+                                    fragment.lineHeight,         true};
+            return visitor(line, context);
+          });
+      if (!visited) return false;
+      currentY += row.height;
+    }
+  }
+  return true;
 }
 
 bool PageTableFragment::serialize(FsFile& file) {

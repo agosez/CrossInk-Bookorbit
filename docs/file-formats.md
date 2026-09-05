@@ -506,6 +506,13 @@ Then `ERA_HISTORY` (6) correction records of 24 bytes each:
 
 ## `section.bin`
 
+### Version 66
+
+Version 66 keeps the version 63 serialized layout unchanged. It was bumped
+because internal EPUB links now preserve CSS superscript and subscript styles,
+changing their cached word-style flags and page layout. Complete files use
+version byte `66`, and suspended partials use sentinel byte `0xF6`.
+
 ### Version 62
 
 Version 62 stores one compact source-whitespace bit per word in serialized text

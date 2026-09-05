@@ -44,6 +44,7 @@ class XtcReaderActivity final : public Activity {
   bool sideButtonLongPressHandled = false;
   bool frontButtonLongPressHandled = false;
   bool longPressBackHandled = false;
+  bool skipRecentBookUpdateOnEntry = false;
   ReaderProgressSaveDebouncer progressSaveDebouncer;
   // The end screen owns these UI resources only while it is visible.
   std::unique_ptr<EndOfBookOptions> endOfBookOptions;
@@ -86,10 +87,11 @@ class XtcReaderActivity final : public Activity {
 
  public:
   explicit XtcReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Xtc> xtc,
-                             int initialRefreshCountdown)
+                             int initialRefreshCountdown, bool skipRecentBookUpdateOnEntry = false)
       : Activity("XtcReader", renderer, mappedInput),
         xtc(std::move(xtc)),
-        pagesUntilFullRefresh(initialRefreshCountdown) {}
+        pagesUntilFullRefresh(initialRefreshCountdown),
+        skipRecentBookUpdateOnEntry(skipRecentBookUpdateOnEntry) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;

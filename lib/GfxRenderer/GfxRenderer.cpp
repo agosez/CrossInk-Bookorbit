@@ -2079,6 +2079,12 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
       }
     }
   }
+
+  const int sourceWidth = bitmap.getWidth() - cropPixX * 2;
+  const int sourceHeight = bitmap.getHeight() - cropPixY * 2;
+  const int renderedWidth = isScaled ? static_cast<int>(std::floor((sourceWidth - 1) * scale)) + 1 : sourceWidth;
+  const int renderedHeight = isScaled ? static_cast<int>(std::floor((sourceHeight - 1) * scale)) + 1 : sourceHeight;
+  preserveImagePolarity(x, y, renderedWidth, renderedHeight);
 }
 
 void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y, const int maxWidth,
@@ -2142,6 +2148,17 @@ void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y,
       // White pixels (val == 3) are not drawn (leave background)
     }
   }
+
+  const int renderedWidth =
+      isScaled ? static_cast<int>(std::floor((bitmap.getWidth() - 1) * scale)) + 1 : bitmap.getWidth();
+  const int renderedHeight =
+      isScaled ? static_cast<int>(std::floor((bitmap.getHeight() - 1) * scale)) + 1 : bitmap.getHeight();
+  preserveImagePolarity(x, y, renderedWidth, renderedHeight);
+}
+
+void GfxRenderer::preserveImagePolarity(const int x, const int y, const int width, const int height) const {
+  if (renderMode != BW || !display.isInverted() || _stripActive) return;
+  invertRect(x, y, width, height);
 }
 
 void GfxRenderer::drawPerspectiveBitmap(const Bitmap& bitmap, const int x, const int y, const int w, const int hL,
@@ -2199,6 +2216,14 @@ void GfxRenderer::drawPerspectiveBitmap(const Bitmap& bitmap, const int x, const
           drawPixel(screenX, screenY, false);
         }
       }
+    }
+  }
+
+  if (renderMode == BW && display.isInverted() && !_stripActive) {
+    for (int dx = 0; dx < w; ++dx) {
+      const int colH = (w == 1) ? hL : (hL + (hR - hL) * dx / (w - 1));
+      const int colTop = (hMax - colH) / 2;
+      invertRect(x + dx, y + colTop, 1, colH);
     }
   }
 }

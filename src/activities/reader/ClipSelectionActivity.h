@@ -28,7 +28,8 @@ class ClipSelectionActivity final : public Activity {
  public:
   ClipSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, ClipWordStore wordStore, int fontId,
                         Section& section, int startPageInSection, int marginTop, int marginLeft,
-                        const DictionaryClippingRequest* dictionaryRequest = nullptr);
+                        const DictionaryClippingRequest* dictionaryRequest = nullptr,
+                        bool ignoreInitialBackRelease = false);
 
   void onEnter() override;
   void onExit() override;
@@ -68,6 +69,9 @@ class ClipSelectionActivity final : public Activity {
   int touchDragPageEndIdx = -1;
   uint32_t touchDragPageEndHeldSince = 0;
   bool hasDictionaryRequest = false;
+  bool ignoreInitialConfirmRelease = false;
+  bool ignoreInitialPowerRelease = false;
+  bool ignoreInitialBackRelease = false;
   DictionaryClippingRequest dictionaryRequest{};
   std::array<uint16_t, MAX_READING_ORDER_WORDS> readingOrder{};
   size_t readingOrderSize = 0;

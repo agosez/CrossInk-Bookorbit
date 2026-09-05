@@ -1,5 +1,6 @@
 #include "SleepActivity.h"
 
+#include <BoardConfig.h>
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
@@ -22,6 +23,7 @@
 #include "../reader/EpubReaderUtils.h"
 #include "../reader/TxtReaderActivity.h"
 #include "../reader/XtcReaderActivity.h"
+#include "AppCapabilities.h"
 #include "AppVersion.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -515,13 +517,19 @@ void SleepActivity::onEnter() {
   overlayBackgroundBufferStored =
       sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::OVERLAY && renderer.storeBwBuffer();
 
+  // X4 Pro and X4 Classic share a panel that can retain this high-contrast
+  // transient update beneath the final OEM-style sleep refresh. Render only
+  // the final sleep frame on that panel family.
+  const bool showSleepPopup = !BoardConfig::isX4Pro() && !CROSSINK_APP_DEVICE_X4CLASSIC;
   // Show the popup in the orientation that was visible before reader exit restores
   // global settings. Reset to portrait afterwards so sleep screen layout stays unchanged.
   if (APP_STATE.lastSleepFromReader) {
-    renderer.setOrientation(sleepPopupOrientation);
-    GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
+    if (showSleepPopup) {
+      renderer.setOrientation(sleepPopupOrientation);
+      GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
+    }
     renderer.setOrientation(GfxRenderer::Orientation::Portrait);
-  } else {
+  } else if (showSleepPopup) {
     GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
   }
 

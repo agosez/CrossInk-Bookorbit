@@ -458,6 +458,12 @@ void EpubReaderClippingListActivity::loop() {
     if (next != topIndex) {
       topIndex = next;
       requestUpdate();
+    } else if (swipe == MappedInputManager::SwipeDir::Down && topIndex == 0) {
+      // Match the physical Previous button: the touch gesture for the previous
+      // list page wraps from the first clipping to the last one.
+      selectedIndex = total - 1;
+      topIndex = followListSelection(selectedIndex, topIndex, visibleRows, total);
+      requestUpdate();
     }
     return;
   }

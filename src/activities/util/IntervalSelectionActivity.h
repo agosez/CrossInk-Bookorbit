@@ -51,6 +51,8 @@ class IntervalSelectionActivity final : public Activity {
   bool readerActivity;
   bool allowPowerAsConfirm;
   bool ignoreConfirmRelease;
+  bool ignoreBackRelease = false;
+  bool ignorePowerRelease = false;
   bool showPercentValue;
   bool overrideDisabledReaderTouchscreen;
   bool showTouchHeaderBackButton;

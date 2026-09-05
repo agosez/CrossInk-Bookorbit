@@ -69,6 +69,7 @@ class FrontlightPanelActivity final : public Activity {
   void adjustBrightness(int delta);
   void adjustWarmth(int delta);
   void toggleLight();
+  void toggleReaderTouchscreen();
   void close();
   void activateQuickAction(int index);
   void openSyncDialog();
@@ -84,7 +85,8 @@ class FrontlightPanelActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
-  // The home key closes the panel back to whatever was underneath.
+  // From an EPUB reader, Home returns to the library; elsewhere it dismisses
+  // the overlay back to the current screen.
   bool handleHomeGesture() override;
   bool requiresFreshBackdrop() const override { return true; }
 };

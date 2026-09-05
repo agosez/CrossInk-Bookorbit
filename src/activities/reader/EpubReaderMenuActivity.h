@@ -120,6 +120,9 @@ class EpubReaderMenuActivity final : public Activity {
   ReaderOptionsActivity::DictionaryFontChangedCallback dictionaryFontChangedCallback = nullptr;
   void* dictionaryFontChangedContext = nullptr;
   bool settingsChanged = false;
+  ReaderSettingsChangeMask changeMask = ReaderSettingsChangeMask::None;
+
+  MenuResult makeMenuResult(int action) const;
 
   freeink::ui::GfxRendererTarget uiTarget;  // must precede `app`: the app holds a reference to it
   UiApp app;

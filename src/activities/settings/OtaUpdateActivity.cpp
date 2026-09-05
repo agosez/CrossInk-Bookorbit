@@ -112,7 +112,7 @@ void OtaUpdateActivity::onExit() {
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
     delay(30);
-    silentRestart();
+    silentRestartAfterNetwork();
   }
 }
 

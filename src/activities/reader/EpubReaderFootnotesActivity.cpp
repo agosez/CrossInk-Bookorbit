@@ -8,6 +8,7 @@
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
+#include "util/InputReleaseGuard.h"
 
 namespace fui = freeink::ui;
 namespace {
@@ -23,6 +24,9 @@ EpubReaderFootnotesActivity::EpubReaderFootnotesActivity(GfxRenderer& renderer, 
 
 void EpubReaderFootnotesActivity::onEnter() {
   Activity::onEnter();
+  ignoreInitialBackRelease = mappedInput.isPressed(MappedInputManager::Button::Back);
+  ignoreInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
+  ignoreInitialPowerRelease = mappedInput.isPressed(MappedInputManager::Button::Power);
   selectedIndex = 0;
   topIndex = 0;
   visibleRows = 1;
@@ -50,6 +54,15 @@ void EpubReaderFootnotesActivity::onRowEvent(const fui::ActionEvent& event, void
 }
 
 void EpubReaderFootnotesActivity::loop() {
+  if (InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Back,
+                                               ignoreInitialBackRelease) ||
+      InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Power,
+                                               ignoreInitialPowerRelease) ||
+      InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Confirm,
+                                               ignoreInitialConfirmRelease)) {
+    return;
+  }
+
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   const Rect header{safe.x, safe.y + metrics.topPadding, safe.width,

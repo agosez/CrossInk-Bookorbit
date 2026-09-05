@@ -86,7 +86,7 @@ void KOReaderAuthActivity::onExit() {
   }
   // Authentication launches from minimal network boot, so restore the full
   // app state even if setup failed before WiFi was started.
-  silentRestart();
+  silentRestartAfterNetwork();
 }
 
 void KOReaderAuthActivity::render(RenderLock&&) {

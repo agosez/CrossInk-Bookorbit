@@ -75,6 +75,14 @@ TEST(OptionPopup, PowerConfirmSelectionSuppressesItsPowerRelease) {
 
   input.injectPowerConfirmRelease();
   EXPECT_FALSE(input.wasReleased(MappedInputManager::Button::Power));
+  // The global dispatcher and active reader can both observe the same
+  // hardware release edge in one loop; neither may run the shortcut.
+  EXPECT_FALSE(input.wasReleased(MappedInputManager::Button::Power));
+
+  input.advanceInputFrame();
+  input.injectPowerConfirmPress();
+  input.injectPowerConfirmRelease();
+  EXPECT_TRUE(input.wasReleased(MappedInputManager::Button::Power));
 }
 
 }  // namespace

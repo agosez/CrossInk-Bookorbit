@@ -9,6 +9,7 @@
 #include "activities/reader/WordRef.h"
 #include "clippings/ClipTextBuilder.h"
 #include "clippings/ClippingHighlightGeometry.h"
+#include "clippings/ClippingMatchTracker.h"
 #include "clippings/ClippingTextMatcher.h"
 
 TEST(ClipWordStore, StoresNullTerminatedUtf8TextWithStableOffsets) {
@@ -210,19 +211,97 @@ TEST(ClippingLayout, RejectsStoredRangeWhenFontChangesWithoutChangingPageCount) 
 
   Clipping clipping;
   clipping.pageCount = 20;
-  clipping.layoutSignature = readerRenderSpecSignature(original);
+  clipping.layoutSignature = clippingWordLayoutSignature(readerRenderSpecSignature(original));
 
-  EXPECT_TRUE(clippingStoredRangeMatchesLayout(clipping, 20, readerRenderSpecSignature(original)));
-  EXPECT_FALSE(clippingStoredRangeMatchesLayout(clipping, 20, readerRenderSpecSignature(changed)));
+  EXPECT_TRUE(
+      clippingStoredRangeMatchesLayout(clipping, 20, clippingWordLayoutSignature(readerRenderSpecSignature(original))));
+  EXPECT_FALSE(
+      clippingStoredRangeMatchesLayout(clipping, 20, clippingWordLayoutSignature(readerRenderSpecSignature(changed))));
 }
 
-TEST(ClippingLayout, PreservesLegacyFastPathUntilRelayout) {
+TEST(ClippingLayout, RejectsUnsignedLegacyRangesAndUsesSavedTextInstead) {
   Clipping clipping;
   clipping.pageCount = 20;
   clipping.layoutSignature = 0;
 
   ReaderRenderSpec current;
   current.fontId = 12;
-  EXPECT_TRUE(clippingStoredRangeMatchesLayout(clipping, 20, readerRenderSpecSignature(current)));
+  EXPECT_FALSE(clippingStoredRangeMatchesLayout(clipping, 20, readerRenderSpecSignature(current)));
   EXPECT_FALSE(clippingStoredRangeMatchesLayout(clipping, 21, readerRenderSpecSignature(current)));
+}
+
+TEST(ClippingLayout, ChangesStoredRangeSignatureWhenWordTraversalChanges) {
+  ReaderRenderSpec current;
+  current.fontId = 12;
+  current.viewportWidth = 760;
+  current.viewportHeight = 430;
+
+  const uint32_t readerSignature = readerRenderSpecSignature(current);
+  const uint32_t clippingSignature = clippingWordLayoutSignature(readerSignature);
+  EXPECT_NE(clippingSignature, readerSignature);
+
+  Clipping clipping;
+  clipping.pageCount = 20;
+  clipping.layoutSignature = readerSignature;
+  EXPECT_FALSE(clippingStoredRangeMatchesLayout(clipping, 20, clippingSignature));
+  EXPECT_TRUE(clippingUsesLegacyWordLayout(clipping, 20, readerSignature));
+  EXPECT_FALSE(clippingUsesLegacyWordLayout(clipping, 21, readerSignature));
+}
+
+TEST(ClippingLayout, CachesLegacyBoundaryRangesWithoutAHeapAllocation) {
+  Clipping clipping;
+  clipping.startPage = 2;
+  clipping.endPage = 4;
+  clipping.pageCount = 10;
+  clipping.layoutSignature = 123;
+
+  EXPECT_EQ(sizeof(Clipping), 80U);
+  EXPECT_FALSE(clippingCachedRangeReadyOnPage(clipping, 2));
+  EXPECT_TRUE(clippingCachedRangeReadyOnPage(clipping, 3));
+  EXPECT_FALSE(clippingCachedRangeReadyOnPage(clipping, 4));
+
+  EXPECT_TRUE(cacheClippingResolvedLayoutRange(clipping, 2, 7, 12, 456));
+  EXPECT_EQ(clipping.startWordIndex, 7);
+  EXPECT_EQ(clipping.layoutSignature, 123U);
+  EXPECT_TRUE(clippingCachedRangeReadyOnPage(clipping, 2));
+  EXPECT_FALSE(clippingCachedRangeReadyOnPage(clipping, 4));
+
+  EXPECT_TRUE(cacheClippingResolvedLayoutRange(clipping, 4, 1, 9, 456));
+  EXPECT_EQ(clipping.endWordIndex, 9);
+  EXPECT_EQ(clipping.layoutSignature, 456U);
+  EXPECT_TRUE(clippingCachedRangeReadyOnPage(clipping, 4));
+}
+
+TEST(ClippingLayout, CompletesSinglePageMigrationInOneMatch) {
+  Clipping clipping;
+  clipping.startPage = 3;
+  clipping.endPage = 3;
+  clipping.pageCount = 10;
+  clipping.layoutSignature = 123;
+
+  EXPECT_TRUE(cacheClippingResolvedLayoutRange(clipping, 3, 4, 8, 456));
+  EXPECT_EQ(clipping.startWordIndex, 4);
+  EXPECT_EQ(clipping.endWordIndex, 8);
+  EXPECT_EQ(clipping.layoutSignature, 456U);
+  EXPECT_EQ(clipping.resolvedLayoutBoundaries, CLIPPING_LAYOUT_BOUNDARIES_RESOLVED);
+}
+
+TEST(ClippingMatchTracker, RejectsRepeatedShortTextAtDifferentWordRanges) {
+  ClippingMatchTracker matches;
+
+  EXPECT_TRUE(matches.record(2, 3));
+  EXPECT_TRUE(matches.unique());
+  EXPECT_FALSE(matches.record(11, 12));
+  EXPECT_TRUE(matches.found());
+  EXPECT_FALSE(matches.unique());
+  EXPECT_EQ(matches.startWord(), 2);
+  EXPECT_EQ(matches.endWord(), 3);
+}
+
+TEST(ClippingMatchTracker, TreatsDuplicateCandidatesForTheSameRangeAsUnique) {
+  ClippingMatchTracker matches;
+
+  EXPECT_TRUE(matches.record(4, 6));
+  EXPECT_FALSE(matches.record(4, 6));
+  EXPECT_TRUE(matches.unique());
 }

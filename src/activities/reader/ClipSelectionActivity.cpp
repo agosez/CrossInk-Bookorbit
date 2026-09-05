@@ -16,6 +16,7 @@
 #include "clippings/ClipTextBuilder.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/InputReleaseGuard.h"
 
 namespace {
 
@@ -29,7 +30,8 @@ bool hasEmSpace(const char* text) { return text[0] == '\xe2' && text[1] == '\x80
 ClipSelectionActivity::ClipSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                              ClipWordStore wordStore, const int fontId, Section& section,
                                              const int startPageInSection, const int marginTop, const int marginLeft,
-                                             const DictionaryClippingRequest* dictionaryRequest)
+                                             const DictionaryClippingRequest* dictionaryRequest,
+                                             const bool ignoreInitialBackRelease)
     : Activity("ClipSelection", renderer, mappedInput),
       wordStore(std::move(wordStore)),
       renderFontId(fontId),
@@ -38,6 +40,7 @@ ClipSelectionActivity::ClipSelectionActivity(GfxRenderer& renderer, MappedInputM
       marginTop(marginTop),
       marginLeft(marginLeft),
       hasDictionaryRequest(dictionaryRequest != nullptr),
+      ignoreInitialBackRelease(ignoreInitialBackRelease),
       dictionaryRequest(dictionaryRequest ? *dictionaryRequest : DictionaryClippingRequest{}) {}
 
 void ClipSelectionActivity::onEnter() {
@@ -45,6 +48,8 @@ void ClipSelectionActivity::onEnter() {
   // Clipping needs direct word selection even when touch is disabled for the
   // reader. onExit() restores the reader's configured touch state.
   mappedInput.setReaderTouchscreenOverride(true);
+  ignoreInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
+  ignoreInitialPowerRelease = mappedInput.isPressed(MappedInputManager::Button::Power);
 
   if (wordStore.words.empty()) {
     LOG_ERR("CLIP", "No words available for selection");
@@ -237,8 +242,15 @@ void ClipSelectionActivity::positionCursorAtInitialPageCenter() {
 }
 
 void ClipSelectionActivity::loop() {
-  const int total = static_cast<int>(readingOrderSize);
   using Button = MappedInputManager::Button;
+
+  if (InputReleaseGuard::consumeInitialRelease(mappedInput, Button::Back, ignoreInitialBackRelease) ||
+      InputReleaseGuard::consumeInitialRelease(mappedInput, Button::Power, ignoreInitialPowerRelease) ||
+      InputReleaseGuard::consumeInitialRelease(mappedInput, Button::Confirm, ignoreInitialConfirmRelease)) {
+    return;
+  }
+
+  const int total = static_cast<int>(readingOrderSize);
 
   auto moveCursor = [this](const int nextOrderIdx) {
     if (nextOrderIdx == cursorIdx || nextOrderIdx < 0 || nextOrderIdx >= static_cast<int>(readingOrderSize)) return;
@@ -324,6 +336,12 @@ void ClipSelectionActivity::loop() {
   }
 
   if (mappedInput.wasReleased(Button::Back)) {
+    if (ignoreInitialBackRelease) {
+      // A long Back press can launch this activity. Its release belongs to the
+      // shortcut, not to the selection screen that has just opened.
+      ignoreInitialBackRelease = false;
+      return;
+    }
     if (startMarkIdx != -1) {
       startMarkIdx = -1;
       requestUpdate();
@@ -376,6 +394,10 @@ void ClipSelectionActivity::confirmSelection() {
   if (const auto paragraphIndex = section.getParagraphIndexForPage(result.sectionPage)) {
     result.paragraphIndex = *paragraphIndex;
   }
+  // onExit() restores savedSectionPage so cancelling a clipping does not move
+  // the reader. A confirmed selection instead resumes at the final cursor,
+  // including when that cursor advanced onto the next page.
+  savedSectionPage = startPageInSection + wordStore.words[readingOrder[cursorIdx]].pageIdx;
   setResult(std::move(result));
   finish();
 }

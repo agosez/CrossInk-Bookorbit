@@ -51,16 +51,19 @@ class WordSelectNavigator {
     EpdFontFamily::Style style = EpdFontFamily::REGULAR;
     bool isIpa = false;
     int fontId = 0;  // resolved at extraction time; used by renderHighlight()
-    // Pack the two display/lookup flags into the byte that already preceded
+    // Pack the display/lookup flags into the byte that already preceded
     // bionicBoundary so WordInfo remains 36 bytes on 32-bit targets.
     bool isRtl : 1;
     // The source layout placed this token directly beside the previous
     // selectable token without whitespace (for example adjacent CJK glyphs).
     bool joinWithoutSpaceBefore : 1;
+    // Table rows interleave cells in visual order, so their line endings must
+    // not participate in the body-text hyphen continuation heuristic.
+    bool isTableText : 1;
     uint8_t bionicBoundary = 0;
     uint16_t bionicSuffixX = 0;
 
-    WordInfo() : isRtl(false), joinWithoutSpaceBefore(false) {}
+    WordInfo() : isRtl(false), joinWithoutSpaceBefore(false), isTableText(false) {}
   };
 
   struct Row {
@@ -309,6 +312,8 @@ class WordSelectNavigator {
   int completedSelectionStart = -1;
   int completedSelectionEnd = -1;
   bool touchDragCursorVisible = false;
+  unsigned long lastWordRepeatTime = 0;
+  bool wordRepeatActive = false;
 
   int findClosestWord(int targetRow) const;
   int findClosestWordFromX(int targetRow, int refCenterX) const;

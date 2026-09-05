@@ -7,6 +7,7 @@
 #include "CompactTableLayout.h"
 #include "GfxRenderer.h"
 #include "TableColumnLayout.h"
+#include "TableTextLineOrder.h"
 
 namespace {
 
@@ -66,6 +67,26 @@ TEST(CompactTableLayoutTest, WideLeadingColumnKeepsEightColumnTableLabelsReadabl
   // Other grids keep their established equal column sizing.
   EXPECT_EQ(TableColumnLayout::columnWidth(tableWidth, 6, 0, 1), 80);
   EXPECT_EQ(TableColumnLayout::columnWidth(tableWidth, 6, 5, 1), 80);
+}
+
+TEST(CompactTableLayoutTest, VisitsWrappedCellsInVisualReadingOrder) {
+  struct Cell {
+    std::vector<int> lines;
+  };
+  struct Row {
+    std::vector<Cell> cells;
+  };
+
+  const Row row{{{{1, 2}}, {{3}}, {{4, 5}}}};
+  std::vector<std::pair<size_t, size_t>> visited;
+  ASSERT_TRUE(
+      TableTextLineOrder::forEachCellLineInVisualOrder(row, [&](const size_t cellIndex, const size_t lineIndex) {
+        visited.emplace_back(cellIndex, lineIndex);
+        return true;
+      }));
+
+  const std::vector<std::pair<size_t, size_t>> expected{{0, 0}, {1, 0}, {2, 0}, {0, 1}, {2, 1}};
+  EXPECT_EQ(visited, expected);
 }
 
 TEST(CompactTableLayoutTest, CompactLayoutUsesWideLeadingColumnForEightCellRows) {

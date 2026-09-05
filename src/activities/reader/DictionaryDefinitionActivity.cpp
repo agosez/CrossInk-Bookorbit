@@ -355,6 +355,12 @@ void DictionaryDefinitionActivity::onEnter() {
 void DictionaryDefinitionActivity::onExit() {
   controller.onExit();
   Dictionary::clearLookupDictPathOverride();
+  if (renderer.isSdCardFont(definitionFontId_)) {
+    // The dictionary can reuse the reader's family and size, in which case
+    // restoreReaderFont() does not switch IDs. Release the definition caches
+    // explicitly so that path does not retain dictionary-only glyph data.
+    renderer.releaseSdCardFontForLowMemory(definitionFontId_);
+  }
   sdFontSystem.restoreReaderFont(renderer);
   Activity::onExit();
 }

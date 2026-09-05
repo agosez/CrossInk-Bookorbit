@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <type_traits>
 
 #include "../settings/DictionarySelectActivity.h"
 #include "ClipSelectionPaging.h"
@@ -21,6 +22,7 @@
 #include "DictionaryDefinitionActivity.h"
 #include "MappedInputManager.h"
 #include "Memory.h"
+#include "PageWordGeometry.h"
 #include "ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -50,6 +52,13 @@ struct WordPartRef {
   size_t length = 0;
   size_t sourceOffset = 0;
 };
+
+template <typename Callback>
+bool forEachPageTextLine(const Page& page, Callback&& callback) {
+  using CallbackType = std::remove_reference_t<Callback>;
+  return page.forEachTextLine(
+      [](const PageTextLine& line, void* context) { return (*static_cast<CallbackType*>(context))(line); }, &callback);
+}
 
 bool isDashSeparator(const char* text, const size_t length, const size_t offset) {
   return offset + 2 < length && static_cast<uint8_t>(text[offset]) == 0xE2 &&
@@ -309,11 +318,9 @@ void DictionaryWordSelectActivity::prebuildAdvanceTable() {
   uint16_t codepointCount = 0;
   uint8_t pageStyleMask = 0;
   bool truncated = false;
-  for (const auto& element : page->elements) {
-    if (element->getTag() != TAG_PageLine) continue;
-    const auto* line = static_cast<const PageLine*>(element.get());
-    const auto& block = line->getBlock();
-    if (!block) continue;
+  forEachPageTextLine(*page, [&](const PageTextLine& line) {
+    const auto* block = line.block;
+    if (!block) return true;
     for (uint16_t i = 0; i < block->wordCount(); i++) {
       const auto* cursor = reinterpret_cast<const unsigned char*>(block->wordText(i));
       uint32_t codepoint = 0;
@@ -329,7 +336,8 @@ void DictionaryWordSelectActivity::prebuildAdvanceTable() {
       }
       pageStyleMask |= styleToBitMask(block->wordStyle(i));
     }
-  }
+    return true;
+  });
   if (pageStyleMask == 0) pageStyleMask = styleToBitMask(EpdFontFamily::REGULAR);
   if (truncated) {
     LOG_ERR("DICT", "SD-font advance collector cap hit (%u); remaining glyphs will load on demand",
@@ -400,6 +408,7 @@ bool DictionaryWordSelectActivity::allocateWorkingSet() {
   bool haveRow = false;
   int16_t currentRowY = 0;
   WordPartRef previousRowLast{};
+  bool previousRowLastWasTableText = false;
 
   const auto addMergedBudget = [&](const WordPartRef& first, const WordPartRef& second, const bool stripLeadingSecond) {
     if (first.length == 0 || first.text[first.length - 1] != '-' || first.text[0] == '-') return;
@@ -408,13 +417,11 @@ bool DictionaryWordSelectActivity::allocateWorkingSet() {
     if (mergedLength > UINT16_MAX || !addBudgetBytes(budget.textBytes, mergedLength + 1)) valid = false;
   };
 
-  for (const auto& element : page->elements) {
-    if (element->getTag() != TAG_PageLine) continue;
-    const auto* line = static_cast<const PageLine*>(element.get());
-    const auto& block = line->getBlock();
-    if (!block) continue;
+  forEachPageTextLine(*page, [&](const PageTextLine& line) {
+    const auto* block = line.block;
+    if (!block) return true;
     const int16_t screenY = static_cast<int16_t>(
-        line->yPos + marginTop + block->getRubyShift(renderer.getFontAscenderSize(SETTINGS.getReaderFontId())));
+        line.yPos + marginTop + block->getRubyShift(renderer.getFontAscenderSize(SETTINGS.getReaderFontId())));
     for (uint16_t wordIndex = 0; wordIndex < block->wordCount(); ++wordIndex) {
       const char* word = block->wordText(wordIndex);
       const size_t wordLength = block->wordTextLen(wordIndex);
@@ -437,16 +444,20 @@ bool DictionaryWordSelectActivity::allocateWorkingSet() {
           currentRowY = screenY;
         } else if (std::abs(static_cast<int>(screenY) - static_cast<int>(currentRowY)) > 2) {
           budget.rowCount++;
-          addMergedBudget(previousRowLast, part, /*stripLeadingSecond=*/true);
+          if (!previousRowLastWasTableText && !line.isTableText) {
+            addMergedBudget(previousRowLast, part, /*stripLeadingSecond=*/true);
+          }
           currentRowY = screenY;
         }
         previousRowLast = part;
+        previousRowLastWasTableText = line.isTableText;
       });
     }
-  }
+    return valid;
+  });
   if (haveRow) budget.rowCount++;
   if (budget.rowCount > static_cast<size_t>(INT16_MAX)) valid = false;
-  if (haveRow && !nextPageFirstWord.empty()) {
+  if (haveRow && !previousRowLastWasTableText && !nextPageFirstWord.empty()) {
     const WordPartRef next{nextPageFirstWord.c_str(), nextPageFirstWord.size(), 0};
     addMergedBudget(previousRowLast, next, /*stripLeadingSecond=*/false);
   }
@@ -604,11 +615,9 @@ bool DictionaryWordSelectActivity::extractWords() {
       static_cast<int16_t>(renderer.getTextAdvanceX(SETTINGS.getReaderFontId(), " ", EpdFontFamily::REGULAR));
 
   uint16_t pageWordOrdinal = 0;
-  for (const auto& element : page->elements) {
-    if (element->getTag() != TAG_PageLine) continue;
-    const auto* line = static_cast<const PageLine*>(element.get());
-    const auto& block = line->getBlock();
-    if (!block) continue;
+  return forEachPageTextLine(*page, [&](const PageTextLine& line) {
+    const auto* block = line.block;
+    if (!block) return true;
 
     const uint16_t sourceWordCount = block->wordCount();
     const int rubyShift = block->getRubyShift(renderer.getFontAscenderSize(SETTINGS.getReaderFontId()));
@@ -629,8 +638,6 @@ bool DictionaryWordSelectActivity::extractWords() {
 
     int lastSelectableWordIndex = -2;
     for (uint16_t wordIndex = 0; wordIndex < sourceWordCount; ++wordIndex) {
-      const int16_t screenX = line->xPos + block->wordXpos(wordIndex) + marginLeft;
-      const int16_t screenY = line->yPos + marginTop + rubyShift;
       const char* wordText = block->wordText(wordIndex);
       const size_t wordLength = block->wordTextLen(wordIndex);
       const auto wordStyle = block->wordStyle(wordIndex);
@@ -642,7 +649,15 @@ bool DictionaryWordSelectActivity::extractWords() {
         lastSelectableWordIndex = -2;
         continue;
       }
+      const PageWordGeometry sourceGeometry =
+          pageWordGeometry(renderer, SETTINGS.getReaderFontId(), line, *block, wordIndex);
+      if (sourceGeometry.width <= 0) {
+        lastSelectableWordIndex = -2;
+        continue;
+      }
       const uint16_t sourcePageWordOrdinal = pageWordOrdinal++;
+      const int16_t screenX = static_cast<int16_t>(line.xPos + sourceGeometry.xOffset + marginLeft);
+      const int16_t screenY = static_cast<int16_t>(line.yPos + marginTop + rubyShift);
 
       if (!utf8ContainsLookupCharacter(wordText)) {
         lastSelectableWordIndex = -2;
@@ -660,6 +675,11 @@ bool DictionaryWordSelectActivity::extractWords() {
         } else {
           wordWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), wordText, wordLength, wordStyle,
                                           bionicBoundary, bionicSuffixX, sanitizeScratch, scratchHalf);
+        }
+        wordWidth = static_cast<int16_t>(std::min<int>(wordWidth, sourceGeometry.width));
+        if (wordWidth <= 0) {
+          lastSelectableWordIndex = -2;
+          continue;
         }
 
         bool joinWithoutSpaceBefore = false;
@@ -700,6 +720,7 @@ bool DictionaryWordSelectActivity::extractWords() {
         word.fontId = SETTINGS.getReaderFontId();
         word.isRtl = wordIsRtl;
         word.joinWithoutSpaceBefore = joinWithoutSpaceBefore;
+        word.isTableText = line.isTableText;
         word.bionicBoundary = bionicBoundary;
         word.bionicSuffixX = bionicSuffixX;
         if (!appendWord(word)) return false;
@@ -728,8 +749,11 @@ bool DictionaryWordSelectActivity::extractWords() {
           return;
         }
         const char* storedPart = textPool + offset;
-        const int16_t partWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), storedPart, part.length,
-                                                      wordStyle, sanitizeScratch, scratchHalf);
+        const int16_t measuredPartWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), storedPart,
+                                                              part.length, wordStyle, sanitizeScratch, scratchHalf);
+        const PageWordGeometry partGeometry =
+            clipPageTextRange(line, block->wordXpos(wordIndex) + offsetX, measuredPartWidth);
+        if (partGeometry.width <= 0) return;
         WordSelectNavigator::WordInfo word;
         word.textOffset = offset;
         word.textLen = static_cast<uint16_t>(part.length);
@@ -737,19 +761,20 @@ bool DictionaryWordSelectActivity::extractWords() {
         word.lookupLen = word.textLen;
         word.pageWordOrdinal = sourcePageWordOrdinal;
         word.sourceWordByteOffset = static_cast<uint16_t>(part.sourceOffset);
-        word.screenX = static_cast<int16_t>(screenX + offsetX);
+        word.screenX = static_cast<int16_t>(line.xPos + marginLeft + partGeometry.xOffset);
         word.screenY = screenY;
-        word.width = partWidth;
+        word.width = static_cast<int16_t>(partGeometry.width);
         word.style = wordStyle;
         word.fontId = SETTINGS.getReaderFontId();
         word.isRtl = wordIsRtl;
+        word.isTableText = line.isTableText;
         if (!appendWord(word)) partSucceeded = false;
       });
       if (!partSucceeded) return false;
       lastSelectableWordIndex = -2;
     }
-  }
-  return true;
+    return true;
+  });
 }
 
 bool DictionaryWordSelectActivity::captureCurrentClippingRequest(DictionaryClippingRequest& request) const {
@@ -938,6 +963,7 @@ bool DictionaryWordSelectActivity::mergeHyphenatedWords() {
     const size_t nextWordIndex = nextRow.firstWord;
     auto& last = workingSet_.words[lastWordIndex];
     auto& next = workingSet_.words[nextWordIndex];
+    if (last.isTableText || next.isTableText) continue;
     const char* lastText = textPool + last.textOffset;
     if (!utf8EndsWithHyphen(lastText, last.textLen) || lastText[0] == '-') continue;
 
@@ -961,7 +987,7 @@ bool DictionaryWordSelectActivity::mergeHyphenatedWords() {
     if (lastRow.wordCount > 0) {
       auto& last = workingSet_.words[lastRow.firstWord + lastRow.wordCount - 1];
       const char* lastText = textPool + last.textOffset;
-      if (utf8EndsWithHyphen(lastText, last.textLen) && lastText[0] != '-') {
+      if (!last.isTableText && utf8EndsWithHyphen(lastText, last.textLen) && lastText[0] != '-') {
         uint16_t mergedOffset = 0;
         if (!appendMergedText(lastText, last.textLen - 1, nextPageFirstWord.c_str(), nextPageFirstWord.size(),
                               mergedOffset)) {

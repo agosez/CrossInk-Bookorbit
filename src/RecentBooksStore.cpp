@@ -36,7 +36,7 @@ bool RecentBooksStore::fromJson(JsonVariantConst doc) {
   JsonArrayConst arr = doc["books"].as<JsonArrayConst>();
   recentBooks.reserve(std::min(arr.size(), static_cast<size_t>(MAX_RECENT_BOOKS)));
   for (JsonObjectConst obj : arr) {
-    if (getCount() >= MAX_RECENT_BOOKS) break;
+    if (recentBooks.size() >= static_cast<size_t>(MAX_RECENT_BOOKS)) break;
     RecentBook book;
     book.path = obj["path"] | "";
     book.title = obj["title"] | "";
@@ -61,13 +61,17 @@ void RecentBooksStore::addOrUpdateBook(const std::string& path, const std::strin
                                        const std::string& coverBmpPath, const RecentBook::CoverState coverState) {
   ensureLoaded();
 
-  // Drop stale entries first so a new add can't evict a valid book in their stead.
-  pruneMissing();
+  // No-op write suppression adapted from Sichroteph/YACP commit
+  // 20af8aee8d3e1d560456753b08d1f52e5488621f (MIT), preserving CrossInk's
+  // cover-state metadata.
+  bool changed = pruneMissing();
 
   // Remove existing entry if present
   auto it =
       std::find_if(recentBooks.begin(), recentBooks.end(), [&](const RecentBook& book) { return book.path == path; });
   if (it != recentBooks.end()) {
+    changed = changed || it->title != title || it->author != author || it->coverBmpPath != coverBmpPath ||
+              it->coverState != coverState;
     it->title = title;
     it->author = author;
     it->coverBmpPath = coverBmpPath;
@@ -76,14 +80,16 @@ void RecentBooksStore::addOrUpdateBook(const std::string& path, const std::strin
       RecentBook book = std::move(*it);
       recentBooks.erase(it);
       recentBooks.insert(recentBooks.begin(), std::move(book));
+      changed = true;
     }
   } else {
     recentBooks.insert(recentBooks.begin(), {path, title, author, coverBmpPath, coverState});
+    changed = true;
     if (recentBooks.size() > MAX_RECENT_BOOKS) {
       recentBooks.resize(MAX_RECENT_BOOKS);
     }
   }
-  saveToFile();
+  if (changed) saveToFile();
 }
 
 bool RecentBooksStore::updateBook(const std::string& path, const std::string& title, const std::string& author,
@@ -96,6 +102,10 @@ bool RecentBooksStore::updateBook(const std::string& path, const std::string& ti
     return false;
   }
   RecentBook& book = *it;
+  if (book.title == title && book.author == author && book.coverBmpPath == coverBmpPath &&
+      book.coverState == coverState) {
+    return true;
+  }
   book.title = title;
   book.author = author;
   book.coverBmpPath = coverBmpPath;

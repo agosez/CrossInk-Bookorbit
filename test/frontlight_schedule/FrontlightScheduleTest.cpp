@@ -21,6 +21,19 @@ TEST(FrontlightSchedule, RestoreOnWakeFallsThroughToScheduleOnlyWhenPreviouslyOf
   EXPECT_FALSE(FrontlightSchedule::shouldApplyOnWakeSchedule(true, false, false));
 }
 
+TEST(FrontlightSchedule, NetworkRestartFollowsWakePolicy) {
+  EXPECT_TRUE(FrontlightSchedule::shouldPreserveLightAcrossRestart(/*isSilentReboot=*/true,
+                                                                   /*followsWakeLightPolicy=*/false));
+  EXPECT_FALSE(FrontlightSchedule::shouldPreserveLightAcrossRestart(/*isSilentReboot=*/true,
+                                                                    /*followsWakeLightPolicy=*/true));
+  EXPECT_FALSE(FrontlightSchedule::shouldRestoreLightOnStart(
+      /*preserveLightAcrossRestart=*/false, /*restoreOnWake=*/false, /*wasLightOnBeforeSleep=*/true));
+  EXPECT_TRUE(FrontlightSchedule::shouldRestoreLightOnStart(
+      /*preserveLightAcrossRestart=*/false, /*restoreOnWake=*/true, /*wasLightOnBeforeSleep=*/true));
+  EXPECT_TRUE(FrontlightSchedule::shouldApplyOnWakeSchedule(
+      /*preserveLightAcrossRestart=*/false, /*restoreOnWake=*/false, /*wasLightOnBeforeSleep=*/true));
+}
+
 TEST(FrontlightSchedule, SameEndpointIsAnEmptyWindow) {
   EXPECT_FALSE(FrontlightSchedule::hasCompleteWindow(true, timeOfDay(18), timeOfDay(18)));
   EXPECT_FALSE(FrontlightSchedule::containsTimeOfDay(timeOfDay(18), timeOfDay(18), timeOfDay(18)));

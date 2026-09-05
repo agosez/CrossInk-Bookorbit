@@ -14,6 +14,7 @@
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
+#include "util/InputReleaseGuard.h"
 
 namespace fui = freeink::ui;
 
@@ -43,6 +44,7 @@ void KOReaderSettingsActivity::onRowEvent(const fui::ActionEvent& event, void* u
 void KOReaderSettingsActivity::onEnter() {
   Activity::onEnter();
 
+  ignoreInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
   selectedIndex = 0;
   uiReady = false;
   visibleRows = 1;
@@ -57,6 +59,11 @@ void KOReaderSettingsActivity::onEnter() {
 void KOReaderSettingsActivity::onExit() { Activity::onExit(); }
 
 void KOReaderSettingsActivity::loop() {
+  if (InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Confirm,
+                                               ignoreInitialConfirmRelease)) {
+    return;
+  }
+
   auto activateSelected = [this] { handleSelection(); };
 
   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {

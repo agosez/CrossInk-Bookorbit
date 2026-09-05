@@ -33,6 +33,9 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   bool quickLockResumePending = false;
   // Serialized raw QuickLockTrigger value for the one permitted post-wake unlock.
   uint8_t quickLockResumeTrigger = 0;
+  // True only when Quick Lock turned an active frontlight off. It survives a
+  // Quick Lock timeout so the permitted unlock can restore the user's light.
+  bool quickLockRestoreFrontlight = false;
   PendingOverlayResume pendingOverlayResume{};
 
   void setPendingOverlayResume(PendingOverlayResume value);

@@ -202,7 +202,7 @@ void FontDownloadActivity::onExit() {
     WiFi.disconnect(false);
     delay(30);
     if (fontsChanged_) {
-      silentRestart();
+      silentRestartAfterNetwork();
     } else {
       WiFi.mode(WIFI_OFF);
     }

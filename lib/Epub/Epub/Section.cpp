@@ -19,11 +19,13 @@ constexpr uint32_t SECTION_CACHE_MAGIC = 0x535843FF;  // bytes: 0xFF, "CXS"
 // v62: Text blocks persist source whitespace semantics for font-preview reflow.
 // This changes their serialized payload, so full and suspended section caches
 // must rebuild together.
-constexpr uint8_t SECTION_FILE_VERSION = 62;
+// v63: Paragraph base direction excludes direction changes from inline elements.
+// v66: Internal EPUB links preserve CSS superscript/subscript positioning.
+constexpr uint8_t SECTION_FILE_VERSION = 66;
 // Suspended incremental build: valid pages plus LUTs and a parse-watermark trailer.
 // Change this with layout or payload changes so stale partial pages cannot resume
 // under a different layout contract.
-constexpr uint8_t SECTION_FILE_PARTIAL_VERSION = 0xF8;
+constexpr uint8_t SECTION_FILE_PARTIAL_VERSION = 0xF6;
 constexpr uint16_t INITIAL_SECTION_PAGE_LUT_ENTRIES = 1024;
 constexpr uint32_t HEADER_SIZE =
     sizeof(SECTION_CACHE_MAGIC) + sizeof(uint8_t) + sizeof(int) + sizeof(float) + sizeof(bool) + sizeof(bool) +

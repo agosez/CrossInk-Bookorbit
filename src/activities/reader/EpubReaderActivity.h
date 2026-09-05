@@ -117,6 +117,7 @@ class EpubReaderActivity final : public Activity {
   // one-shot clean base for its first image page; normal image-page cleanup
   // uses pagesUntilFullRefresh independently.
   bool cleanImageBasePending = false;
+  bool skipRecentBookUpdateOnEntry = false;
   int cachedSpineIndex = 0;
   int cachedChapterPageNumber = 0;
   int cachedChapterTotalPageCount = 0;
@@ -307,7 +308,7 @@ class EpubReaderActivity final : public Activity {
   uint16_t preparedNextViewportWidth = 0;
   uint16_t preparedNextViewportHeight = 0;
 
-  void renderContents(std::unique_ptr<Page> page, int fontId, int orientedMarginTop, int orientedMarginRight,
+  bool renderContents(std::unique_ptr<Page> page, int fontId, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft, bool updatePanel);
   bool ensureGrayscaleStripScratch();
   void releaseGrayscaleStripScratch(bool force = false);
@@ -423,7 +424,8 @@ class EpubReaderActivity final : public Activity {
   void resetCurrentBookStatsAfterDelete();
   void openFileTransfer();
   void openAutoPageTurnIntervalPicker(bool ignoreInitialConfirmRelease = false, bool returnToReaderMenu = false);
-  void startClipSelection(const DictionaryClippingRequest* dictionaryRequest = nullptr);
+  void startClipSelection(const DictionaryClippingRequest* dictionaryRequest = nullptr,
+                          bool ignoreInitialBackRelease = false);
   void resetReadingPaceData();
   void captureGlobalReaderSettings();
   void restoreGlobalReaderSettings();
@@ -447,9 +449,6 @@ class EpubReaderActivity final : public Activity {
                                 bool dictionaryLookupFramebufferContainsPage = true,
                                 QuickLockTrigger quickLockTrigger = QuickLockTrigger::LongMenu);
   void openQuickActionsPopup();
-  bool quickActionUsesConfirmRelease(CrossPointSettings::LONG_PRESS_MENU_ACTION action) const;
-  bool quickActionUsesPowerRelease(CrossPointSettings::LONG_PRESS_MENU_ACTION action) const;
-  void suppressConfirmShortcutRelease(CrossPointSettings::LONG_PRESS_MENU_ACTION action);
   void executeFootnoteQuickAction(bool suppressInitialPowerRelease = false);
 #if CROSSINK_APP_CAP_TOUCH
   bool handlePinchFontResize();
@@ -499,12 +498,13 @@ class EpubReaderActivity final : public Activity {
  public:
   explicit EpubReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Epub> epub,
                               const BookReaderSettingsData& readerSettings, int initialRefreshCountdown,
-                              bool cleanImageBaseOnEntry = false)
+                              bool cleanImageBaseOnEntry = false, bool skipRecentBookUpdateOnEntry = false)
       : Activity("EpubReader", renderer, mappedInput),
         epub(std::move(epub)),
         initialBookReaderSettings(readerSettings),
         pagesUntilFullRefresh(initialRefreshCountdown),
-        cleanImageBasePending(cleanImageBaseOnEntry) {}
+        cleanImageBasePending(cleanImageBaseOnEntry),
+        skipRecentBookUpdateOnEntry(skipRecentBookUpdateOnEntry) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;

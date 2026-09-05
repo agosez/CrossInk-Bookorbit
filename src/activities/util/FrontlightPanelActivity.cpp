@@ -2,7 +2,6 @@
 
 #include <CrossInkHalFrontlight.h>
 #include <GfxRenderer.h>
-#include <HalDisplay.h>
 #include <I18n.h>
 #include <Memory.h>
 
@@ -11,6 +10,8 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "activities/RenderLock.h"
+#include "activities/home/BookActions.h"
 #include "activities/settings/SettingsActivity.h"
 #include "components/DrawerHandle.h"
 #include "components/HeaderDate.h"
@@ -94,8 +95,8 @@ void FrontlightPanelActivity::onEnter() {
 void FrontlightPanelActivity::onExit() {
   // Debounced persistence: one SPIFFS write on close, never per slider tick.
   const bool inversionChanged = initialInversion != static_cast<bool>(SETTINGS.screenInverted);
-  const bool touchscreenChanged = context.activeEpub && initialTouchscreenDisabled != pendingTouchscreenDisabled;
-  if (context.activeEpub) SETTINGS.disableReaderTouchscreen = pendingTouchscreenDisabled ? 1 : 0;
+  const bool touchscreenChanged = initialTouchscreenDisabled != pendingTouchscreenDisabled;
+  SETTINGS.disableReaderTouchscreen = pendingTouchscreenDisabled ? 1 : 0;
   const bool frontlightChanged =
       !context.showReaderDetails && (SETTINGS.frontlightBrightness != brightness ||
                                      SETTINGS.frontlightWarmth != warmth || SETTINGS.frontlightOn != (lightOn ? 1 : 0));
@@ -180,6 +181,17 @@ void FrontlightPanelActivity::adjustWarmth(const int delta) {
 void FrontlightPanelActivity::toggleLight() {
   lightOn = !lightOn;
   Frontlight.setOn(lightOn);
+  requestUpdate();
+}
+
+void FrontlightPanelActivity::toggleReaderTouchscreen() {
+  pendingTouchscreenDisabled = !pendingTouchscreenDisabled;
+  {
+    RenderLock lock;
+    BookActions::drawToast(renderer,
+                           pendingTouchscreenDisabled ? tr(STR_TOUCHSCREEN_DISABLED) : tr(STR_TOUCHSCREEN_ENABLED));
+  }
+  delay(1000);
   requestUpdate();
 }
 
@@ -275,10 +287,7 @@ void FrontlightPanelActivity::activateQuickAction(const int index) {
       openGlobalSettings();
       return;
     case 4:
-      if (context.activeEpub) {
-        pendingTouchscreenDisabled = !pendingTouchscreenDisabled;
-        requestUpdate();
-      }
+      toggleReaderTouchscreen();
       return;
   }
 }
@@ -524,6 +533,7 @@ void FrontlightPanelActivity::drawHeader() {
     titleFontId = UI_10_FONT_ID;
   } else if (context.activeEpub && !context.bookTitle.empty()) {
     title = context.bookTitle.c_str();
+    titleFontId = UI_10_FONT_ID;
   } else if (formatHeaderDateText(date, sizeof(date))) {
     title = date;
     titleFontId = UI_10_FONT_ID;
@@ -539,7 +549,18 @@ void FrontlightPanelActivity::drawHeader() {
   // owns the clock and battery, so centering across the whole header crowds it.
   const int headerBottom = header.y + header.height;
   const int titleY = headerBottom - HEADER_CONTENT_BOTTOM_GAP - renderer.getLineHeight(titleFontId);
-  UITheme::drawCenteredText(renderer, header, titleFontId, titleY, title, true);
+  const bool showBookTitle = !context.showReaderDetails && context.activeEpub && !context.bookTitle.empty();
+  if (showBookTitle) {
+    const auto tokens = uiThemeTokens(uiTarget);
+    const Rect homeButton = homeButtonRect();
+    const int titleX = header.x + tokens.headerSidePadding;
+    const int titleRight = homeButton.x - tokens.spaceSm;
+    const int titleWidth = std::max(0, titleRight - titleX);
+    const std::string visibleTitle = renderer.truncatedText(titleFontId, title, titleWidth, EpdFontFamily::REGULAR);
+    renderer.drawText(titleFontId, titleX, titleY, visibleTitle.c_str(), true);
+  } else {
+    UITheme::drawCenteredText(renderer, header, titleFontId, titleY, title, true);
+  }
 
   if (context.activeEpub) {
     const Rect button = homeButtonRect();

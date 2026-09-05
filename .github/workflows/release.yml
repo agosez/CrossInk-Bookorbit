@@ -58,6 +58,8 @@ jobs:
             firmware: firmware-sticky
           - environment: x4-pro
             firmware: firmware-x4-pro
+          - environment: x4-classic
+            firmware: firmware-x4-classic
     steps:
       - uses: actions/checkout@v6
         with:
@@ -134,3 +136,4 @@ jobs:
             release-firmware/firmware-x3-x4-v${{ env.ASSET_VERSION }}.bin
             release-firmware/firmware-sticky-v${{ env.ASSET_VERSION }}.bin
             release-firmware/firmware-x4-pro-v${{ env.ASSET_VERSION }}.bin
+            release-firmware/firmware-x4-classic-v${{ env.ASSET_VERSION }}.bin

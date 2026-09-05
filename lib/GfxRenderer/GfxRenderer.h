@@ -261,6 +261,9 @@ class GfxRenderer {
   void drawBitmap(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight, float cropX = 0,
                   float cropY = 0) const;
   void drawBitmap1Bit(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight) const;
+  // Counter-invert content images in the logical framebuffer so output-level
+  // Dark Mode leaves their original polarity unchanged.
+  void preserveImagePolarity(int x, int y, int width, int height) const;
   // Trapezoidal blit used by Flow/iPod-style carousels. Fits the bitmap into a
   // bounding box of width `w` and height `max(hL, hR)` whose top-left is (x, y).
   void drawPerspectiveBitmap(const Bitmap& bitmap, int x, int y, int w, int hL, int hR) const;

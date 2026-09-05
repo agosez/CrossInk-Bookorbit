@@ -823,16 +823,21 @@ bool MappedInputManager::wasReleased(const Button button) const {
   }
 
   if (button == Button::Power) {
-    if (!mapButton(button, &HalGPIO::wasReleased)) {
+    const bool released = mapButton(button, &HalGPIO::wasReleased);
+    if (!released) {
+      // A release edge stays visible for one full input loop. Once that loop
+      // has passed, drop a stale suppression before the next Power press.
+      if (!gpio.isPressed(HalGPIO::BTN_POWER)) {
+        suppressPowerRelease = false;
+      }
       return false;
     }
 
-    // Only consume a release belonging to a Power press that was actually
-    // routed to Confirm. `powerAsConfirmInReaderMode` is an activity
-    // capability, not evidence that this particular click confirmed a modal:
-    // global Power actions must still work in reader menus.
+    // InputManager exposes the same release edge to every caller in this
+    // loop. Keep the suppression set until the edge expires so the global
+    // shortcut dispatcher cannot consume it first and leave the reader's
+    // later handler to run the configured short-Power action.
     if (suppressPowerRelease) {
-      suppressPowerRelease = false;
       return false;
     }
 

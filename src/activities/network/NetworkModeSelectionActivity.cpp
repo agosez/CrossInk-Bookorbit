@@ -71,6 +71,7 @@ void NetworkModeSelectionActivity::onEnter() {
   ui.closeRouting();
   visibleRows = 1;
   topIndex = 0;
+  listNav.reset(listIndexForMenuIndex(selectedIndex));
   ui.reset();
   ui.app.on(ACTION_ROW, &NetworkModeSelectionActivity::onRowEvent, this);
   ui.app.setScreen(&NetworkModeSelectionActivity::listScreen, this);
@@ -107,16 +108,50 @@ void NetworkModeSelectionActivity::loop() {
     }
   }
 
+  // Swipes scroll the viewport; the selection stays put and button
+  // navigation pulls the view back to it.
+  const auto swipe = mappedInput.wasSwipe();
+  if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
+    bool moved = false;
+    {
+      RenderLock lock(*this);
+      const int delta = swipe == MappedInputManager::SwipeDir::Up ? visibleRows : -visibleRows;
+      listNav.selected = listIndexForMenuIndex(selectedIndex);
+      listNav.top = topIndex;
+      listNav.visibleRows = visibleRows;
+      moved = listNav.scrollBy(delta, LIST_ITEM_COUNT);
+      topIndex = listNav.top;
+    }
+    if (moved) {
+      requestUpdate();
+    }
+    return;
+  }
+
   // Handle navigation
   buttonNavigator.onNext([this] {
-    selectedIndex = ButtonNavigator::nextIndex(selectedIndex, MENU_ITEM_COUNT);
-    topIndex = followListSelection(listIndexForMenuIndex(selectedIndex), topIndex, visibleRows, LIST_ITEM_COUNT);
+    {
+      RenderLock lock(*this);
+      selectedIndex = ButtonNavigator::nextIndex(selectedIndex, MENU_ITEM_COUNT);
+      listNav.selected = listIndexForMenuIndex(selectedIndex);
+      listNav.top = topIndex;
+      listNav.visibleRows = visibleRows;
+      listNav.follow(LIST_ITEM_COUNT);
+      topIndex = listNav.top;
+    }
     requestUpdate();
   });
 
   buttonNavigator.onPrevious([this] {
-    selectedIndex = ButtonNavigator::previousIndex(selectedIndex, MENU_ITEM_COUNT);
-    topIndex = followListSelection(listIndexForMenuIndex(selectedIndex), topIndex, visibleRows, LIST_ITEM_COUNT);
+    {
+      RenderLock lock(*this);
+      selectedIndex = ButtonNavigator::previousIndex(selectedIndex, MENU_ITEM_COUNT);
+      listNav.selected = listIndexForMenuIndex(selectedIndex);
+      listNav.top = topIndex;
+      listNav.visibleRows = visibleRows;
+      listNav.follow(LIST_ITEM_COUNT);
+      topIndex = listNav.top;
+    }
     requestUpdate();
   });
 }
@@ -178,9 +213,13 @@ void NetworkModeSelectionActivity::buildListScreen(UiApp::ScreenType& screen) {
   props.sectionGap = 10;
   const auto rows = configureUiList(props, screen.theme(), screen.body(), UiListRowType::WithSubtitle);
   visibleRows = rows > 0 ? rows : 1;
-  topIndex = scrollListBy(topIndex, 0, visibleRows, LIST_ITEM_COUNT);  // clamp to range
-  props.topIndex = static_cast<uint16_t>(topIndex);
+  listNav.selected = listIndexForMenuIndex(selectedIndex);
+  listNav.top = topIndex;
+  listNav.visibleRows = visibleRows;
+  listNav.syncToProps(screen.body(), props.rowHeight, props.rowGap, LIST_ITEM_COUNT, props);
+  topIndex = listNav.top;
   screen.list(props);
+  topIndex = listNav.top;
 }
 
 void NetworkModeSelectionActivity::render(RenderLock&&) {
@@ -198,7 +237,11 @@ void NetworkModeSelectionActivity::render(RenderLock&&) {
     GUI.drawHeader(renderer, header, tr(STR_FILE_TRANSFER));
   }
 
-  ui.render();
+  ui.closeRouting();
+  for (int pass = 0; pass < 8; ++pass) {
+    ui.render();
+    if (!listNav.consumeRebuildNeeded()) break;
+  }
 
   const auto labels =
       mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));

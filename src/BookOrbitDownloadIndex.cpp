@@ -86,8 +86,7 @@ void save() {
     const uint16_t pathLen = static_cast<uint16_t>(std::min<size_t>(entry.path.size(), PATH_MAX_LEN));
     if (pathLen == 0) continue;
     ok = serialization::tryWritePod(f, entry.bookId) && serialization::tryWritePod(f, entry.fileSize) &&
-         serialization::tryWritePod(f, pathLen) &&
-         f.write(entry.path.data(), pathLen) == static_cast<int>(pathLen);
+         serialization::tryWritePod(f, pathLen) && f.write(entry.path.data(), pathLen) == static_cast<int>(pathLen);
   }
   f.close();
   // A torn write is caught by ensureLoaded()'s per-record checks and just shortens
@@ -108,8 +107,8 @@ uint32_t fileSizeOf(const std::string& path) {
 
 bool BookOrbitDownloadIndex::lookup(const int64_t bookId, std::string& outPath) {
   ensureLoaded();
-  const auto it = std::find_if(entries.begin(), entries.end(),
-                               [bookId](const Entry& entry) { return entry.bookId == bookId; });
+  const auto it =
+      std::find_if(entries.begin(), entries.end(), [bookId](const Entry& entry) { return entry.bookId == bookId; });
   if (it == entries.end()) return false;
 
   // The recorded size doubles as an identity check: a different file put at the

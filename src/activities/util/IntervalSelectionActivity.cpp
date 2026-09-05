@@ -13,6 +13,7 @@
 #include "components/TouchActionButtons.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
+#include "util/InputReleaseGuard.h"
 #if CROSSINK_APP_CAP_TOUCH
 #include "components/UiAppHelpers.h"
 #endif
@@ -261,6 +262,9 @@ void IntervalSelectionActivity::onStepEvent(const fui::ActionEvent& event, void*
 
 void IntervalSelectionActivity::onEnter() {
   Activity::onEnter();
+  ignoreConfirmRelease = ignoreConfirmRelease || mappedInput.isPressed(MappedInputManager::Button::Confirm);
+  ignoreBackRelease = mappedInput.isPressed(MappedInputManager::Button::Back);
+  ignorePowerRelease = mappedInput.isPressed(MappedInputManager::Button::Power);
   if (overrideDisabledReaderTouchscreen) {
     mappedInput.setReaderTouchscreenOverride(true);
   }
@@ -304,12 +308,14 @@ void IntervalSelectionActivity::drawStepHintLine(const int y, const StrId labelI
 }
 
 void IntervalSelectionActivity::loop() {
+  if (InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Back, ignoreBackRelease) ||
+      InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Power, ignorePowerRelease)) {
+    return;
+  }
   if (ignoreConfirmRelease) {
-    const bool confirmReleased = mappedInput.wasReleased(MappedInputManager::Button::Confirm);
-    if (confirmReleased || !mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
-      ignoreConfirmRelease = false;
-      return;
-    }
+    (void)InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Confirm,
+                                                   ignoreConfirmRelease);
+    return;
   }
 
   if (showTouchHeaderBackButton && TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
