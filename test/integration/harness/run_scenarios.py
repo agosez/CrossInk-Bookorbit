@@ -654,6 +654,40 @@ def scenario_bookmark_pull(verbose: bool) -> None:
             f"bookmark did not land in chapter 2: {bookmarks}"
 
 
+def scenario_catalog_collections_browse(verbose: bool) -> None:
+    """The catalog browser lists the server's Collections section and the books
+    inside one. Driven entirely by scripted input (the catalog flow never
+    silent-reboots before exit), asserted through the list cache the browser
+    writes for each screen it loaded. Browse-only: nothing mutates server-side,
+    so this is repeatable as-is."""
+    manifest, _ = load_seed()
+    collection = manifest["collection"]
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])  # no open book: boots to home
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
+            "11000:DOWN", "11400:DOWN", "11800:CONFIRM",  # root -> Collections (3rd row)
+            "14000:CONFIRM",                              # the seeded collection
+            "17000:QUIT",
+        ])
+        run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
+
+        caches = [json.loads(p.read_text())
+                  for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
+        roots = [c for c in caches if "sections" in c]
+        assert roots and any(s["id"] == "collections" for s in roots[0]["sections"]), \
+            f"Collections missing from the cached root: {roots}"
+        facets = [c for c in caches if "hasNext" in c]
+        assert facets and any(i["title"] == collection["name"] for i in facets[0]["items"]), \
+            f"collection list never loaded: {facets}"
+        books = [c for c in caches if "total" in c and "sections" not in c]
+        assert books, "collection books were never listed"
+        listed = {b["title"] for b in books[0]["items"]}
+        expected = {Path(b["file"]).stem for b in collection["books"]}
+        assert listed == expected, f"collection books mismatch: {listed} != {expected}"
+
+
 def scenario_bookmark_push(verbose: bool) -> None:
     """A local bookmark (store entry + minted position record) reaches the
     server and is offered to a device that has never seen it."""
@@ -688,6 +722,7 @@ def scenario_bookmark_push(verbose: bool) -> None:
 
 
 SCENARIOS = {
+    "catalog_collections_browse": scenario_catalog_collections_browse,
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,
     "highlight_pull": scenario_highlight_pull,

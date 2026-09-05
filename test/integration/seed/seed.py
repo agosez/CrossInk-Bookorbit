@@ -37,6 +37,7 @@ OTHER_DEVICE_ID = "crossink-integration-peer"
 WITH_PROGRESS = range(0, 10)     # server progress at ~40%
 WITH_HIGHLIGHTS = range(10, 20)  # two highlights each
 WITH_BOOKMARKS = range(20, 25)   # one bookmark each
+IN_COLLECTION = range(40, 45)    # members of the "Integration Shelf" collection
 SEED_EPOCH = 1_756_000_000       # fixed timestamps keep reruns idempotent
 
 
@@ -104,12 +105,30 @@ def main() -> int:
             time.sleep(5)
     print(f"Library ingested ({admin.book_count()} books)")
 
+    # A collection for the catalog browser's Collections section. Books whose
+    # metadata scan is still pending are titled by filename stem server-side, so
+    # look each one up under both names.
+    collection_books = [books[i] for i in IN_COLLECTION]
+    names = {b["title"]: [b["title"], Path(b["file"]).stem] for b in collection_books}
+    ids_by_title = admin.find_book_ids([n for pair in names.values() for n in pair])
+    collection_ids = []
+    for title, candidates in names.items():
+        book_id = next((ids_by_title[n] for n in candidates if n in ids_by_title), None)
+        if book_id is None:
+            print(f"Book '{title}' not found on the server; cannot build the collection", file=sys.stderr)
+            return 1
+        collection_ids.append(book_id)
+    collection_id = admin.ensure_collection("Integration Shelf", "book", collection_ids)
+    print(f"Collection {collection_id} (Integration Shelf) in place")
+
     peer = KosyncDevice(BASE_URL, KOSYNC["username"], KOSYNC["password"], OTHER_DEVICE_ID)
     peer.auth()
 
     manifest = SeedManifest(INTEGRATION / "seed-manifest.json")
     manifest.data = {"user": USER, "kosync": KOSYNC, "peer_device_id": OTHER_DEVICE_ID,
-                     "progress": [], "highlights": [], "bookmarks": []}
+                     "progress": [], "highlights": [], "bookmarks": [],
+                     "collection": {"id": collection_id, "name": "Integration Shelf",
+                                    "books": collection_books}}
 
     for i in WITH_PROGRESS:
         book = books[i]

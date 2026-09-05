@@ -212,6 +212,37 @@ class AdminClient:
             return len(result)
         raise RuntimeError(f"cannot read a book count out of: {json.dumps(result)[:300]}")
 
+    def find_book_ids(self, titles: list[str]) -> dict[str, int]:
+        """Map book titles to their server-side book ids. Books whose metadata
+        scan has not run yet are titled by filename stem, so callers may pass
+        either form; keys of the result are the matched server titles."""
+        wanted = set(titles)
+        found: dict[str, int] = {}
+        page = 0
+        while True:
+            result = request_json("POST", self.api("/books/query"), self._headers(),
+                                  {"pagination": {"page": page, "size": 200}}, ok=(200, 201))
+            items = result.get("items", [])
+            for item in items:
+                if item.get("title") in wanted:
+                    found[item["title"]] = int(item["id"])
+            page += 1
+            if len(found) >= len(wanted) or page * 200 >= int(result.get("total", 0)) or not items:
+                break
+        return found
+
+    def ensure_collection(self, name: str, icon: str, book_ids: list[int]) -> int:
+        """Create a collection holding ``book_ids``, or return the existing one by name."""
+        for collection in request_json("GET", self.api("/collections"), self._headers(), ok=(200,)):
+            if collection.get("name") == name:
+                return int(collection["id"])
+        created = request_json("POST", self.api("/collections"), self._headers(),
+                               {"name": name, "icon": icon})
+        collection_id = int(created["id"])
+        request_json("POST", self.api(f"/collections/{collection_id}/books"),
+                     self._headers(), {"bookIds": book_ids})
+        return collection_id
+
 
 # --- kosync device API (what the firmware speaks) ------------------------------
 

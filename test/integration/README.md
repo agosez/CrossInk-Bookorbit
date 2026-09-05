@@ -96,6 +96,7 @@ scenarios, compose down.
 | `highlight_delete_guard` | Same, but with the sync-state store lost between runs: the guard reports no key set and the server keeps the highlight. |
 | `bookmark_pull` | A bookmark created by the peer lands in the local bookmark store, with a minted position record. |
 | `bookmark_push` | A pre-seeded local bookmark reaches the server and is offered to a device that never saw it. |
+| `catalog_collections_browse` | Scripted UI navigation: home menu → BookOrbit catalog → Collections → the seeded collection; asserted through the browser's list cache. The catalog flow never silent-reboots before exit, so input scripts drive it end to end. |
 
 ### Repeatability
 
