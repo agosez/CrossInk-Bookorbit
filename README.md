@@ -2,7 +2,7 @@
 
 Everything else — fonts, themes, reader features, reading stats, controls, the web server — comes from CrossInk unchanged, with one exception: KOReader Sync is removed to make room (see below). See the [upstream README](https://github.com/uxjulia/CrossInk#readme) for those, and the [docs](./docs/) folder in this repository for the detailed guides.
 
-**Note**: this fork publishes releases for the Xteink X3 and X4 and the Seeed reTerminal Sticky.
+**Note**: this fork publishes releases for the Xteink X3, X4, X4 Pro and X4 Classic, and the Seeed reTerminal Sticky.
 
 ---
 
@@ -10,7 +10,7 @@ Everything else — fonts, themes, reader features, reading stats, controls, the
 
 - **BookOrbit progress sync** — sync your reading position with a self-hosted BookOrbit server.
 - **BookOrbit highlight and bookmark sync** — two-way: what you highlight or bookmark on the device appears in the web reader at its exact place in the text, what you add on the web lands in the book, and deletions propagate both ways.
-- **BookOrbit catalog browser** — browse your server's library on the device and download EPUBs over WiFi, including by author and by series.
+- **BookOrbit catalog browser** — browse your server's library on the device and download EPUBs over WiFi, including by author, series or collection.
 - **Offline shortcuts to your own books** — "On device" and "In progress" categories that open a book directly, without touching the network.
 - **Reading statistics pushed to BookOrbit** — your reading time, streaks and pace on the server's dashboard, fed by the pages you turn on the device.
 - **A working clock on the X4** — the status-bar clock, which upstream can only show on hardware that has a clock chip, plus an opt-in mode that keeps the time running through sleep.
@@ -88,7 +88,7 @@ Details worth knowing:
   beside an open TLS connection — so a large backlog drains over a few syncs.
 - Highlights and bookmarks made before this feature existed gain their sync identity
   progressively as you read, one chapter per visit, and start syncing from there.
-- A highlight's stored text is capped at 2 KB; an extremely long web highlight is drawn
+- A highlight's stored text is capped at 4 KB; an extremely long web highlight is drawn
   up to where that cap cuts its text.
 
 ## Reading statistics
@@ -155,11 +155,12 @@ The root list contains:
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | Recently added / Continue reading / All books | Your server's own sections                                                                             |
 | **Authors** / **Series**                      | Paged lists with a book count per entry; pick one to see its books (series are listed in series order) |
+| **Collections**                               | Your server's collections, with a book count per entry; pick one to see its books                      |
 | **Search**                                    | Free-text search of your library                                                                       |
-| **On device**                                 | Every EPUB already in the SD card root and the `/Read` folder — works offline                          |
+| **On device**                                 | Every EPUB already in the configured download folder, the SD card root and the `/Read` folder — works offline |
 | **In progress**                               | Recent books you haven't finished yet — works offline                                                  |
 
-In a server book list, **Confirm** downloads the book to the SD card root as `Title - Author.epub`. A download that gets interrupted resumes automatically on retry, and **Back** cancels it. Books already present on the device are marked with a dot at the end of the line, so you can tell at a glance what is worth downloading.
+In a server book list, **Confirm** downloads the book as `Title - Author.epub` into the download folder configured in the BookOrbit settings (the SD card root by default). A download that gets interrupted resumes automatically on retry, and **Back** cancels it. Books already present on the device are marked with a dot at the end of the line, so you can tell at a glance what is worth downloading.
 
 In **On device** and **In progress**, Confirm opens the book in the reader instead of downloading it.
 

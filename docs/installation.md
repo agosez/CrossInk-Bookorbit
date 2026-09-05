@@ -9,6 +9,7 @@ nav_order: 2
 
 - Xteink X3, X4
 - Xteink X4 Pro
+- Xteink X4 Classic
 - Seeed Studio Sticky
 
 ## Firmware Files
@@ -29,9 +30,6 @@ arrive over the air.
    your device model and choose the custom-firmware option.
 3. Give it the downloaded `firmware-*.bin` and start the flash, keeping the reader
    connected through the download-mode and flashing steps.
-
-X4 Pro uses the ESP32-S3 firmware option. Keep the reader connected during the
-download-mode and flashing steps shown by Inky.
 
 ## USB Drive
 
@@ -54,8 +52,10 @@ removed.
 Flash an upstream build with CrossInk's own
 [web installer](https://inky.crossink.dev/#flash-tools), or place an upstream
 `firmware-*.bin` on the SD card and use the SD Card Firmware Update above. Settings,
-books, reading progress, highlights and bookmarks live on the SD card and survive the
-swap in both directions.
+books and reading progress live on the SD card and survive the swap in both directions.
+Highlights and bookmarks stay stored too, but upstream does not read the content-keyed
+files this fork keeps them in, so they are invisible there — everything returns when the
+fork is flashed back.
 
 ## Command Line
 
