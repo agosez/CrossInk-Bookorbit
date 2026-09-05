@@ -49,3 +49,9 @@ dist-publish/
 /CMakeLists.txt
 /dependencies.lock
 /sdkconfig.*
+
+# Integration test generated artifacts
+test/integration/library-dock/
+test/integration/library/
+test/integration/library.json
+test/integration/seed-manifest.json

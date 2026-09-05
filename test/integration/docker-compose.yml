@@ -1,0 +1,51 @@
+# Test-only BookOrbit server for the integration suite. Fixed secrets live in
+# .env next to this file — they never protect anything real.
+name: crossink-integration
+
+services:
+  bookorbit:
+    image: ${APP_IMAGE:-ghcr.io/bookorbit/bookorbit:latest}
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_PORT:-3999}:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      TZ: UTC
+      # The dock watcher ingests every EPUB dropped into this folder; the
+      # seeder fills it from make_library.py's output.
+      BOOK_DOCK_PATH: /dock
+    volumes:
+      - appdata:/data
+      - ./library-dock:/dock
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/v1/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  postgres:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      # pg18 images place PGDATA in a subdirectory; the mount must sit one level up.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  appdata:
+  pgdata:
