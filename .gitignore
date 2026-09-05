@@ -15,6 +15,7 @@ build
 .history/
 /.venv
 *.local*
+!platformio.local.example.ini
 fs_/
 /site/node_modules/
 /site/dist/

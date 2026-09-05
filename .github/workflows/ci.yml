@@ -138,6 +138,72 @@ jobs:
           path: .pio/build/x4-classic/firmware-x4-classic.bin
           if-no-files-found: error
 
+  integration:
+    name: BookOrbit integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          # Do not cache PlatformIO's Python virtual environment. It is tied to
+          # the runner's Python and can become invalid when restored elsewhere.
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-platformio-py3.14-core6.1.19-simulator-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Install SDL2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev
+
+      - name: Apply the simulator cold-build overrides
+        # The fetched simulator package needs an include-path fix (see the
+        # example file) and a few HAL shims it does not carry yet.
+        run: |
+          cp platformio.local.example.ini platformio.local.ini
+          pio pkg install -e simulator
+          python3 test/integration/ci/patch_simulator_package.py
+
+      - name: Build the simulator
+        run: pio run -e simulator
+
+      - name: Start the BookOrbit server
+        run: docker compose -f test/integration/docker-compose.yml up -d --wait
+
+      - name: Seed the server
+        run: |
+          python3 test/integration/seed/make_library.py
+          python3 test/integration/seed/seed.py
+
+      - name: Run the scenarios
+        run: python3 test/integration/harness/run_scenarios.py
+
+      - name: Dump server logs on failure
+        if: failure()
+        run: docker compose -f test/integration/docker-compose.yml logs --tail 300
+
+      - name: Stop the server
+        if: always()
+        run: docker compose -f test/integration/docker-compose.yml down -v
+
   # This job is used as the PR required actions check, allows for changes to other steps in the future without breaking
   # PR requirements.
   test-status:
@@ -146,6 +212,7 @@ jobs:
       - build
       - clang-format
       - cppcheck
+      - integration
     if: always()
     runs-on: ubuntu-latest
     steps:
