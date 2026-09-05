@@ -688,6 +688,35 @@ def scenario_catalog_collections_browse(verbose: bool) -> None:
         assert listed == expected, f"collection books mismatch: {listed} != {expected}"
 
 
+def scenario_catalog_empty_listing_back(verbose: bool) -> None:
+    """An empty listing (a collection with no books) shows the no-entries error,
+    and Back must climb out of it — the regression had the error screen's Back
+    reload the very listing it was showing, forever. Proven by navigating onward
+    after the error: the non-empty collection's books still load."""
+    manifest, _ = load_seed()
+    collection = manifest["collection"]
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])  # no open book: boots to home
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
+            "11000:DOWN", "11400:DOWN", "11800:CONFIRM",  # root -> Collections
+            "14000:DOWN", "14400:CONFIRM",                # Zero Shelf (empty) -> error screen
+            "17000:BACK",                                 # must climb back to the collection list
+            "19000:CONFIRM",                              # Integration Shelf -> its books
+            "22000:QUIT",
+        ])
+        run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
+
+        caches = [json.loads(p.read_text())
+                  for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
+        books = [c for c in caches if "total" in c and "sections" not in c]
+        assert any(c["total"] == 0 for c in books), "the empty collection was never opened"
+        expected = {Path(b["file"]).stem for b in collection["books"]}
+        assert any({i["title"] for i in c["items"]} == expected for c in books), \
+            "navigation after the empty-listing error never reached the collection's books"
+
+
 def scenario_bookmark_push(verbose: bool) -> None:
     """A local bookmark (store entry + minted position record) reaches the
     server and is offered to a device that has never seen it."""
@@ -723,6 +752,7 @@ def scenario_bookmark_push(verbose: bool) -> None:
 
 SCENARIOS = {
     "catalog_collections_browse": scenario_catalog_collections_browse,
+    "catalog_empty_listing_back": scenario_catalog_empty_listing_back,
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,
     "highlight_pull": scenario_highlight_pull,

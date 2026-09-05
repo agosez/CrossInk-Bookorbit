@@ -239,8 +239,9 @@ class AdminClient:
         created = request_json("POST", self.api("/collections"), self._headers(),
                                {"name": name, "icon": icon})
         collection_id = int(created["id"])
-        request_json("POST", self.api(f"/collections/{collection_id}/books"),
-                     self._headers(), {"bookIds": book_ids})
+        if book_ids:  # the bulk-selection DTO rejects an empty bookIds list
+            request_json("POST", self.api(f"/collections/{collection_id}/books"),
+                         self._headers(), {"bookIds": book_ids})
         return collection_id
 
 

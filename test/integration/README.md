@@ -97,6 +97,7 @@ scenarios, compose down.
 | `bookmark_pull` | A bookmark created by the peer lands in the local bookmark store, with a minted position record. |
 | `bookmark_push` | A pre-seeded local bookmark reaches the server and is offered to a device that never saw it. |
 | `catalog_collections_browse` | Scripted UI navigation: home menu → BookOrbit catalog → Collections → the seeded collection; asserted through the browser's list cache. The catalog flow never silent-reboots before exit, so input scripts drive it end to end. |
+| `catalog_empty_listing_back` | Opening the seeded empty collection shows the no-entries error; Back climbs out of it and the next listing still loads (regression: Back reloaded the same empty listing forever). |
 
 ### Repeatability
 

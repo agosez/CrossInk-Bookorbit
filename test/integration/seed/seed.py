@@ -119,7 +119,10 @@ def main() -> int:
             return 1
         collection_ids.append(book_id)
     collection_id = admin.ensure_collection("Integration Shelf", "book", collection_ids)
-    print(f"Collection {collection_id} (Integration Shelf) in place")
+    # An EMPTY collection too: its book listing is the catalog's empty-listing
+    # screen, which scenarios drive Back navigation through.
+    empty_collection_id = admin.ensure_collection("Zero Shelf", "book", [])
+    print(f"Collections {collection_id} (Integration Shelf) and {empty_collection_id} (Zero Shelf) in place")
 
     peer = KosyncDevice(BASE_URL, KOSYNC["username"], KOSYNC["password"], OTHER_DEVICE_ID)
     peer.auth()
@@ -128,7 +131,8 @@ def main() -> int:
     manifest.data = {"user": USER, "kosync": KOSYNC, "peer_device_id": OTHER_DEVICE_ID,
                      "progress": [], "highlights": [], "bookmarks": [],
                      "collection": {"id": collection_id, "name": "Integration Shelf",
-                                    "books": collection_books}}
+                                    "books": collection_books},
+                     "empty_collection": {"id": empty_collection_id, "name": "Zero Shelf"}}
 
     for i in WITH_PROGRESS:
         book = books[i]
