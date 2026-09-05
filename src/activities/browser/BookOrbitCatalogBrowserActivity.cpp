@@ -202,6 +202,7 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   }
 
   entries.clear();
+  listFreedForDownload = false;
   for (auto& section : sections) {
     Entry entry;
     const bool isFacet = section.id == "authors" || section.id == "series" || section.id == "collections";
@@ -293,6 +294,7 @@ void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
   // scroll indicator would size itself on the stale server total.
   navLevel = NavLevel::Books;
   booksFromFacet = false;
+  listFreedForDownload = false;
   listPage = 1;
   listTotal = static_cast<int>(entries.size());
   listPageSize = std::max<int>(1, static_cast<int>(entries.size()));
@@ -323,6 +325,7 @@ bool BookOrbitCatalogBrowserActivity::loadFacetEntries(const std::string& sectio
   // Commit the navigation context only on success, so a failed page fetch leaves
   // the currently displayed list and its paging state consistent.
   navLevel = NavLevel::FacetList;
+  listFreedForDownload = false;
   facetSectionId = sectionId;
   facetTitle = title;
   facetPage = page;
@@ -374,6 +377,7 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
 
   // Commit the navigation context only on success (see loadFacetEntries).
   navLevel = NavLevel::Books;
+  listFreedForDownload = false;
   listQuery = query;
   listTitle = title;
   listPage = page;
@@ -550,6 +554,7 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
   // Free the current listing while the download runs: every KB of contiguous heap
   // matters next to the TLS session, and the list is rebuilt from listQuery after.
   std::vector<Entry>().swap(entries);
+  listFreedForDownload = true;
 
   constexpr int MAX_DOWNLOAD_ATTEMPTS = 3;
   HttpDownloader::DownloadError result = HttpDownloader::HTTP_ERROR;
@@ -740,16 +745,14 @@ void BookOrbitCatalogBrowserActivity::loop() {
     if (backRequested) {
       if (!BOOKORBIT_STORE.hasCredentials() || navLevel == NavLevel::Root) {
         onGoHome();
-      } else if (entries.empty()) {
+      } else if (entries.empty() && listFreedForDownload) {
         // The listing was freed for a download that then failed; rebuild it.
-        if (navLevel == NavLevel::FacetList) {
-          if (!loadFacetEntries(facetSectionId, facetTitle, facetPage, /*append=*/false, /*allowNetwork=*/false)) {
-            showLoadingBeforeFetch();
-            loadFacetEntries(facetSectionId, facetTitle, facetPage);
-          }
-        } else {
-          restoreBookListAfterDownload();
-        }
+        restoreBookListAfterDownload();
+      } else if (entries.empty()) {
+        // The listing genuinely loaded empty (a section with no entries, a search
+        // with no matches): reloading it would show the same error forever, so
+        // Back navigates up, exactly as it does from a non-empty listing.
+        navigateBack();
       } else {
         state = BrowserState::BROWSING;
         requestUpdate();

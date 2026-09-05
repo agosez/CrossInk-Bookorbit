@@ -72,6 +72,11 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   // Set when the current book list was opened from a facet entry, so Back returns
   // to the facet listing instead of the root.
   bool booksFromFacet = false;
+  // Set while the listing is freed for a download's heap headroom, cleared once a
+  // listing loads again. Distinguishes "rebuild the list Back should return to"
+  // from a listing that genuinely loaded empty, where Back must navigate up
+  // instead of reloading the same empty listing forever.
+  bool listFreedForDownload = false;
 
   // Current facet-list context (authors or series).
   std::string facetSectionId;
