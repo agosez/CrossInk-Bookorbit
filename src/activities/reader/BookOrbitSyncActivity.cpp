@@ -1444,11 +1444,13 @@ void BookOrbitSyncActivity::onEnter() {
     touchOverrideActive = true;
   }
 
-  uint8_t syncOrientation = SETTINGS.orientation;
+  bool hasReaderOrientation = readerOrientation < CrossPointSettings::ORIENTATION_COUNT;
+  uint8_t syncOrientation = hasReaderOrientation ? readerOrientation : SETTINGS.orientation;
   const PendingOverlayResume& resume = APP_STATE.pendingOverlayResume;
   if (resume.origin == PendingOverlayOrigin::Reader && resume.overlay == PendingOverlayType::FrontlightDrawer &&
       resume.preserveReaderOrientation && resume.readerOrientation < CrossPointSettings::ORIENTATION_COUNT) {
     syncOrientation = resume.readerOrientation;
+    hasReaderOrientation = true;
   }
   ReaderUtils::applyOrientation(renderer, syncOrientation);
   lockInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
@@ -1464,8 +1466,16 @@ void BookOrbitSyncActivity::onEnter() {
   // progress is saved and the reading-session stats are queued, so nothing is lost to the restart.
   // The paragraph anchor is the one piece of the position that lives only in RAM
   if (!networkBoot) {
+    // Orientation rides one-based so 0 keeps meaning "no reader override".
+    static_assert(CrossPointSettings::ORIENTATION_COUNT <=
+                      (BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_MASK >> BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_SHIFT),
+                  "orientation payload field too small");
+    const uint32_t orientationPayload = hasReaderOrientation ? (static_cast<uint32_t>(syncOrientation) + 1)
+                                                                   << BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_SHIFT
+                                                             : 0;
     const uint32_t payload =
-        currentParagraphIndex ? (BOOKORBIT_SYNC_PAYLOAD_HAS_PARAGRAPH | *currentParagraphIndex) : 0;
+        orientationPayload |
+        (currentParagraphIndex ? (BOOKORBIT_SYNC_PAYLOAD_HAS_PARAGRAPH | *currentParagraphIndex) : 0);
     silentRestartToNetwork(NetworkBootTarget::BOOKORBIT_SYNC, payload);
     return;  // only reached when a deep sleep in progress suppressed the restart
   }

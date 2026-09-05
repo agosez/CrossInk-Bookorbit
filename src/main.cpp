@@ -594,9 +594,17 @@ bool startGlobalBookOrbitSync(const bool networkBootReady, const uint32_t payloa
   const int tocIdx = epub->getTocIndexForSpineIndex(spineIndex);
   std::string localChapterName = (tocIdx >= 0) ? epub->getTocItem(tocIdx).title : "";
 
+  // One-based in the payload; 0 means the sync ran without a reader orientation
+  // override and follows the global setting (see SilentRestart.h).
+  const uint32_t orientationBits =
+      (payload & BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_MASK) >> BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_SHIFT;
+  const uint8_t readerOrientation = orientationBits > 0 && orientationBits <= CrossPointSettings::ORIENTATION_COUNT
+                                        ? static_cast<uint8_t>(orientationBits - 1)
+                                        : CrossPointSettings::ORIENTATION_COUNT;
+
   auto syncActivity = makeUniqueNoThrow<BookOrbitSyncActivity>(
       renderer, mappedInputManager, epubPath, spineIndex, pageNumber, totalPagesInSpine, std::move(localKoPos),
-      std::move(localChapterName), paragraphIndex, networkBootReady);
+      std::move(localChapterName), paragraphIndex, networkBootReady, readerOrientation);
   if (!syncActivity) {
     LOG_ERR("MAIN", "OOM: BookOrbit sync activity (free=%u maxAlloc=%u)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
     return false;

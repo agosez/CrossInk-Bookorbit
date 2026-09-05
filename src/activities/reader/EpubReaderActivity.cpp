@@ -4118,9 +4118,11 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         LOG_DBG("BookOrbit", "Section released for sync (heap after: %u)", (unsigned)ESP.getFreeHeap());
 
         pauseReadingPaceTimer("sync_progress");
+        // SETTINGS.orientation still holds the book's orientation here; the reader's
+        // teardown restores the global one before the sync activity gets control.
         activityManager.replaceActivity(std::make_unique<BookOrbitSyncActivity>(
             renderer, mappedInput, savedEpubPath, currentSpineIndex, currentPage, totalPages, std::move(localKoPos),
-            std::move(localChapterName), paragraphIndex));
+            std::move(localChapterName), paragraphIndex, /*networkBoot=*/false, SETTINGS.orientation));
       }
       break;
     }

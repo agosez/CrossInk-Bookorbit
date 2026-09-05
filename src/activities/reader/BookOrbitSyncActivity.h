@@ -32,7 +32,8 @@ class BookOrbitSyncActivity final : public Activity {
   explicit BookOrbitSyncActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& epubPath,
                                  int currentSpineIndex, int currentPage, int totalPagesInSpine,
                                  KOReaderPosition localKoPos, std::string localChapterName,
-                                 std::optional<uint16_t> currentParagraphIndex = std::nullopt, bool networkBoot = false)
+                                 std::optional<uint16_t> currentParagraphIndex = std::nullopt, bool networkBoot = false,
+                                 uint8_t readerOrientation = CrossPointSettings::ORIENTATION_COUNT)
       : Activity("BookOrbitSync", renderer, mappedInput),
         epubPath(epubPath),
         currentSpineIndex(currentSpineIndex),
@@ -41,6 +42,7 @@ class BookOrbitSyncActivity final : public Activity {
         currentParagraphIndex(currentParagraphIndex),
         localChapterName(std::move(localChapterName)),
         networkBoot(networkBoot),
+        readerOrientation(readerOrientation),
         remoteProgress{},
         remotePosition{},
         localProgress(std::move(localKoPos)) {}
@@ -78,6 +80,10 @@ class BookOrbitSyncActivity final : public Activity {
   // True when this instance was created by the minimal network-boot resume (see
   // NetworkBootTarget::BOOKORBIT_SYNC); onEnter() then proceeds instead of restarting.
   bool networkBoot = false;
+  // The reader can use a book-specific orientation that its teardown restores before
+  // this activity gets control. Keep that one value through the lightweight network
+  // reboot so every sync screen matches the book. (Mirrors KOReaderSyncActivity.)
+  uint8_t readerOrientation = CrossPointSettings::ORIENTATION_COUNT;
 
   State state = WIFI_SELECTION;
   std::string statusMessage;
