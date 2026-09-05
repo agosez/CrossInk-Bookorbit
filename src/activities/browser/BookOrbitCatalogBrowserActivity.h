@@ -15,8 +15,8 @@
  * Activity for browsing and downloading books from BookOrbit's catalog.
  *
  * Simplified compared to BookOrbit's own KOReader plugin: three navigation levels
- * (root sections -> optional authors/series facet list -> a paged book list or a
- * search). Library/collection/smart-scope drill-down, covers, ratings and
+ * (root sections -> optional authors/series/collections facet list -> a paged book
+ * list or a search). Library/smart-scope drill-down, covers, ratings and
  * read-status editing remain out of scope (see SCOPE.md discussion for BookOrbit
  * sync).
  */

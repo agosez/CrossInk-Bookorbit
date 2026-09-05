@@ -144,10 +144,10 @@ bool fetchJson(const std::string& url, const JsonDocument& filter, JsonDocument&
   return !error && !wrongShape;
 }
 
-// Sections we can browse: direct book listings plus the authors/series drill-down
-// facets. BookOrbit's library/collection/smart-scope facets remain out of scope.
+// Sections we can browse: direct book listings plus the authors/series/collections
+// drill-down facets. BookOrbit's library/smart-scope facets remain out of scope.
 constexpr const char* SUPPORTED_SECTIONS[] = {
-    "recent", "continue-reading", "all-books", "authors", "series",
+    "recent", "continue-reading", "all-books", "authors", "series", "collections",
 };
 
 bool isSupportedSection(const std::string& sectionId) {
@@ -200,6 +200,9 @@ bool BookOrbitCatalogClient::fetchBooks(const BookOrbitBookQuery& query, const i
     url += "&seriesId=" + urlEncode(query.seriesId);
   } else if (!query.series.empty()) {
     url += "&series=" + urlEncode(query.series);
+  }
+  if (!query.collectionId.empty()) {
+    url += "&collectionId=" + urlEncode(query.collectionId);
   }
 
   JsonDocument filter;

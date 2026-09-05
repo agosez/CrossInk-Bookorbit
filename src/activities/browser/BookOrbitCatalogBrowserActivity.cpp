@@ -204,7 +204,7 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   entries.clear();
   for (auto& section : sections) {
     Entry entry;
-    const bool isFacet = section.id == "authors" || section.id == "series";
+    const bool isFacet = section.id == "authors" || section.id == "series" || section.id == "collections";
     entry.type = isFacet ? EntryType::FACET_SECTION : EntryType::SECTION;
     entry.title = section.title;
     entry.sectionId = section.id;
@@ -669,7 +669,9 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       break;
     case EntryType::FACET: {
       // Mirror BookOrbit's own plugin: author filters by the entry id; series
-      // prefers the numeric seriesId and sorts by series order.
+      // prefers the numeric seriesId and sorts by series order; collections
+      // filter by their numeric id and sort by title (the server's own
+      // booksHref for a collection).
       BookOrbitBookQuery query;
       if (facetSectionId == "series") {
         query.sort = "series";
@@ -678,6 +680,9 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
         } else {
           query.series = entry.sectionId;
         }
+      } else if (facetSectionId == "collections") {
+        query.sort = "title";
+        query.collectionId = entry.sectionId;
       } else {
         query.author = entry.sectionId;
       }

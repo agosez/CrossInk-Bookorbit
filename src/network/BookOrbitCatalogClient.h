@@ -7,9 +7,9 @@
 
 /**
  * A top-level BookOrbit catalog section (e.g. "Recently added", "Continue reading",
- * "All books"). Only the sections backed directly by a book listing are exposed here;
- * BookOrbit's library/collection/smart-scope/author/series browsing facets are not
- * supported, matching CrossInk's simple, single-level browse experience for OPDS.
+ * "All books", or the authors/series/collections drill-down facets). BookOrbit's
+ * library/smart-scope browsing facets are not supported, matching CrossInk's
+ * simple browse experience for OPDS.
  */
 struct BookOrbitCatalogSection {
   std::string id;
@@ -30,7 +30,7 @@ struct BookOrbitCatalogBook {
   std::string author;  // first author only, for compact list display
 };
 
-/** One entry in a drill-down facet listing (an author or a series). */
+/** One entry in a drill-down facet listing (an author, a series or a collection). */
 struct BookOrbitFacetEntry {
   std::string id;        // filter value for the books listing
   std::string title;     // display name
@@ -47,11 +47,12 @@ struct BookOrbitFacetPage {
 
 /** Filters for a book listing request; empty fields are omitted from the query. */
 struct BookOrbitBookQuery {
-  std::string sort;      // BookOrbit sort id (e.g. "recently_added", "title", "series")
-  std::string query;     // free-text search
-  std::string author;    // author filter (facet entry id)
-  std::string seriesId;  // numeric series filter (preferred when present)
-  std::string series;    // series-name filter (fallback when no seriesId)
+  std::string sort;          // BookOrbit sort id (e.g. "recently_added", "title", "series")
+  std::string query;         // free-text search
+  std::string author;        // author filter (facet entry id)
+  std::string seriesId;      // numeric series filter (preferred when present)
+  std::string series;        // series-name filter (fallback when no seriesId)
+  std::string collectionId;  // numeric collection filter (facet entry id)
 };
 
 /** Full detail for a single BookOrbit book, including its downloadable files. */
@@ -80,9 +81,10 @@ struct BookOrbitBookPage {
  * (src/) utility.
  *
  * Only a simplified subset of BookOrbit's catalog is supported: the direct book
- * listings (recently added, continue reading, all books, search) and downloading
- * an EPUB file from a book's detail. Library/collection/smart-scope/author/series
- * drill-down, covers, ratings and read-status editing are out of scope.
+ * listings (recently added, continue reading, all books, search), the
+ * authors/series/collections drill-down facets, and downloading an EPUB file from
+ * a book's detail. Library/smart-scope drill-down, covers, ratings and
+ * read-status editing are out of scope.
  */
 class BookOrbitCatalogClient {
  public:
