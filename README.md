@@ -2,7 +2,7 @@
 
 Everything else — fonts, themes, reader features, reading stats, controls, the web server — comes from CrossInk unchanged, with one exception: KOReader Sync is removed to make room (see below). See the [upstream README](https://github.com/uxjulia/CrossInk#readme) for those, and the [docs](./docs/) folder in this repository for the detailed guides.
 
-**Note**: like upstream, this firmware runs on both the Xteink X3 and X4.
+**Note**: this fork publishes releases for the Xteink X3 and X4 and the Seeed reTerminal Sticky.
 
 ---
 
@@ -22,8 +22,18 @@ BookOrbit exposes a KOReader-compatible sync API, so this fork talks to it the s
 
 ## Setting up your BookOrbit account
 
-1. On the device, go to **Settings → System → BookOrbit Sync**.
-2. Fill in **Username**, **Password** and **Server URL**. The URL accepts a bare hostname (`books.example.com`); `https://` is assumed, and a pasted `/api/v1` or `/api/v1/koreader` suffix is stripped for you.
+### On your BookOrbit server
+
+The device signs in with your account's **KOReader sync credentials**, not your BookOrbit web login. Create them once, in **Settings → Devices & Sync → KOReader**, with **Create credentials** — each BookOrbit account has a single set, shared by all of its readers. Once they exist, the page's **Setup** panel shows the **Sync server URL**:
+
+![The KOReader Sync page of BookOrbit's settings, with the Sync server URL in its Setup panel](docs/images/bookorbit/koreader.png)
+
+That URL is what the device asks for below. The preconfigured plugin offered on the same page is for actual KOReader devices — CrossInk needs only the URL and the credentials.
+
+### On the device
+
+1. Go to **Settings → System → BookOrbit Sync**.
+2. Fill in **Username** and **Password** — the KOReader sync credentials created above — and **Server URL**, the Sync server URL shown on the same page. The URL accepts a bare hostname (`books.example.com`); `https://` is assumed, and a pasted `/api/v1` or `/api/v1/koreader` suffix is stripped for you.
 3. Choose **Authenticate**. The device connects to WiFi and validates the credentials against your server. You should see _Successfully authenticated!_
 
 Credentials live on the SD card in `/.crosspoint/bookorbit.json`, obfuscated with the device's hardware MAC — the same scheme CrossInk uses for KOReader credentials.
@@ -197,22 +207,22 @@ It also decides how faithful your uploaded reading-session timestamps are — se
 
 ## Installation
 
-Download a `firmware-*.bin` from **this repository's** [releases page](https://github.com/agosez/CrossInk-Bookorbit/releases) — not upstream's, which does not include BookOrbit support — then flash it with the web installer or the command line. See [Installation](./docs/installation.md) for step-by-step flashing and revert instructions, and [Font Build Variants](./docs/font-build-variants.md) to pick between the `tiny` and `xlarge` builds.
+Download the `firmware-*.bin` for your device from **this repository's** [releases page](https://github.com/agosez/CrossInk-Bookorbit/releases) — not upstream's, which does not include BookOrbit support. CrossInk's own web installer only offers upstream builds, so flash the file as a custom firmware with the [CrossPoint flash tools](https://crosspointreader.com/#flash-tools), from the command line, or from the SD card — [Installation](./docs/installation.md) walks through each path, including USB-locked devices and reverting to upstream CrossInk.
 
 Once this firmware is installed, **Settings → System → Check for Updates** resolves against this fork's releases, so later versions arrive over the air. Devices running upstream CrossInk will not see these releases: the first install has to be done by USB or SD card.
 
 ## Development
 
 ```sh
-pio run -e tiny --target upload   # build and flash over USB-C
+pio run -e default --target upload   # X3/X4 build, flashed over USB-C; see platformio.ini for the other devices
 ```
 
-See [Getting Started](./docs/contributing/getting-started.md) for prerequisites and validation commands, and [Testing and Debugging](./docs/contributing/testing-debugging.md) for serial logging and static analysis. `AGENTS.md` holds the repository's engineering conventions.
+See [Getting Started](./docs/development/getting-started.md) for prerequisites and validation commands, and [Testing and Debugging](./docs/development/testing-debugging.md) for serial logging and static analysis. `AGENTS.md` holds the repository's engineering conventions.
 
 ## Documentation
 
-- [User Guide](./USER_GUIDE.md) and [Reader Features](./docs/reader-features.md)
+- [User Guide](./docs/user-guide.md) and [Reader Features](./docs/reader-features.md)
 - [Controls](./docs/controls.md) — full button action list
-- [Installation](./docs/installation.md) and [Font Build Variants](./docs/font-build-variants.md)
+- [Installation](./docs/installation.md)
 - [Data Cache](./docs/data-cache.md) and [File Formats](./docs/file-formats.md)
 - [Common issues](./docs/troubleshooting.md)
