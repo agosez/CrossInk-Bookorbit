@@ -26,12 +26,14 @@ The main data directory is `.crosspoint` on the SD card. It stores render caches
 ├── wifi.json               # Saved Wi-Fi networks
 ├── opds.json               # Saved OPDS servers
 ├── koreader.json           # KOReader sync credentials
-├── bookmarks/              # Bookmark files, one per book
-├── clippings/              # EPUB clipping/highlight files, one per book
+├── bookmarks/              # Bookmark files, one per book, named by content hash
+├── clippings/              # EPUB clipping/highlight files, one per book, named by content hash
+├── book_<contenthash>/     # Per-book BookOrbit sync state and reading-progress copy; follows the book through moves
+├── bookorbit_downloads.bin # Where BookOrbit catalog downloads landed, for the catalog's on-device marker
 ├── home_carousel_cache.bin # Lyra Carousel home-screen snapshot cache
 ├── sleep_frame.bin         # Temporary sleep overlay framebuffer, when used
 ├── epub_12471232/          # Each EPUB is cached to epub_<hash>
-│   ├── progress.bin        # Reading position (chapter, page, etc.)
+│   ├── progress.bin        # Reading position (chapter, page, etc.); also mirrored to book_<contenthash>/
 │   ├── stats.bin           # Legacy per-book reading stats
 │   ├── stats_v5.bin        # Version 5 per-book reading stats
 │   ├── reader_settings.bin # Per-book reader settings, render mode, and auto-page-turn interval
@@ -57,7 +59,7 @@ To clear EPUB/XTC render caches from the device UI without deleting settings or 
 
 ## Book Moves And Cache Identity
 
-Cache folders are path-based. Moving a book file can create a new cache directory, so the moved copy may start with fresh reading progress unless the firmware migrates the cache for that move. CrossInk migrates cache and bookmark data for the built-in move-to-Read flow and related file-browser move actions.
+Cache folders are path-based. Moving a book file can create a new cache directory, so the moved copy may start with fresh reading progress unless the firmware migrates the cache for that move. CrossInk migrates cache and bookmark data for the built-in move-to-Read flow and related file-browser move actions. Clippings, bookmarks and the `book_<contenthash>` state are named by the book's content hash instead, so they survive any move or rename, including ones made over USB or from a computer. Reading progress is written to both homes: the content-keyed copy follows the book through moves, while the path-keyed copy keeps stock CrossInk working after a firmware revert; on read, the further of the two positions wins.
 
 EPUB reader font, page layout, styling, and reading-aid settings normally come from the global Reader settings. If those settings are changed from inside an EPUB, CrossInk stores a per-book override in that book's `reader_settings.bin`; books without that override continue to follow the global defaults. EPUB render mode is also stored per book so a problematic title can be switched to Balanced or Light rendering from the File Browser or Recent Books long-press menus before opening it.
 

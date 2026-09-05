@@ -11,6 +11,8 @@
 #include <cstring>
 #include <functional>
 
+#include "util/BookContentId.h"
+
 namespace {
 constexpr uint8_t LEGACY_VERSION = 1;
 constexpr uint8_t TEXT_OFFSET_VERSION = 2;
@@ -27,9 +29,21 @@ struct ClippingFileHeader {
   uint16_t count = 0;
 };
 
-std::string storeFilePathForBook(const std::string& filePath, const std::string& bookType) {
+// Path-keyed name from before content keying; loadForBook folds it into the content-keyed
+// store, and it stays the fallback when the book file itself cannot be read.
+std::string legacyStoreFilePathForBook(const std::string& filePath, const std::string& bookType) {
   const uint32_t crc = uzlib_crc32(filePath.data(), static_cast<unsigned int>(filePath.size()), 0);
   return std::string(CLIPPINGS_DIR) + "/" + bookType + "_" + std::to_string(crc) + ".bin";
+}
+
+// Content-keyed name: survives the book being moved or renamed, and matches the identity
+// BookOrbit sync reports to the server. Empty when the book file cannot be read.
+std::string storeFilePathForBook(const std::string& filePath, const std::string& bookType) {
+  const std::string hash = BookContentId::contentHash(filePath);
+  if (hash.empty()) {
+    return "";
+  }
+  return std::string(CLIPPINGS_DIR) + "/" + bookType + "_" + hash + ".bin";
 }
 
 void copyBounded(char* dst, const size_t dstSize, const char* src) {
@@ -103,11 +117,35 @@ bool ClippingStore::loadForBook(const std::string& filePath, const std::string& 
   }
 
   storeFilePath = storeFilePathForBook(filePath, bookType);
+  const std::string legacyStoreFilePath = legacyStoreFilePathForBook(filePath, bookType);
+  if (storeFilePath.empty()) {
+    // Book file unreadable (deleted, or a failing card): stay on the path-keyed name so
+    // its highlights remain viewable; a later load with the book readable migrates them.
+    LOG_ERR("CLIP", "Book not hashable, using path-keyed clippings: %s", filePath.c_str());
+    storeFilePath = legacyStoreFilePath;
+  } else if (!Storage.exists(storeFilePath.c_str()) && Storage.exists(legacyStoreFilePath.c_str())) {
+    if (Storage.rename(legacyStoreFilePath.c_str(), storeFilePath.c_str())) {
+      LOG_INF("CLIP", "Migrated clippings to content-keyed store: %s", storeFilePath.c_str());
+    } else {
+      LOG_ERR("CLIP", "Clipping migration failed, using path-keyed store: %s", legacyStoreFilePath.c_str());
+      storeFilePath = legacyStoreFilePath;
+    }
+  }
   if (!Storage.exists(storeFilePath.c_str())) {
     return true;
   }
 
-  return readFromFile();
+  if (!readFromFile()) {
+    return false;
+  }
+  // A content-keyed store follows its book through a move, but its header still names the
+  // old path; mark it dirty so the next unload rewrites it and the saved-items lists can
+  // reopen the book from its new location.
+  ClippingFileHeader header;
+  if (readClippingFileHeader(storeFilePath, "", header) && header.path != filePath) {
+    dirty = true;
+  }
+  return true;
 }
 
 void ClippingStore::unload() {
@@ -519,16 +557,25 @@ bool ClippingStore::getAllClippedBooks(std::vector<ClippedBookEntry>& out) {
 }
 
 void ClippingStore::deleteForFilePath(const std::string& filePath, const std::string& bookType) {
+  // The content-keyed name needs the book file to still be readable; deleting a whole
+  // directory removes the files before this runs, so that store can be left behind as an
+  // orphan there. The path-keyed name is always computable and removed either way.
   const std::string path = storeFilePathForBook(filePath, bookType);
-  if (Storage.exists(path.c_str())) {
+  if (!path.empty() && Storage.exists(path.c_str())) {
     Storage.remove(path.c_str());
+  }
+  const std::string legacyPath = legacyStoreFilePathForBook(filePath, bookType);
+  if (Storage.exists(legacyPath.c_str())) {
+    Storage.remove(legacyPath.c_str());
   }
 }
 
 bool ClippingStore::migrateForFilePath(const std::string& oldFilePath, const std::string& newFilePath,
                                        const std::string& title, const std::string& author,
                                        const std::string& bookType) {
-  const std::string oldStorePath = storeFilePathForBook(oldFilePath, bookType);
+  // A content-keyed store needs no move: same content, same name. This call now only folds
+  // a legacy path-keyed store into the new book location's store, refreshing its header.
+  const std::string oldStorePath = legacyStoreFilePathForBook(oldFilePath, bookType);
   if (!Storage.exists(oldStorePath.c_str())) {
     return true;
   }
@@ -549,7 +596,10 @@ bool ClippingStore::migrateForFilePath(const std::string& oldFilePath, const std
     return false;
   }
 
-  const std::string newStorePath = storeFilePathForBook(newFilePath, bookType);
+  std::string newStorePath = storeFilePathForBook(newFilePath, bookType);
+  if (newStorePath.empty()) {
+    newStorePath = legacyStoreFilePathForBook(newFilePath, bookType);
+  }
   if (oldStorePath == newStorePath) {
     return true;
   }

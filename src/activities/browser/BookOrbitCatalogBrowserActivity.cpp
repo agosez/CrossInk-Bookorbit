@@ -14,6 +14,7 @@
 
 #include "./BookOrbitCatalogListCache.h"
 #include "BookOrbitCredentialStore.h"
+#include "BookOrbitDownloadIndex.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
@@ -46,17 +47,30 @@ constexpr unsigned long DOWNLOAD_PROGRESS_MAX_UPDATE_MS = 5000;
 // device. U+2022 bullet: guaranteed by the built-in fonts' default glyph intervals.
 constexpr char ON_DEVICE_MARKER[] = "\xE2\x80\xA2";
 
-// The SD filename a catalog book downloads to; must stay in sync with downloadBook().
+// The SD filename (leading slash, no folder) a catalog book downloads to.
 std::string catalogBookFilename(const std::string& title, const std::string& author) {
   const std::string suffix = author.empty() ? "" : (" - " + author);
   return "/" + StringUtils::sanitizeFilename(title + suffix) + ".epub";
 }
 
-// True when the catalog book already exists locally (download location or the
-// /Read folder the finished-book move feature uses). Books manually moved into
-// other folders are not detected — this is a best-effort convenience marker.
-bool bookOnDevice(const std::string& title, const std::string& author) {
+// The full SD path a catalog book downloads to: the configured download folder
+// ("" = SD root) plus the title-author filename.
+std::string catalogBookPath(const std::string& title, const std::string& author) {
+  return BOOKORBIT_STORE.getDownloadFolder() + catalogBookFilename(title, author);
+}
+
+// True when the catalog book already exists locally. The download index knows
+// where past downloads landed, whatever the folder setting was at the time; the
+// fallback filename heuristic covers pre-index downloads in the current download
+// location, the SD root (the old fixed location) and the /Read folder the
+// finished-book move feature uses. Books manually moved or renamed elsewhere are
+// not detected — this is a best-effort convenience marker.
+bool bookOnDevice(const int64_t bookId, const std::string& title, const std::string& author) {
+  std::string indexedPath;
+  if (BookOrbitDownloadIndex::lookup(bookId, indexedPath)) return true;
   const std::string filename = catalogBookFilename(title, author);
+  const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
+  if (!folder.empty() && Storage.exists((folder + filename).c_str())) return true;
   if (Storage.exists(filename.c_str())) return true;
   const std::string readPath = std::string(READ_FOLDER_PREFIX) + filename;
   return Storage.exists(readPath.c_str());
@@ -125,6 +139,7 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
 void BookOrbitCatalogBrowserActivity::onExit() {
   Activity::onExit();
   entries.clear();
+  BookOrbitDownloadIndex::unload();
 
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
@@ -241,7 +256,8 @@ void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
       return FsHelpers::naturalLess(a.subtitle, b.subtitle);
     });
   } else {
-    // Every EPUB in the download location and the /Read folder, offline.
+    // Every EPUB in the download locations (configured folder and the SD root,
+    // where older firmware downloaded) and the /Read folder, offline.
     const auto scanDir = [this](const char* dirPath) {
       FsFile dir = Storage.open(dirPath);
       if (!dir || !dir.isDirectory()) return;
@@ -260,6 +276,8 @@ void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
       }
       dir.close();
     };
+    const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
+    if (!folder.empty() && folder != READ_FOLDER_PREFIX) scanDir(folder.c_str());
     scanDir("/");
     scanDir(READ_FOLDER_PREFIX);
     std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
@@ -376,7 +394,7 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
     entry.title = book.title;
     entry.subtitle = book.author;
     entry.bookId = book.id;
-    entry.onDevice = bookOnDevice(book.title, book.author);
+    entry.onDevice = bookOnDevice(book.id, book.title, book.author);
     entries.push_back(std::move(entry));
   }
   if (!append) {
@@ -491,7 +509,16 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
     return;
   }
 
-  const std::string filename = catalogBookFilename(detail.title, detail.author);
+  const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
+  if (!folder.empty() && !Storage.exists(folder.c_str()) && !Storage.mkdir(folder.c_str())) {
+    LOG_ERR("BookOrbit", "Could not create download folder %s", folder.c_str());
+    state = BrowserState::ERROR;
+    errorMessage = tr(STR_DOWNLOAD_FAILED);
+    requestUpdate();
+    return;
+  }
+
+  const std::string filename = catalogBookPath(detail.title, detail.author);
   LOG_DBG("BookOrbit", "Downloading file %lld -> %s", static_cast<long long>(epubFile.id), filename.c_str());
 
   bool cancelRequested = false;
@@ -573,6 +600,7 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
 
   if (result == HttpDownloader::OK) {
     clearBookCache(filename);
+    BookOrbitDownloadIndex::record(bookId, filename);
   } else if (result == HttpDownloader::ABORTED) {
     LOG_DBG("BookOrbit", "Download cancelled");
     if (goHomeAfterCancel) {
