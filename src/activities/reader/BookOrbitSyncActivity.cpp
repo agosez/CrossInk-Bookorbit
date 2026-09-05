@@ -1,6 +1,11 @@
 #include "BookOrbitSyncActivity.h"
 
 #include <GfxRenderer.h>
+
+#ifdef SIMULATOR
+#include <cstdlib>
+#include <cstring>
+#endif
 #include <HalClock.h>
 #include <HalStorage.h>
 #include <I18n.h>
@@ -236,6 +241,15 @@ void BookOrbitSyncActivity::saveProgressAndReturn(const CrossPointPosition& posi
 }
 
 void BookOrbitSyncActivity::returnToReader() {
+#ifdef SIMULATOR
+  // Integration-test hook (test/integration/): every sync outcome funnels
+  // through here once its files and uploads are settled, so it is the one
+  // deterministic place a scripted run can end at. The state says how it went.
+  if (std::getenv("CROSSINK_SIM_BOOKORBIT_QUIT_AFTER_SYNC") != nullptr) {
+    LOG_INF("BookOrbit", "Simulator sync scenario finished (state=%d)", static_cast<int>(state));
+    std::_Exit(0);
+  }
+#endif
   syncSession.reset();
   activityManager.goToReader(epubPath);
 }
@@ -1701,6 +1715,21 @@ void BookOrbitSyncActivity::loop() {
   }
 
   if (state == SHOWING_RESULT) {
+#ifdef SIMULATOR
+    // Integration-test hook: synthetic input cannot be scheduled across the
+    // silent network reboot (the simulator only promotes after-wake input
+    // scripts on deep-sleep wakes), so the harness answers the choice screen
+    // through the environment instead.
+    if (const char* choice = std::getenv("CROSSINK_SIM_BOOKORBIT_CHOICE")) {
+      LOG_INF("BookOrbit", "Simulator scripted choice: %s", choice);
+      if (std::strcmp(choice, "upload") == 0) {
+        performUpload();
+      } else {
+        saveProgressAndReturn(remotePosition);
+      }
+      return;
+    }
+#endif
     // Touch: pressing a button highlights it, releasing on it takes the choice.
     // The same layout the draw used, so a translated label cannot move one
     // without the other.
@@ -1757,6 +1786,17 @@ void BookOrbitSyncActivity::loop() {
   }
 
   if (state == NO_REMOTE_PROGRESS) {
+#ifdef SIMULATOR
+    // Scripted runs answer the "no progress on the server yet" prompt too;
+    // uploading is its only affirmative action, whatever the choice value.
+    if (std::getenv("CROSSINK_SIM_BOOKORBIT_CHOICE") != nullptr) {
+      if (documentHash.empty()) {
+        documentHash = KOReaderDocumentId::calculate(epubPath);
+      }
+      performUpload();
+      return;
+    }
+#endif
     if (mappedInput.hasTouch()) {
       const auto& metrics = UITheme::getInstance().getMetrics();
       const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
