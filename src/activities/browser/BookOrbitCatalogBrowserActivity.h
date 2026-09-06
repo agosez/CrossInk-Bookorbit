@@ -15,10 +15,11 @@
  * Activity for browsing and downloading books from BookOrbit's catalog.
  *
  * Simplified compared to BookOrbit's own KOReader plugin: three navigation levels
- * (root sections -> optional authors/series/collections facet list -> a paged book
- * list or a search). Library/smart-scope drill-down, covers, ratings and
- * read-status editing remain out of scope (see SCOPE.md discussion for BookOrbit
- * sync).
+ * (root sections -> optional authors/series/collections/libraries facet list -> a
+ * paged book list or a search), with each root section badged with its entry
+ * count, the way the plugin badges its Browse tiles. Smart-scope drill-down,
+ * covers, ratings and read-status editing remain out of scope (see SCOPE.md
+ * discussion for BookOrbit sync).
  */
 class BookOrbitCatalogBrowserActivity final : public Activity {
  public:
@@ -104,6 +105,7 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   void showLoadingBeforeFetch();
   bool loadRoot(bool allowNetwork = true);
   void loadLocalBooks(const std::string& kind);
+  size_t collectLocalBooks(const std::string& kind, std::vector<Entry>* sink);
   bool loadFacetEntries(const std::string& sectionId, const std::string& title, int page, bool append = false,
                         bool allowNetwork = true);
   bool loadBooks(const BookOrbitBookQuery& query, const std::string& title, int page, bool fromFacet,

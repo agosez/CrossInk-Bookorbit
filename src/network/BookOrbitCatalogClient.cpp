@@ -144,10 +144,11 @@ bool fetchJson(const std::string& url, const JsonDocument& filter, JsonDocument&
   return !error && !wrongShape;
 }
 
-// Sections we can browse: direct book listings plus the authors/series/collections
-// drill-down facets. BookOrbit's library/smart-scope facets remain out of scope.
+// Sections we can browse: direct book listings plus the
+// authors/series/collections/libraries drill-down facets. BookOrbit's smart-scope
+// facet remains out of scope.
 constexpr const char* SUPPORTED_SECTIONS[] = {
-    "recent", "continue-reading", "all-books", "authors", "series", "collections",
+    "recent", "continue-reading", "all-books", "authors", "series", "collections", "libraries",
 };
 
 bool isSupportedSection(const std::string& sectionId) {
@@ -180,6 +181,30 @@ bool BookOrbitCatalogClient::fetchRootSections(std::vector<BookOrbitCatalogSecti
   return true;
 }
 
+bool BookOrbitCatalogClient::fetchCatalogCounts(BookOrbitCatalogCounts& outCounts) {
+  outCounts = BookOrbitCatalogCounts{};
+  if (!BOOKORBIT_STORE.hasCredentials()) return false;
+
+  const std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/dashboard";
+  JsonDocument filter;
+  filter["totalBooks"] = true;
+  filter["browseCounts"]["inProgress"] = true;
+  filter["browseCounts"]["libraries"] = true;
+  filter["browseCounts"]["authors"] = true;
+  filter["browseCounts"]["series"] = true;
+  filter["browseCounts"]["collections"] = true;
+  JsonDocument doc;
+  if (!fetchJson(url, filter, doc)) return false;
+
+  outCounts.totalBooks = doc["totalBooks"] | -1;
+  outCounts.inProgress = doc["browseCounts"]["inProgress"] | -1;
+  outCounts.libraries = doc["browseCounts"]["libraries"] | -1;
+  outCounts.authors = doc["browseCounts"]["authors"] | -1;
+  outCounts.series = doc["browseCounts"]["series"] | -1;
+  outCounts.collections = doc["browseCounts"]["collections"] | -1;
+  return true;
+}
+
 bool BookOrbitCatalogClient::fetchBooks(const BookOrbitBookQuery& query, const int page, BookOrbitBookPage& outPage) {
   outPage = BookOrbitBookPage{};
   if (!BOOKORBIT_STORE.hasCredentials()) return false;
@@ -203,6 +228,9 @@ bool BookOrbitCatalogClient::fetchBooks(const BookOrbitBookQuery& query, const i
   }
   if (!query.collectionId.empty()) {
     url += "&collectionId=" + urlEncode(query.collectionId);
+  }
+  if (!query.libraryId.empty()) {
+    url += "&libraryId=" + urlEncode(query.libraryId);
   }
 
   JsonDocument filter;

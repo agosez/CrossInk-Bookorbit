@@ -201,25 +201,50 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
     BookOrbitCatalogListCache::saveRootSections(sections);
   }
 
+  // Per-section entry counts, the way BookOrbit's own plugin badges its Browse
+  // tiles: one dashboard request, cached with the listings. Non-fatal — an older
+  // server without the dashboard just shows the sections without counts.
+  BookOrbitCatalogCounts counts;
+  if (!BookOrbitCatalogListCache::loadCatalogCounts(counts) && allowNetwork &&
+      BookOrbitCatalogClient::fetchCatalogCounts(counts)) {
+    BookOrbitCatalogListCache::saveCatalogCounts(counts);
+  }
+  const auto sectionCount = [&counts](const std::string& id) {
+    if (id == "all-books" || id == "recent") return counts.totalBooks;
+    if (id == "continue-reading") return counts.inProgress;
+    if (id == "libraries") return counts.libraries;
+    if (id == "authors") return counts.authors;
+    if (id == "series") return counts.series;
+    if (id == "collections") return counts.collections;
+    return -1;
+  };
+
   entries.clear();
   listFreedForDownload = false;
   for (auto& section : sections) {
     Entry entry;
-    const bool isFacet = section.id == "authors" || section.id == "series" || section.id == "collections";
+    const bool isFacet =
+        section.id == "authors" || section.id == "series" || section.id == "collections" || section.id == "libraries";
     entry.type = isFacet ? EntryType::FACET_SECTION : EntryType::SECTION;
     entry.title = section.title;
+    const int count = sectionCount(section.id);
+    if (count >= 0) {
+      entry.title += " (" + std::to_string(count) + ")";
+    }
     entry.sectionId = section.id;
     entries.push_back(std::move(entry));
   }
-  // Local, offline categories: what's already on the SD card.
+  // Local, offline categories: what's already on the SD card, counted on the spot.
   Entry onDevice;
   onDevice.type = EntryType::LOCAL_SECTION;
-  onDevice.title = tr(STR_BOOKORBIT_ON_DEVICE);
+  onDevice.title =
+      std::string(tr(STR_BOOKORBIT_ON_DEVICE)) + " (" + std::to_string(collectLocalBooks("on-device", nullptr)) + ")";
   onDevice.sectionId = "on-device";
   entries.push_back(std::move(onDevice));
   Entry inProgress;
   inProgress.type = EntryType::LOCAL_SECTION;
-  inProgress.title = tr(STR_BOOKORBIT_IN_PROGRESS);
+  inProgress.title = std::string(tr(STR_BOOKORBIT_IN_PROGRESS)) + " (" +
+                     std::to_string(collectLocalBooks("in-progress", nullptr)) + ")";
   inProgress.sectionId = "in-progress";
   entries.push_back(std::move(inProgress));
   Entry search;
@@ -234,59 +259,68 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   return true;
 }
 
-void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
-  entries.clear();
-  listTitle = (kind == "in-progress") ? tr(STR_BOOKORBIT_IN_PROGRESS) : tr(STR_BOOKORBIT_ON_DEVICE);
-
+// Enumerate the local books behind one of the offline root categories, appending
+// Entry rows when a sink is given. Returns the count either way, so the root can
+// badge the categories without building (and then discarding) their rows.
+size_t BookOrbitCatalogBrowserActivity::collectLocalBooks(const std::string& kind, std::vector<Entry>* sink) {
+  size_t count = 0;
   if (kind == "in-progress") {
     // Books with local reading progress: the recent-books list minus finished ones.
     for (const auto& book : RECENT_BOOKS.getBooks()) {
       if (!FsHelpers::hasEpubExtension(book.path) || !Storage.exists(book.path.c_str())) continue;
       const BookReadingStats stats = BookReadingStats::load(Epub::cachePathForFilePath(book.path, "/.crosspoint"));
       if (stats.isCompleted) continue;
+      count++;
+      if (!sink) continue;
       Entry entry;
       entry.type = EntryType::LOCAL_BOOK;
       entry.title = book.title.empty() ? book.path : book.title;
       entry.subtitle = book.author;
       entry.path = book.path;
-      entries.push_back(std::move(entry));
+      sink->push_back(std::move(entry));
     }
-    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
-      if (FsHelpers::naturalLess(a.title, b.title)) return true;
-      if (FsHelpers::naturalLess(b.title, a.title)) return false;
-      return FsHelpers::naturalLess(a.subtitle, b.subtitle);
-    });
-  } else {
-    // Every EPUB in the download locations (configured folder and the SD root,
-    // where older firmware downloaded) and the /Read folder, offline.
-    const auto scanDir = [this](const char* dirPath) {
-      FsFile dir = Storage.open(dirPath);
-      if (!dir || !dir.isDirectory()) return;
-      char name[128];
-      FsFile file;
-      while (entries.size() < MAX_LOCAL_ENTRIES && (file = dir.openNextFile())) {
-        const size_t nameLen = file.isDirectory() ? 0 : file.getName(name, sizeof(name));
-        file.close();
-        if (nameLen > 5 && FsHelpers::hasEpubExtension(std::string_view(name, nameLen))) {
-          Entry entry;
-          entry.type = EntryType::LOCAL_BOOK;
-          entry.title = std::string(name, nameLen - 5);  // strip ".epub"
-          entry.path = (std::strcmp(dirPath, "/") == 0 ? std::string("/") : std::string(dirPath) + "/") + name;
-          entries.push_back(std::move(entry));
-        }
-      }
-      dir.close();
-    };
-    const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
-    if (!folder.empty() && folder != READ_FOLDER_PREFIX) scanDir(folder.c_str());
-    scanDir("/");
-    scanDir(READ_FOLDER_PREFIX);
-    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
-      if (FsHelpers::naturalLess(a.title, b.title)) return true;
-      if (FsHelpers::naturalLess(b.title, a.title)) return false;
-      return FsHelpers::naturalLess(a.subtitle, b.subtitle);
-    });
+    return count;
   }
+
+  // Every EPUB in the download locations (configured folder and the SD root,
+  // where older firmware downloaded) and the /Read folder, offline.
+  const auto scanDir = [&count, sink](const char* dirPath) {
+    FsFile dir = Storage.open(dirPath);
+    if (!dir || !dir.isDirectory()) return;
+    char name[128];
+    FsFile file;
+    while (count < MAX_LOCAL_ENTRIES && (file = dir.openNextFile())) {
+      const size_t nameLen = file.isDirectory() ? 0 : file.getName(name, sizeof(name));
+      file.close();
+      if (nameLen > 5 && FsHelpers::hasEpubExtension(std::string_view(name, nameLen))) {
+        count++;
+        if (!sink) continue;
+        Entry entry;
+        entry.type = EntryType::LOCAL_BOOK;
+        entry.title = std::string(name, nameLen - 5);  // strip ".epub"
+        entry.path = (std::strcmp(dirPath, "/") == 0 ? std::string("/") : std::string(dirPath) + "/") + name;
+        sink->push_back(std::move(entry));
+      }
+    }
+    dir.close();
+  };
+  const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
+  if (!folder.empty() && folder != READ_FOLDER_PREFIX) scanDir(folder.c_str());
+  scanDir("/");
+  scanDir(READ_FOLDER_PREFIX);
+  return count;
+}
+
+void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
+  entries.clear();
+  listTitle = (kind == "in-progress") ? tr(STR_BOOKORBIT_IN_PROGRESS) : tr(STR_BOOKORBIT_ON_DEVICE);
+
+  collectLocalBooks(kind, &entries);
+  std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+    if (FsHelpers::naturalLess(a.title, b.title)) return true;
+    if (FsHelpers::naturalLess(b.title, a.title)) return false;
+    return FsHelpers::naturalLess(a.subtitle, b.subtitle);
+  });
 
   // Local listings behave like a book list one level below the root. Neutralise
   // the paging context left by a previous server listing: without this, reaching
@@ -674,9 +708,9 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       break;
     case EntryType::FACET: {
       // Mirror BookOrbit's own plugin: author filters by the entry id; series
-      // prefers the numeric seriesId and sorts by series order; collections
-      // filter by their numeric id and sort by title (the server's own
-      // booksHref for a collection).
+      // prefers the numeric seriesId and sorts by series order; collections and
+      // libraries filter by their numeric id and sort by title (the server's own
+      // booksHref for both).
       BookOrbitBookQuery query;
       if (facetSectionId == "series") {
         query.sort = "series";
@@ -688,6 +722,9 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       } else if (facetSectionId == "collections") {
         query.sort = "title";
         query.collectionId = entry.sectionId;
+      } else if (facetSectionId == "libraries") {
+        query.sort = "title";
+        query.libraryId = entry.sectionId;
       } else {
         query.author = entry.sectionId;
       }
