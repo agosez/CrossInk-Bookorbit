@@ -98,6 +98,7 @@ scenarios, compose down.
 | `bookmark_push` | A pre-seeded local bookmark reaches the server and is offered to a device that never saw it. |
 | `catalog_collections_browse` | Scripted UI navigation: home menu → BookOrbit catalog → Collections → the seeded collection; asserted through the browser's list cache. The catalog flow never silent-reboots before exit, so input scripts drive it end to end. |
 | `catalog_empty_listing_back` | Opening the seeded empty collection shows the no-entries error; Back climbs out of it and the next listing still loads (regression: Back reloaded the same empty listing forever). |
+| `catalog_libraries_browse` | Libraries as a browsable root section: its listing carries the seeded library's book count, opening it lists that library's books (cache key carries the library id), and the root's per-section counts (dashboard fetch) are cached. |
 
 ### Repeatability
 

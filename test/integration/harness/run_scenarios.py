@@ -667,9 +667,10 @@ def scenario_catalog_collections_browse(verbose: bool) -> None:
         fs = SimFs(Path(tmp), manifest["kosync"])  # no open book: boots to home
         script = ";".join([
             "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
-            "11000:DOWN", "11400:DOWN", "11800:CONFIRM",  # root -> Collections (3rd row)
-            "14000:CONFIRM",                              # the seeded collection
-            "17000:QUIT",
+            "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> Collections (4th row,
+            "12100:CONFIRM",                              #   after Libraries)
+            "14500:CONFIRM",                              # the seeded collection
+            "17500:QUIT",
         ])
         run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
 
@@ -679,7 +680,7 @@ def scenario_catalog_collections_browse(verbose: bool) -> None:
         assert roots and any(s["id"] == "collections" for s in roots[0]["sections"]), \
             f"Collections missing from the cached root: {roots}"
         facets = [c for c in caches if "hasNext" in c]
-        assert facets and any(i["title"] == collection["name"] for i in facets[0]["items"]), \
+        assert any(i["title"] == collection["name"] for c in facets for i in c["items"]), \
             f"collection list never loaded: {facets}"
         books = [c for c in caches if "total" in c and "sections" not in c]
         assert books, "collection books were never listed"
@@ -700,11 +701,12 @@ def scenario_catalog_empty_listing_back(verbose: bool) -> None:
         fs = SimFs(Path(tmp), manifest["kosync"])  # no open book: boots to home
         script = ";".join([
             "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
-            "11000:DOWN", "11400:DOWN", "11800:CONFIRM",  # root -> Collections
-            "14000:DOWN", "14400:CONFIRM",                # Zero Shelf (empty) -> error screen
-            "17000:BACK",                                 # must climb back to the collection list
-            "19000:CONFIRM",                              # Integration Shelf -> its books
-            "22000:QUIT",
+            "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> Collections (4th row,
+            "12100:CONFIRM",                              #   after Libraries)
+            "14500:DOWN", "14900:CONFIRM",                # Zero Shelf (empty) -> error screen
+            "17500:BACK",                                 # must climb back to the collection list
+            "19500:CONFIRM",                              # Integration Shelf -> its books
+            "22500:QUIT",
         ])
         run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
 
@@ -715,6 +717,42 @@ def scenario_catalog_empty_listing_back(verbose: bool) -> None:
         expected = {Path(b["file"]).stem for b in collection["books"]}
         assert any({i["title"] for i in c["items"]} == expected for c in books), \
             "navigation after the empty-listing error never reached the collection's books"
+
+
+def scenario_catalog_libraries_browse(verbose: bool) -> None:
+    """Libraries is a browsable root section, like BookOrbit's own KOReader
+    plugin: its listing carries each library's book count, and opening one lists
+    that library's books (the query carries the library id in its cache key).
+    Also proves the root's section counts: the dashboard fetch is cached with
+    the listings. The seed has a single library holding every book."""
+    manifest, books = load_seed()
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])  # no open book: boots to home
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",  # home menu -> BookOrbit catalog
+            "11000:DOWN", "11350:DOWN",                # root -> Libraries (3rd row)
+            "11700:CONFIRM",
+            "14000:CONFIRM",                           # the seeded library -> its books
+            "17000:QUIT",
+        ])
+        run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
+
+        caches = [json.loads(p.read_text())
+                  for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
+        counts = [c for c in caches if "totalBooks" in c]
+        assert counts and counts[0]["totalBooks"] == len(books), \
+            f"section counts never cached or wrong: {counts}"
+        assert counts[0]["collections"] == 2, f"collections count wrong: {counts[0]}"
+        facets = [c for c in caches if "hasNext" in c]
+        library_rows = [i for c in facets for i in c["items"] if i["title"] == "Integration"]
+        assert library_rows, f"the libraries listing never loaded: {facets}"
+        assert library_rows[0]["count"] == len(books), \
+            f"library book count wrong: {library_rows[0]['count']} != {len(books)}"
+        scoped = [c for c in caches if c.get("key", "").split("|")[-1] != "" and "total" in c]
+        assert scoped, "no book listing was fetched with a libraryId"
+        assert scoped[0]["total"] == len(books), \
+            f"library books total wrong: {scoped[0]['total']} != {len(books)}"
 
 
 def scenario_bookmark_push(verbose: bool) -> None:
@@ -753,6 +791,7 @@ def scenario_bookmark_push(verbose: bool) -> None:
 SCENARIOS = {
     "catalog_collections_browse": scenario_catalog_collections_browse,
     "catalog_empty_listing_back": scenario_catalog_empty_listing_back,
+    "catalog_libraries_browse": scenario_catalog_libraries_browse,
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,
     "highlight_pull": scenario_highlight_pull,
