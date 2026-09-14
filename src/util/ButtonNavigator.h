@@ -1,13 +1,13 @@
 #pragma once
 
+#include <array>
 #include <functional>
-#include <vector>
 
 #include "MappedInputManager.h"
 
 class ButtonNavigator final {
   using Callback = std::function<void()>;
-  using Buttons = std::vector<MappedInputManager::Button>;
+  using Buttons = std::array<MappedInputManager::Button, 2>;
 
   const uint16_t continuousStartMs;
   const uint16_t continuousIntervalMs;
@@ -44,10 +44,10 @@ class ButtonNavigator final {
   [[nodiscard]] static int nextPageIndex(int currentIndex, int totalItems, int itemsPerPage);
   [[nodiscard]] static int previousPageIndex(int currentIndex, int totalItems, int itemsPerPage);
 
-  [[nodiscard]] static Buttons getNextButtons() {
+  [[nodiscard]] static constexpr Buttons getNextButtons() {
     return {MappedInputManager::Button::Down, MappedInputManager::Button::Right};
   }
-  [[nodiscard]] static Buttons getPreviousButtons() {
+  [[nodiscard]] static constexpr Buttons getPreviousButtons() {
     return {MappedInputManager::Button::Up, MappedInputManager::Button::Left};
   }
 };

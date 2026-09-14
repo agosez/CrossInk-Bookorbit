@@ -6,6 +6,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <algorithm>
+#include <cstdio>
+
 #include "../activities/Activity.h"
 #include "../activities/reader/DictionarySuggestionsActivity.h"
 #include "CrossPointSettings.h"
@@ -21,11 +24,13 @@
 #include "util/Dictionary.h"
 
 DictionaryLookupController::DictionaryLookupController(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                                       Activity& owner, const std::string& cachePath)
+                                                       Activity& owner, const std::string& cachePath,
+                                                       const bool allowCreateClipping)
     : renderer(renderer),
       mappedInput(mappedInput),
       owner(owner),
-      cachePath(cachePath)
+      cachePath(cachePath),
+      allowCreateClipping_(allowCreateClipping)
 #if CROSSINK_APP_CAP_TOUCH
       ,
       altFormUiTarget(makeUiTarget(renderer)),
@@ -38,6 +43,11 @@ DictionaryLookupController::~DictionaryLookupController() { onExit(); }
 
 namespace {
 constexpr int kDictionarySwitchTouchHeight = 56;
+constexpr size_t kDictionaryNotFoundTitleCapacity = 96;
+
+void dictionaryNotFoundTitle(char (&title)[kDictionaryNotFoundTitleCapacity]) {
+  snprintf(title, sizeof(title), "%s: %s", tr(STR_DICTIONARY), tr(STR_NOT_FOUND));
+}
 
 Rect dictionarySwitchTouchRect(const GfxRenderer& renderer) {
   const int buttonHintsHeight = UITheme::getInstance().getMetrics().buttonHintsHeight;
@@ -91,6 +101,15 @@ void DictionaryLookupController::startLookupAsSuggestion(const std::string& word
 
 void DictionaryLookupController::setNotFound() {
   state = LookupState::NotFound;
+#if CROSSINK_APP_CAP_TOUCH
+  if (mappedInput.hasTouch()) {
+    altFormUiReady = false;
+    applySharedUiTheme(altFormUiApp, altFormUiTarget);
+    if (allowCreateClipping_) {
+      altFormUiApp.setScreen(&DictionaryLookupController::altFormPromptScreen, this);
+    }
+  }
+#endif
   owner.requestUpdate();
 }
 
@@ -122,12 +141,12 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
       }
 
       // Try alt forms
-      if (Dictionary::hasAltForms(cachePath.c_str())) {
+      if (shouldOfferAltForms_ && Dictionary::hasAltForms(cachePath.c_str())) {
         altFormWord = lookupWord;
         state = LookupState::AltFormPrompt;
 #if CROSSINK_APP_CAP_TOUCH
         altFormUiReady = false;
-        altFormUiApp.setTheme(uiThemeTokens(altFormUiTarget));
+        applySharedUiTheme(altFormUiApp, altFormUiTarget);
         altFormUiApp.setScreen(&DictionaryLookupController::altFormPromptScreen, this);
 #endif
         owner.requestUpdate();
@@ -183,21 +202,48 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
     ) {
       state = LookupState::Idle;
       nextIsSuggestion = false;
-      return LookupEvent::Cancelled;
+      // Declining the optional alternate-form lookup completes this lookup.
+      // The word-selection activity treats this the same as dismissing a
+      // not-found result, so it returns to the reader instead of restoring
+      // the selected word underneath the prompt.
+      return LookupEvent::NotFoundDismissedBack;
     }
+#if CROSSINK_APP_CAP_TOUCH
+    if (allowCreateClipping_ && touchAction == ACTION_CREATE_CLIPPING) {
+      state = LookupState::Idle;
+      return LookupEvent::CreateClipping;
+    }
+#endif
     return LookupEvent::None;
   }
 
   if (state == LookupState::NotFound || state == LookupState::ReadError) {
 #if CROSSINK_APP_CAP_TOUCH
-    int touchX = 0;
-    int touchY = 0;
-    const Rect switchRect = dictionarySwitchTouchRect(renderer);
-    if (mappedInput.hasTouch() && mappedInput.wasScreenTapped(touchX, touchY) && touchX >= switchRect.x &&
-        touchX < switchRect.x + switchRect.width && touchY >= switchRect.y &&
-        touchY < switchRect.y + switchRect.height) {
+    freeink::ui::ActionId touchAction = freeink::ui::NO_ACTION;
+    const bool headerTapped = state == LookupState::NotFound && TouchHeaderBackButton::wasTapped(mappedInput, renderer);
+    if (state == LookupState::NotFound && altFormUiReady && mappedInput.hasTouch()) {
+      const auto event = altFormUiApp.route(touchSnapshotFrom(mappedInput));
+      if (altFormUiApp.invalidated()) owner.requestUpdate();
+      touchAction = event.action;
+    }
+    if (state == LookupState::NotFound && allowCreateClipping_ && touchAction == ACTION_CREATE_CLIPPING) {
+      state = LookupState::Idle;
+      return LookupEvent::CreateClipping;
+    }
+    if (state == LookupState::NotFound && touchAction == ACTION_SWITCH_DICTIONARY) {
       state = LookupState::Idle;
       return LookupEvent::SwitchDictionary;
+    }
+    if (state == LookupState::ReadError) {
+      int touchX = 0;
+      int touchY = 0;
+      const Rect switchRect = dictionarySwitchTouchRect(renderer);
+      if (mappedInput.hasTouch() && mappedInput.wasScreenTapped(touchX, touchY) && touchX >= switchRect.x &&
+          touchX < switchRect.x + switchRect.width && touchY >= switchRect.y &&
+          touchY < switchRect.y + switchRect.height) {
+        state = LookupState::Idle;
+        return LookupEvent::SwitchDictionary;
+      }
     }
 #endif
     if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
@@ -208,7 +254,11 @@ DictionaryLookupController::LookupEvent DictionaryLookupController::handleInput(
       state = LookupState::Idle;
       return LookupEvent::NotFoundDismissedDone;
     }
-    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)
+#if CROSSINK_APP_CAP_TOUCH
+        || headerTapped
+#endif
+    ) {
       state = LookupState::Idle;
       return LookupEvent::NotFoundDismissedBack;
     }
@@ -224,15 +274,48 @@ void DictionaryLookupController::altFormPromptScreen(AltFormUiApp::ScreenType& s
 }
 
 void DictionaryLookupController::buildAltFormPromptScreen(AltFormUiApp::ScreenType& screen) {
-  const freeink::ui::FooterAction actions[] = {
-      {tr(STR_NO), ACTION_ALT_FORM_NO},
-      {tr(STR_YES), ACTION_ALT_FORM_YES},
+  if (!mappedInput.hasTouch()) return;
+
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto& theme = screen.theme();
+  const bool isAltForm = state == LookupState::AltFormPrompt;
+  const uint8_t actionCount = isAltForm ? (allowCreateClipping_ ? 3 : 2) : (allowCreateClipping_ ? 2 : 0);
+  const int16_t actionHeight = std::max<int16_t>(theme.rowHeight, kDictionarySwitchTouchHeight);
+  const int16_t actionGap = theme.spaceMd;
+  const int16_t actionBandHeight =
+      actionCount == 0
+          ? 0
+          : static_cast<int16_t>(actionHeight * actionCount + actionGap * static_cast<int16_t>(actionCount - 1));
+  // Keep the final action clear of the e-ink panel's bottom edge. The visible
+  // button-hint strip is not enough margin on every touch device.
+  screen.setContentMargin(
+      freeink::ui::Insets{0, 0, static_cast<int16_t>(metrics.buttonHintsHeight + theme.spaceLg), 0});
+  const freeink::ui::Rect band = screen.takeBottom(actionBandHeight, theme.spaceLg);
+  const int16_t inset = static_cast<int16_t>(metrics.contentSidePadding);
+  const freeink::ui::Rect area{static_cast<int16_t>(band.x + inset), band.y,
+                               std::max<int16_t>(1, static_cast<int16_t>(band.width - inset * 2)), band.height};
+
+  freeink::ui::ButtonProps button;
+  button.inputMask = freeink::ui::InputTouch;
+  button.styles = freeink::ui::outlinedButtonStyles();
+  button.text = theme.bodyText;
+  button.text.align = freeink::ui::TextAlign::Center;
+  button.minTouchSize = actionHeight;
+  auto addButton = [&](const char* label, const freeink::ui::ActionId action, const bool bold, const int index) {
+    button.label = label;
+    button.action = action;
+    button.text.bold = bold;
+    screen.button(button, freeink::ui::Rect{area.x, static_cast<int16_t>(area.y + index * (actionHeight + actionGap)),
+                                            area.width, actionHeight});
   };
-  freeink::ui::FooterProps footer;
-  footer.actions = actions;
-  footer.count = 2;
-  footer.buttonBorderEdges = freeink::ui::EdgesAll;
-  screen.footer(footer);
+  if (isAltForm) {
+    addButton(tr(STR_YES), ACTION_ALT_FORM_YES, false, 0);
+    addButton(tr(STR_NO), ACTION_ALT_FORM_NO, false, 1);
+    if (allowCreateClipping_) addButton(tr(STR_SAVE_CLIPPING), ACTION_CREATE_CLIPPING, true, 2);
+  } else if (allowCreateClipping_) {
+    addButton(tr(STR_SWITCH_DICTIONARY), ACTION_SWITCH_DICTIONARY, false, 0);
+    addButton(tr(STR_SAVE_CLIPPING), ACTION_CREATE_CLIPPING, false, 1);
+  }
 }
 #endif
 
@@ -247,6 +330,7 @@ bool DictionaryLookupController::render() {
   }
 
   if (state == LookupState::AltFormPrompt) {
+    renderer.clearScreen();
     const int pageWidth = renderer.getScreenWidth();
     const Rect header{0, metrics.topPadding, pageWidth, TouchHeaderBackButton::height(metrics, mappedInput)};
 #if CROSSINK_APP_CAP_TOUCH
@@ -257,9 +341,37 @@ bool DictionaryLookupController::render() {
     {
       GUI.drawHeader(renderer, header, tr(STR_DICT_SEARCH_ALT_FORMS));
     }
-    const int y = metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing +
-                  renderer.getLineHeight(UI_10_FONT_ID);
-    renderer.drawCenteredText(UI_10_FONT_ID, y, altFormWord.c_str());
+    const int promptTop =
+        metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing;
+#if CROSSINK_APP_CAP_TOUCH
+    if (mappedInput.hasTouch()) {
+      const int actionRows = allowCreateClipping_ ? 3 : 2;
+      const auto& theme = altFormUiApp.theme();
+      const int actionHeight = std::max<int>(theme.rowHeight, kDictionarySwitchTouchHeight);
+      const int actionBandHeight = actionHeight * actionRows + theme.spaceMd * (actionRows - 1);
+      const int bottom =
+          renderer.getScreenHeight() - metrics.buttonHintsHeight - theme.spaceLg - actionBandHeight - theme.spaceLg;
+      freeink::ui::TextStyle phraseStyle = altFormUiApp.theme().bodyText;
+      phraseStyle.align = freeink::ui::TextAlign::Center;
+      phraseStyle.maxLines =
+          static_cast<uint8_t>(std::max(1, (bottom - promptTop) / renderer.getLineHeight(UI_10_FONT_ID)));
+      altFormUiTarget.text(
+          freeink::ui::Rect{static_cast<int16_t>(metrics.contentSidePadding), static_cast<int16_t>(promptTop),
+                            static_cast<int16_t>(std::max(1, pageWidth - metrics.contentSidePadding * 2)),
+                            static_cast<int16_t>(std::max(1, bottom - promptTop))},
+          altFormWord.c_str(), phraseStyle);
+    } else
+#endif
+    {
+      // Keep the original alternate-form baseline on button-only devices while
+      // giving multi-word phrases the same wrapped full-screen treatment.
+      const int y = promptTop + renderer.getLineHeight(UI_10_FONT_ID);
+      const int bottom = renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing;
+      const Rect textArea{metrics.contentSidePadding, y, std::max(1, pageWidth - metrics.contentSidePadding * 2),
+                          std::max(1, bottom - y)};
+      const int maxLines = std::max(1, textArea.height / renderer.getLineHeight(UI_10_FONT_ID));
+      UITheme::drawCenteredWrappedText(renderer, textArea, UI_10_FONT_ID, y, altFormWord.c_str(), maxLines);
+    }
 #if CROSSINK_APP_CAP_TOUCH
     if (mappedInput.hasTouch()) {
       altFormUiReady = false;
@@ -268,16 +380,65 @@ bool DictionaryLookupController::render() {
     } else
 #endif
     {
-      const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_CONFIRM), "", "");
+      const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_CONFIRM), "", "");
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     }
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     return true;
   }
 
-  if (state == LookupState::NotFound || state == LookupState::ReadError) {
-    const char* message = state == LookupState::ReadError ? tr(STR_DICT_READ_FAILED) : tr(STR_DICT_NOT_FOUND);
-    GUI.drawPopup(renderer, message);
+  if (state == LookupState::NotFound) {
+    renderer.clearScreen();
+    const int pageWidth = renderer.getScreenWidth();
+    const Rect header{0, metrics.topPadding, pageWidth, TouchHeaderBackButton::height(metrics, mappedInput)};
+    char title[kDictionaryNotFoundTitleCapacity];
+    dictionaryNotFoundTitle(title);
+#if CROSSINK_APP_CAP_TOUCH
+    if (mappedInput.hasTouchHardware()) {
+      TouchHeaderBackButton::draw(renderer, altFormUiTarget, header, title, true);
+      const int y = metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing;
+      const auto& theme = altFormUiApp.theme();
+      const int actionHeight = std::max<int>(theme.rowHeight, kDictionarySwitchTouchHeight);
+      const int actionBandHeight = allowCreateClipping_ ? actionHeight * 2 + theme.spaceMd : 0;
+      const int bottom = renderer.getScreenHeight() - metrics.buttonHintsHeight - theme.spaceLg - actionBandHeight -
+                         (allowCreateClipping_ ? theme.spaceLg : 0);
+      freeink::ui::TextStyle phraseStyle = altFormUiApp.theme().bodyText;
+      phraseStyle.align = freeink::ui::TextAlign::Center;
+      phraseStyle.maxLines = static_cast<uint8_t>(std::max(1, (bottom - y) / renderer.getLineHeight(UI_10_FONT_ID)));
+      altFormUiTarget.text(
+          freeink::ui::Rect{static_cast<int16_t>(metrics.contentSidePadding), static_cast<int16_t>(y),
+                            static_cast<int16_t>(std::max(1, pageWidth - metrics.contentSidePadding * 2)),
+                            static_cast<int16_t>(std::max(1, bottom - y))},
+          lookupWord.c_str(), phraseStyle);
+      if (allowCreateClipping_) {
+        altFormUiReady = false;
+        altFormUiApp.render();
+        altFormUiReady = true;
+      }
+      const auto labels =
+          mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_DONE), tr(STR_DICT_SWITCH), "");
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      return true;
+    }
+#endif
+    GUI.drawHeader(renderer, header, title);
+    const int y = metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing +
+                  renderer.getLineHeight(UI_10_FONT_ID);
+    const int bottom = renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing;
+    const Rect textArea{metrics.contentSidePadding, y, std::max(1, pageWidth - metrics.contentSidePadding * 2),
+                        std::max(1, bottom - y)};
+    const int maxLines = std::max(1, textArea.height / renderer.getLineHeight(UI_10_FONT_ID));
+    UITheme::drawCenteredWrappedText(renderer, textArea, UI_10_FONT_ID, y, lookupWord.c_str(), maxLines);
+    const auto labels =
+        mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_DONE), tr(STR_DICT_SWITCH), "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    return true;
+  }
+
+  if (state == LookupState::ReadError) {
+    GUI.drawPopup(renderer, tr(STR_DICT_READ_FAILED));
 #if CROSSINK_APP_CAP_TOUCH
     if (mappedInput.hasTouch()) {
       const Rect switchRect = dictionarySwitchTouchRect(renderer);
@@ -289,7 +450,8 @@ bool DictionaryLookupController::render() {
       renderer.drawText(UI_10_FONT_ID, labelX, labelY, label, true, EpdFontFamily::BOLD);
     }
 #endif
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_DONE), tr(STR_DICT_SWITCH), "");
+    const auto labels =
+        mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_DONE), tr(STR_DICT_SWITCH), "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     return true;
@@ -300,7 +462,7 @@ bool DictionaryLookupController::render() {
 
 const char* DictionaryLookupController::getFailureMessage() const {
   if (state == LookupState::ReadError) return tr(STR_DICT_READ_FAILED);
-  if (state == LookupState::NotFound) return tr(STR_DICT_NOT_FOUND);
+  if (state == LookupState::NotFound) return tr(STR_NOT_FOUND);
   return "";
 }
 
@@ -316,7 +478,7 @@ bool DictionaryLookupController::handleMultiSelect(WordSelectNavigator& navigato
   if (msAction == WordSelectNavigator::MultiSelectAction::None) return false;
   switch (msAction) {
     case WordSelectNavigator::MultiSelectAction::PhraseReady:
-      lookupOrPopup(msPhrase);
+      lookupOrPopup(msPhrase, navigator.getLookupSelectionWordCount());
       return true;
     case WordSelectNavigator::MultiSelectAction::ExitedMultiSelect:
     case WordSelectNavigator::MultiSelectAction::EnteredMultiSelect:
@@ -331,11 +493,12 @@ bool DictionaryLookupController::handleConfirmLookup(const WordSelectNavigator& 
   if (!mappedInput.wasReleased(MappedInputManager::Button::Confirm)) return false;
   const auto* sel = navigator.getSelected();
   if (!sel) return true;  // consumed input even if nothing selected
-  lookupOrPopup(navigator.getLookup(*sel));
+  lookupOrPopup(navigator.getLookup(*sel), navigator.getLookupSelectionWordCount());
   return true;
 }
 
-void DictionaryLookupController::lookupOrPopup(const std::string& rawWord) {
+void DictionaryLookupController::lookupOrPopup(const std::string& rawWord, const size_t highlightedWordCount) {
+  shouldOfferAltForms_ = highlightedWordCount <= 3;
   std::string cleaned = Dictionary::cleanWord(rawWord);
   if (cleaned.empty()) {
     showNoWordPopup();

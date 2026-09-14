@@ -1,6 +1,5 @@
 #pragma once
 #include <Arena.h>
-#include <ArenaVector.h>
 #include <Print.h>
 
 #include <algorithm>
@@ -38,14 +37,30 @@ class ContentOpfParser final : public Print {
   bool hasExplicitStartReference = false;
   bool collectCssFiles = true;
 
-  // Index for compact idref->href lookup. The temp manifest rows store only
-  // hash/length plus href, not a second full copy of every manifest ID.
+  // Index for compact idref->href lookup. The temp manifest rows retain the
+  // full ID for collision-safe matching without retaining IDs in heap memory.
   struct ItemIndexEntry {
     uint64_t idHash;      // FNV-1a hash of itemId
     uint16_t idLen;       // length for collision reduction
     uint32_t fileOffset;  // offset in .items.bin
   };
-  ArenaVector<ItemIndexEntry> itemIndex;
+  static constexpr size_t ITEM_INDEX_CHUNK_CAPACITY = 240;
+  struct ItemIndexChunk {
+    ItemIndexChunk* next = nullptr;
+    uint16_t count = 0;
+    ItemIndexEntry entries[ITEM_INDEX_CHUNK_CAPACITY];
+  };
+  ItemIndexChunk* itemIndexHead = nullptr;
+  ItemIndexChunk* itemIndexTail = nullptr;
+  size_t itemIndexCount = 0;
+  size_t itemIndexChunkCount = 0;
+
+  bool appendItemIndexEntry(const ItemIndexEntry& entry);
+  void sortItemIndexChunks();
+  bool findItemHref(const std::string& idref, std::string& href);
+  static bool itemIndexEntryLess(const ItemIndexEntry& lhs, const ItemIndexEntry& rhs) {
+    return lhs.idHash < rhs.idHash || (lhs.idHash == rhs.idHash && lhs.idLen < rhs.idLen);
+  }
 
   // FNV-1a hash function
   static uint64_t fnvHash(const char* s, size_t len) {
@@ -77,7 +92,8 @@ class ContentOpfParser final : public Print {
   std::string author;
   std::string language;
   std::string tocNcxPath;
-  std::string tocNavPath;  // EPUB 3 nav document path
+  std::string tocNavPath;        // EPUB 3 nav document path
+  std::string guideTocPageHref;  // EPUB 2 guide TOC page, if declared
   std::string coverItemHref;
   std::string guideCoverPageHref;  // Guide reference with type="cover" or "cover-page" (points to XHTML wrapper)
   std::string textReferenceHref;
@@ -89,8 +105,7 @@ class ContentOpfParser final : public Print {
         baseContentPath(baseContentPath),
         remainingSize(xmlSize),
         cache(cache),
-        collectCssFiles(collectCssFiles),
-        itemIndex(itemIndexArena) {}
+        collectCssFiles(collectCssFiles) {}
   ~ContentOpfParser() override;
 
   bool setup();

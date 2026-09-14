@@ -28,8 +28,10 @@ class ReaderOptionsActivity final : public Activity {
   std::vector<SettingInfo> settings;
   std::vector<SettingInfo> fontSettings;
   std::vector<SettingInfo> pageLayoutSettings;
+  std::vector<SettingInfo> screenMarginSettings;
   const std::vector<SettingInfo>* currentSettings = nullptr;
   SettingAction activeSubmenu = SettingAction::None;
+  SettingAction parentSubmenu = SettingAction::None;
   OptionPopup optionPopup;
   SaveSettingsCallback saveSettingsCallback = nullptr;
   void* saveSettingsContext = nullptr;
@@ -66,10 +68,11 @@ class ReaderOptionsActivity final : public Activity {
   void openDictionaryFontPicker(const SettingInfo& setting);
   void openDictionaryFontSizePicker(const SettingInfo& setting);
   void openScreenMarginPicker(const SettingInfo& setting);
+  void openWordSpacingPicker();
   void toggleCurrentSetting();
   void openLineHeightPicker();
   void persistReaderSettings();
-  void persistGlobalSettings();
+  void persistGlobalSettings() override;
   void beginGlobalSettingsEdit();
   void endGlobalSettingsEdit();
   static void optionsScreen(UiApp::ScreenType& screen, void* user);

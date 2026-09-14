@@ -12,6 +12,9 @@ void clear();
 bool loadRootSections(std::vector<BookOrbitCatalogSection>& outSections);
 void saveRootSections(const std::vector<BookOrbitCatalogSection>& sections);
 
+bool loadCatalogCounts(BookOrbitCatalogCounts& outCounts);
+void saveCatalogCounts(const BookOrbitCatalogCounts& counts);
+
 bool loadFacetPage(const std::string& sectionId, int page, BookOrbitFacetPage& outPage);
 void saveFacetPage(const std::string& sectionId, int page, const BookOrbitFacetPage& pageData);
 

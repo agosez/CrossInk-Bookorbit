@@ -1,5 +1,7 @@
 #pragma once
 
+#include <Memory.h>
+
 #include <cstddef>
 #include <cstdint>
 
@@ -56,6 +58,11 @@ class InflateStream {
 
   // Transient storage needed when the framebuffer scratch loan is unavailable.
   static size_t requiredStorageSize(bool streaming);
+  // Admission hint: preserve the conservative full-storage requirement unless
+  // a scratch loan or an admitted external window removes those heap bytes.
+  static size_t requiredInternalStorageSize(bool streaming);
+  MemoryPool windowPool() const { return byteBufferPool(windowOwner.get()); }
+  bool usesBuildScratch() const { return arenaBase != nullptr; }
 
   // Free the decompressor state and window.
   void deinit();
@@ -77,6 +84,8 @@ class InflateStream {
   Status readAtMost(uint8_t* dest, size_t maxLen, size_t* produced);
 
  private:
+  HeapByteBuffer stateOwner;
+  HeapByteBuffer windowOwner;
   tinfl_decompressor_tag* state = nullptr;  // ~11KB: heap, or inside the claimed build scratch
   uint8_t* window = nullptr;                // 32KB ring, streaming mode only
   uint8_t* arenaBase = nullptr;             // non-null when state/window live in lent framebuffer bytes

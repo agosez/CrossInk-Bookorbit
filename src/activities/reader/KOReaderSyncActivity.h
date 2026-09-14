@@ -25,7 +25,7 @@ class KOReaderSyncActivity final : public Activity {
  public:
   static constexpr const char* NAME = "KOReaderSync";
 
-  explicit KOReaderSyncActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
+  explicit KOReaderSyncActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const uint8_t readerOrientation)
       : Activity(NAME, renderer, mappedInput),
         currentSpineIndex(0),
         currentPage(0),
@@ -35,10 +35,11 @@ class KOReaderSyncActivity final : public Activity {
         remoteProgress{},
         remotePosition{},
         localProgress{},
-        restartBeforeNetwork(true) {}
+        restartBeforeNetwork(true),
+        readerOrientation(readerOrientation) {}
 
   explicit KOReaderSyncActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string epubPath,
-                                DocumentMatchMethod matchMethod)
+                                DocumentMatchMethod matchMethod, const uint8_t readerOrientation)
       : Activity(NAME, renderer, mappedInput),
         epubPath(std::move(epubPath)),
         currentSpineIndex(0),
@@ -49,7 +50,8 @@ class KOReaderSyncActivity final : public Activity {
         remoteProgress{},
         remotePosition{},
         localProgress{},
-        localProgressDeferred(true) {}
+        localProgressDeferred(true),
+        readerOrientation(readerOrientation) {}
 
   void onEnter() override;
   void onExit() override;
@@ -97,6 +99,10 @@ class KOReaderSyncActivity final : public Activity {
   KOReaderPosition localProgress;
   bool localProgressDeferred = false;
   bool restartBeforeNetwork = false;
+  // The reader can use a book-specific orientation that its teardown restores
+  // before this activity gets control. Keep that one value through the
+  // lightweight network reboot so every sync screen matches the book.
+  uint8_t readerOrientation = CrossPointSettings::ORIENTATION_COUNT;
 
   // Selection in result screen (0=Apply, 1=Upload)
   int selectedOption = 0;
@@ -111,6 +117,7 @@ class KOReaderSyncActivity final : public Activity {
   // which makes WiFi.getMode() return WIFI_MODE_NULL.
   bool wifiActivated = false;
   bool lockInitialConfirmRelease = false;
+  bool touchOverrideActive = false;
 
   void onWifiSelectionComplete(bool success);
   void performSync();

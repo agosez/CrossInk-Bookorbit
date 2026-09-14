@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <new>
 
 struct BmpHeader;
 
@@ -10,6 +11,17 @@ uint8_t quantize(int gray, int x, int y);
 uint8_t quantizeSimple(int gray);
 uint8_t quantize1bit(int gray, int x, int y);
 int adjustPixel(int gray);
+
+struct GrayPlanePixel {
+  bool write;
+  bool black;
+};
+
+// Levels: black, dark, light, white. drawPixel(true) clears a framebuffer bit.
+constexpr GrayPlanePixel grayPlanePixel(uint8_t level, bool msb, bool absolute) {
+  if (absolute) return {true, !(level == 3 || level == (msb ? 2 : 1))};
+  return {msb ? (level == 1 || level == 2) : level == 1, false};
+}
 
 enum class BmpRowOrder { BottomUp, TopDown };
 
@@ -104,10 +116,18 @@ class Atkinson1BitDitherer {
 // Less error buildup = fewer artifacts than Floyd-Steinberg
 class AtkinsonDitherer {
  public:
-  explicit AtkinsonDitherer(int width) : width(width) {
-    errorRow0 = new int16_t[width + 4]();  // Current row
-    errorRow1 = new int16_t[width + 4]();  // Next row
-    errorRow2 = new int16_t[width + 4]();  // Row after next
+  explicit AtkinsonDitherer(int width, bool imageLevels = false) : imageLevels(imageLevels), width(width) {
+    errorRow0 = new (std::nothrow) int16_t[width + 4]();  // Current row
+    errorRow1 = new (std::nothrow) int16_t[width + 4]();  // Next row
+    errorRow2 = new (std::nothrow) int16_t[width + 4]();  // Row after next
+    if (!isValid()) {
+      delete[] errorRow0;
+      delete[] errorRow1;
+      delete[] errorRow2;
+      errorRow0 = nullptr;
+      errorRow1 = nullptr;
+      errorRow2 = nullptr;
+    }
   }
 
   ~AtkinsonDitherer() {
@@ -121,6 +141,8 @@ class AtkinsonDitherer {
   // **2. EXPLICITLY DELETE THE COPY ASSIGNMENT OPERATOR**
   AtkinsonDitherer& operator=(const AtkinsonDitherer& other) = delete;
 
+  bool isValid() const { return errorRow0 != nullptr && errorRow1 != nullptr && errorRow2 != nullptr; }
+
   uint8_t processPixel(int gray, int x) {
     // Add accumulated error
     int adjusted = gray + errorRow0[x + 2];
@@ -130,7 +152,7 @@ class AtkinsonDitherer {
     // Quantize to 4 levels
     uint8_t quantized;
     int quantizedValue;
-    if (false) {  // original thresholds
+    if (imageLevels) {  // evenly spaced image tones
       if (adjusted < 43) {
         quantized = 0;
         quantizedValue = 0;
@@ -189,6 +211,7 @@ class AtkinsonDitherer {
   }
 
  private:
+  const bool imageLevels;
   int width;
   int16_t* errorRow0;
   int16_t* errorRow1;
@@ -205,7 +228,8 @@ class AtkinsonDitherer {
 //      7/16  X
 class FloydSteinbergDitherer {
  public:
-  explicit FloydSteinbergDitherer(int width) : width(width), rowCount(0) {
+  explicit FloydSteinbergDitherer(int width, bool imageLevels = false)
+      : imageLevels(imageLevels), width(width), rowCount(0) {
     errorCurRow = new int16_t[width + 2]();  // +2 for boundary handling
     errorNextRow = new int16_t[width + 2]();
   }
@@ -234,7 +258,7 @@ class FloydSteinbergDitherer {
     // Quantize to 4 levels (0, 85, 170, 255)
     uint8_t quantized;
     int quantizedValue;
-    if (false) {  // original thresholds
+    if (imageLevels) {  // evenly spaced image tones
       if (adjusted < 43) {
         quantized = 0;
         quantizedValue = 0;
@@ -315,6 +339,7 @@ class FloydSteinbergDitherer {
   }
 
  private:
+  const bool imageLevels;
   int width;
   int rowCount;
   int16_t* errorCurRow;

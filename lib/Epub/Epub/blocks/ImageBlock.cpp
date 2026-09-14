@@ -3,8 +3,11 @@
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <Logging.h>
+#include <Memory.h>
+#include <MemoryBudget.h>
 #include <Serialization.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <utility>
 
@@ -21,13 +24,13 @@ ImageBlock::ImageBlock(std::string imagePath, std::string sourcePath, int16_t wi
 
 void* ImageBlock::extractContext = nullptr;
 ImageBlock::ExtractFn ImageBlock::extractFn = nullptr;
+ImageBlock::SeedCacheFn ImageBlock::seedCacheFn = nullptr;
 
-void ImageBlock::setExtractor(void* context, ExtractFn fn) {
+void ImageBlock::setExtractor(void* context, ExtractFn extract, SeedCacheFn seedCache) {
   extractContext = context;
-  extractFn = fn;
+  extractFn = extract;
+  seedCacheFn = seedCache;
 }
-
-bool ImageBlock::imageExists() const { return Storage.exists(imagePath.c_str()); }
 
 namespace {
 
@@ -40,33 +43,40 @@ std::string getCachePath(const std::string& imagePath) {
   return imagePath + ".pxc";
 }
 
-void clampCachedRowsToLandscapeStrip(const GfxRenderer& renderer, const int imageY, int& rowStart, int& rowEnd) {
-  if (!renderer.isStripTargetActive()) {
-    return;
-  }
+// Half-open image-local bounds shared by retained and streamed PXC rendering.
+// Portrait strips restrict columns; landscape strips restrict rows.
+struct CachedImageClip {
+  int x0, y0, x1, y1;
+  bool empty() const { return x0 >= x1 || y0 >= y1; }
+};
 
-  const int stripY0 = renderer.getWriteOriginY();
-  const int stripY1Exclusive = stripY0 + renderer.getWriteRows();
-  int logicalY0;
-  int logicalY1Exclusive;
+CachedImageClip cachedImageClip(const GfxRenderer& renderer, int x, int y, int width, int height) {
+  CachedImageClip clip{std::max(0, -x), std::max(0, -y), std::min(width, renderer.getScreenWidth() - x),
+                       std::min(height, renderer.getScreenHeight() - y)};
+  if (!renderer.isStripTargetActive()) return clip;
 
+  const int s0 = renderer.getWriteOriginY();
+  const int s1 = s0 + renderer.getWriteRows();
+  const int h = renderer.getDisplayHeight();
   switch (renderer.getOrientation()) {
     case GfxRenderer::LandscapeCounterClockwise:
-      logicalY0 = stripY0;
-      logicalY1Exclusive = stripY1Exclusive;
+      clip.y0 = std::max(clip.y0, s0 - y);
+      clip.y1 = std::min(clip.y1, s1 - y);
       break;
     case GfxRenderer::LandscapeClockwise:
-      logicalY0 = renderer.getDisplayHeight() - stripY1Exclusive;
-      logicalY1Exclusive = renderer.getDisplayHeight() - stripY0;
+      clip.y0 = std::max(clip.y0, h - s1 - y);
+      clip.y1 = std::min(clip.y1, h - s0 - y);
       break;
-    default:
-      return;
+    case GfxRenderer::Portrait:
+      clip.x0 = std::max(clip.x0, h - s1 - x);
+      clip.x1 = std::min(clip.x1, h - s0 - x);
+      break;
+    case GfxRenderer::PortraitInverted:
+      clip.x0 = std::max(clip.x0, s0 - x);
+      clip.x1 = std::min(clip.x1, s1 - x);
+      break;
   }
-
-  const int stripRowStart = logicalY0 - imageY;
-  const int stripRowEnd = logicalY1Exclusive - imageY;
-  if (rowStart < stripRowStart) rowStart = stripRowStart;
-  if (rowEnd > stripRowEnd) rowEnd = stripRowEnd;
+  return clip;
 }
 
 bool readValidCacheHeader(FsFile& cacheFile, const int expectedWidth, const int expectedHeight, uint16_t& cachedWidth,
@@ -95,6 +105,16 @@ constexpr size_t MAX_SESSION_IMAGE_FAILURES = 16;
 uint64_t failedImageHashes[MAX_SESSION_IMAGE_FAILURES];
 size_t failedImageCount = 0;
 
+// One full 2-bit PXC payload is retained for the current/last image. A full
+// 800x480 image is 96 KB; cap pathological files at 128 KB. The buffer is PSRAM
+// only, so C3 keeps the existing ~4 KB streamed reader and internal heap budget.
+constexpr size_t MAX_RETAINED_PXC_BYTES = 128 * 1024;
+HeapByteBuffer retainedPxcPixels;
+size_t retainedPxcCapacity = 0;
+uint16_t retainedPxcWidth = 0;
+uint16_t retainedPxcHeight = 0;
+std::string retainedPxcPath;
+
 uint64_t imagePathHash(const std::string& path) {
   uint64_t hash = 14695981039346656037ull;
   for (const char c : path) {
@@ -117,8 +137,35 @@ void rememberImageFailure(const std::string& path) {
   failedImageHashes[failedImageCount++] = imagePathHash(path);
 }
 
+bool renderCachedPixels(GfxRenderer& renderer, const uint8_t* pixels, const uint16_t cachedWidth,
+                        const uint16_t cachedHeight, const int x, const int y) {
+  if (!pixels) return false;
+  const auto clip = cachedImageClip(renderer, x, y, cachedWidth, cachedHeight);
+  if (clip.empty()) return true;
+
+  const int bytesPerRow = (cachedWidth + 3) / 4;
+  DirectPixelWriter pw;
+  pw.init(renderer);
+  for (int row = clip.y0; row < clip.y1; ++row) {
+    const uint8_t* rowBuffer = pixels + static_cast<size_t>(row) * bytesPerRow;
+    pw.beginRow(y + row);
+    for (int col = clip.x0; col < clip.x1; ++col) {
+      const int byteIdx = col >> 2;
+      const int bitShift = 6 - (col & 3) * 2;
+      pw.writePixel(x + col, (rowBuffer[byteIdx] >> bitShift) & 0x03);
+    }
+  }
+  return true;
+}
+
 bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x, int y, int expectedWidth,
                      int expectedHeight) {
+  const bool retainedDimensionsMatch = abs(static_cast<int>(retainedPxcWidth) - expectedWidth) <= 1 &&
+                                       abs(static_cast<int>(retainedPxcHeight) - expectedHeight) <= 1;
+  if (retainedPxcPixels && retainedPxcPath == cachePath && retainedDimensionsMatch) {
+    return renderCachedPixels(renderer, retainedPxcPixels.get(), retainedPxcWidth, retainedPxcHeight, x, y);
+  }
+
   FsFile cacheFile;
   if (!Storage.openFileForRead("IMG", cachePath, cacheFile)) {
     return false;
@@ -127,36 +174,44 @@ bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x,
   uint16_t cachedWidth, cachedHeight;
   if (!readValidCacheHeader(cacheFile, expectedWidth, expectedHeight, cachedWidth, cachedHeight)) {
     LOG_ERR("IMG", "Invalid image cache: %s", cachePath.c_str());
+    cacheFile.close();
     return false;
   }
 
-  // Use cached dimensions for rendering (they're the actual decoded size)
-  expectedWidth = cachedWidth;
-  expectedHeight = cachedHeight;
-
-  const int screenWidth = renderer.getScreenWidth();
-  const int screenHeight = renderer.getScreenHeight();
-  int clipXStart = 0;
-  int clipYStart = 0;
-  int clipXEnd = cachedWidth;
-  int clipYEnd = cachedHeight;
-  if (x < 0) clipXStart = -x;
-  if (y < 0) clipYStart = -y;
-  if (screenWidth - x < clipXEnd) clipXEnd = screenWidth - x;
-  if (screenHeight - y < clipYEnd) clipYEnd = screenHeight - y;
-
-  if (clipXStart >= clipXEnd || clipYStart >= clipYEnd) {
-    LOG_DBG("IMG", "Cached image is outside screen after clipping");
+  const auto clip = cachedImageClip(renderer, x, y, cachedWidth, cachedHeight);
+  if (clip.empty()) {
     cacheFile.close();
     return true;
   }
 
-  int renderRowStart = clipYStart;
-  int renderRowEnd = clipYEnd;
-  clampCachedRowsToLandscapeStrip(renderer, y, renderRowStart, renderRowEnd);
-  if (renderRowStart >= renderRowEnd) {
-    cacheFile.close();
-    return true;
+  const size_t bytesPerRow = (cachedWidth + 3U) / 4U;
+  const size_t pixelBytes = bytesPerRow * cachedHeight;
+  if (psramHeapAvailable() && pixelBytes <= MAX_RETAINED_PXC_BYTES) {
+    if (retainedPxcCapacity < pixelBytes) {
+      auto grown = makePsramByteBufferNoThrow(pixelBytes);
+      if (grown) {
+        retainedPxcPixels = std::move(grown);
+        retainedPxcCapacity = pixelBytes;
+      }
+    }
+    // A failed growth leaves the previous, smaller buffer in place; reading the
+    // new payload into it would overflow that allocation.
+    if (retainedPxcPixels && retainedPxcCapacity >= pixelBytes && cacheFile.seek(4) &&
+        cacheFile.read(retainedPxcPixels.get(), pixelBytes) == static_cast<int>(pixelBytes)) {
+      retainedPxcPath = cachePath;
+      retainedPxcWidth = cachedWidth;
+      retainedPxcHeight = cachedHeight;
+      cacheFile.close();
+      LOG_INF("EPS", "Retained PXC in PSRAM: bytes=%u dimensions=%ux%u", static_cast<unsigned>(pixelBytes), cachedWidth,
+              cachedHeight);
+      MemoryBudget::logEpubHeapPools("pxc retained");
+      return renderCachedPixels(renderer, retainedPxcPixels.get(), cachedWidth, cachedHeight, x, y);
+    }
+    retainedPxcPath.clear();
+    if (!cacheFile.seek(4)) {
+      cacheFile.close();
+      return false;
+    }
   }
 
   // Read several rows per SD access. A full-page image is re-rendered on every
@@ -164,16 +219,16 @@ bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x,
   // cachedHeight (~728) tiny reads through the storage mutex + SdFat each time —
   // the dominant cost of displaying an image page. Batching rows into a ~4KB
   // buffer cuts that to ~20 reads per pass without holding the whole image.
-  const int bytesPerRow = (cachedWidth + 3) / 4;  // 2 bits per pixel, 4 pixels per byte
-  const int rowsToRender = renderRowEnd - renderRowStart;
-  int rowsPerRead = 4096 / bytesPerRow;
+  const int bytesPerRowInt = (cachedWidth + 3) / 4;  // 2 bits per pixel, 4 pixels per byte
+  const int rowsToRender = clip.y1 - clip.y0;
+  int rowsPerRead = 4096 / bytesPerRowInt;
   if (rowsPerRead < 1) rowsPerRead = 1;
   if (rowsPerRead > rowsToRender) rowsPerRead = rowsToRender;
-  uint8_t* readBuffer = (uint8_t*)malloc((size_t)rowsPerRead * bytesPerRow);
+  uint8_t* readBuffer = (uint8_t*)malloc((size_t)rowsPerRead * bytesPerRowInt);
   if (!readBuffer) {
     // Fall back to a single-row buffer under memory pressure.
     rowsPerRead = 1;
-    readBuffer = (uint8_t*)malloc(bytesPerRow);
+    readBuffer = (uint8_t*)malloc(bytesPerRowInt);
   }
   if (!readBuffer) {
     LOG_ERR("IMG", "Failed to allocate row buffer");
@@ -184,9 +239,9 @@ bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x,
   DirectPixelWriter pw;
   pw.init(renderer);
 
-  const size_t dataOffset = 4U + static_cast<size_t>(renderRowStart) * static_cast<size_t>(bytesPerRow);
+  const size_t dataOffset = 4U + static_cast<size_t>(clip.y0) * static_cast<size_t>(bytesPerRowInt);
   if (!cacheFile.seek(dataOffset)) {
-    LOG_ERR("IMG", "Cache seek error at row %d", renderRowStart);
+    LOG_ERR("IMG", "Cache seek error at row %d", clip.y0);
     free(readBuffer);
     cacheFile.close();
     return false;
@@ -194,10 +249,10 @@ bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x,
 
   int rowsInBuffer = 0;
   int bufferRow = 0;
-  for (int row = renderRowStart; row < renderRowEnd; row++) {
+  for (int row = clip.y0; row < clip.y1; row++) {
     if (bufferRow >= rowsInBuffer) {
-      const int toRead = (renderRowEnd - row < rowsPerRead) ? (renderRowEnd - row) : rowsPerRead;
-      const size_t bytes = (size_t)toRead * bytesPerRow;
+      const int toRead = (clip.y1 - row < rowsPerRead) ? (clip.y1 - row) : rowsPerRead;
+      const size_t bytes = (size_t)toRead * bytesPerRowInt;
       if (cacheFile.read(readBuffer, bytes) != static_cast<int>(bytes)) {
         LOG_ERR("IMG", "Cache read error at row %d", row);
         free(readBuffer);
@@ -208,18 +263,14 @@ bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x,
       bufferRow = 0;
     }
 
-    const uint8_t* rowBuffer = readBuffer + (size_t)bufferRow * bytesPerRow;
+    const uint8_t* rowBuffer = readBuffer + (size_t)bufferRow * bytesPerRowInt;
     bufferRow++;
-
-    if (row < clipYStart) continue;
-    if (row >= clipYEnd) break;
 
     const int destY = y + row;
     pw.beginRow(destY);
-    // Walk only the on-screen columns: writePixel drops off-band rows but does
-    // not clip X, so this range is what keeps a partially off-screen image
-    // inside the framebuffer.
-    for (int col = clipXStart; col < clipXEnd; col++) {
+    // Clip before unpacking, including portrait strip columns. Row reads stay
+    // sequential and batched; this reduces pixel work, not portrait SD bytes.
+    for (int col = clip.x0; col < clip.x1; col++) {
       const int byteIdx = col >> 2;            // col / 4
       const int bitShift = 6 - (col & 3) * 2;  // MSB first within byte
       uint8_t pixelValue = (rowBuffer[byteIdx] >> bitShift) & 0x03;
@@ -248,9 +299,36 @@ bool ImageBlock::hasValidCache() const {
   return valid;
 }
 
+void ImageBlock::prepareCache() const {
+  if (hasValidCache()) {
+    LOG_DBG("IMG", "Local image cache hit: %s", imagePath.c_str());
+    return;
+  }
+  if (sourcePath.empty()) return;
+  const std::string cache = getCachePath(imagePath);
+  Storage.remove((cache + ".optimizer.tmp").c_str());
+  Storage.remove((cache + ".optimizer.source").c_str());
+  if (seedCacheFn && seedCacheFn(extractContext, sourcePath.c_str(), width, height, cache.c_str())) return;
+  if (extractFn && !Storage.exists(imagePath.c_str()) &&
+      !extractFn(extractContext, sourcePath.c_str(), imagePath.c_str())) {
+    LOG_ERR("IMG", "Image preflight extraction failed: %s", sourcePath.c_str());
+  }
+}
+
 bool ImageBlock::needsDecode() const { return !imageFailedThisSession(imagePath) && !hasValidCache(); }
 
-void ImageBlock::clearSessionRenderFailures() { failedImageCount = 0; }
+void ImageBlock::clearSessionRenderFailures() {
+  failedImageCount = 0;
+  releaseSessionPixelCache();
+}
+
+void ImageBlock::releaseSessionPixelCache() {
+  retainedPxcPixels.reset();
+  retainedPxcCapacity = 0;
+  retainedPxcWidth = 0;
+  retainedPxcHeight = 0;
+  retainedPxcPath.clear();
+}
 
 void ImageBlock::renderPlaceholder(GfxRenderer& renderer, const int x, const int y, const bool foregroundBlack) const {
   renderer.fillRect(x, y, width, height, foregroundBlack);
@@ -303,13 +381,8 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y, const b
   // Try to render from cache first
   std::string cachePath = getCachePath(imagePath);
   if (renderFromCache(renderer, cachePath, x, y, width, height)) {
+    renderer.preserveImagePolarity(x, y, width, height);
     return;  // Successfully rendered from cache
-  }
-
-  if (!sourcePath.empty() && extractFn && !Storage.exists(imagePath.c_str())) {
-    if (!extractFn(extractContext, sourcePath.c_str(), imagePath.c_str())) {
-      LOG_ERR("IMG", "Lazy extraction failed: %s", sourcePath.c_str());
-    }
   }
 
   // No cache - need to decode the image
@@ -359,6 +432,8 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y, const b
     renderPlaceholder(renderer, x, y, foregroundBlack);
     return;
   }
+
+  renderer.preserveImagePolarity(x, y, width, height);
 }
 
 bool ImageBlock::serialize(FsFile& file) {

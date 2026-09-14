@@ -56,10 +56,11 @@ DEFAULT_FALLBACK_FONT = EPDFONTS_DIR / "builtinFonts/source/NotoSans/NotoSans-Re
 # as the built-in reader fonts. Families can still add extra script presets.
 PATCHED_INTERVAL_PRESETS = ("builtin",)
 
-# Keep the SD-card fallback stack aligned with convert-builtin-fonts.sh. Each
-# tuple is an inclusive Unicode range assigned to its corresponding fallback
-# face. Noto Sans remains the final unrestricted fallback for missing glyphs,
-# including the IPA ranges requested by dictionary fonts.
+# Keep the SD-card fallback stack aligned with the built-in non-emoji ranges.
+# SD-card fonts deliberately retain the extra emoji fallback because they do
+# not consume firmware space. Noto Sans remains the final unrestricted
+# fallback for missing glyphs, including the IPA ranges requested by dictionary
+# fonts.
 COMMON_FALLBACK_RANGES = (
     (0x03BB, 0x03BB),
     (0x0410, 0x0414), (0x0418, 0x0418), (0x041B, 0x041B),
@@ -77,7 +78,10 @@ EMOJI_FALLBACK_RANGES = (
     (0x1F631, 0x1F635), (0x1F641, 0x1F642), (0x1F644, 0x1F644),
     (0x1F44B, 0x1F44F), (0x2764, 0x2764),
 )
-SYMBOL_FALLBACK_RANGES = ((0x2669, 0x266F),)
+SYMBOL_FALLBACK_RANGES = (
+    (0x2191, 0x2191),  # upward arrow used in dictionary pronunciation guides
+    (0x2669, 0x266F),
+)
 PHM_FALLBACK_RANGES = (
     (0x4F1A, 0x4F1A), (0x53BB, 0x53BB), (0x5458, 0x5458),
     (0x59DA, 0x59DA), (0x5B98, 0x5B98), (0x5BA4, 0x5BA4),
@@ -157,7 +161,7 @@ def builtin_fallback_specs(style_name: str, family_name: str) -> list[tuple[Path
             COMMON_FALLBACK_RANGES,
         ))
 
-    # The built-in script uses the regular emoji/symbol face for every style.
+    # SD-card fonts retain the regular emoji face for every style.
     specs.append((
         EPDFONTS_DIR / "builtinFonts/source/NotoEmoji/NotoEmoji-Regular.ttf",
         EMOJI_FALLBACK_RANGES,

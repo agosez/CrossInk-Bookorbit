@@ -7,6 +7,8 @@
 #include <HalDisplay.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Memory.h>
+#include <MemoryBudget.h>
 #include <Serialization.h>
 #include <Utf8.h>
 #include <Xtc.h>
@@ -20,6 +22,10 @@
 #include <string>
 #include <vector>
 
+#if defined(CROSSINK_ISSUE_666_MEMORY_DIAGNOSTICS) && defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
+#include <esp_memory_utils.h>
+#endif
+
 #include "../reader/BookReadingStats.h"
 #include "../reader/BookStatsActivity.h"
 #include "../reader/EpubReaderUtils.h"
@@ -28,6 +34,8 @@
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "GlobalActions.h"
+#include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBookProgress.h"
@@ -134,6 +142,35 @@ bool hasHeapForCarouselFrameCache() {
   return ESP.getFreeHeap() >= CAROUSEL_FRAME_MIN_FREE_AFTER_ALLOC &&
          ESP.getMaxAllocHeap() >= CAROUSEL_FRAME_MIN_MAX_ALLOC_AFTER_ALLOC;
 }
+
+#if defined(CROSSINK_ISSUE_666_MEMORY_DIAGNOSTICS) && defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
+const char* carouselPointerPool(const void* ptr) {
+  if (!ptr) return "null";
+  if (esp_ptr_external_ram(ptr)) return "PSRAM";
+  if (esp_ptr_internal(ptr)) return "internal";
+  return "other";
+}
+
+// Temporary #666 probe: cache frames are full-screen buffers, so stack/static
+// storage is unsuitable. Check their containing heap regions only at cache
+// setup/copy time. A healthy region does not prove that an individual pointer
+// still owns a live allocation; the owner/alias check below covers that case.
+bool logCarouselMemoryDiagnostic(const char* stage, const int slotIdx, const void* source, const void* destination,
+                                 const size_t byteCount) {
+  const auto internal = MemoryBudget::snapshot();
+  const auto psram = MemoryBudget::psramSnapshot();
+  const bool sourceRegionIntact = source && heap_caps_check_integrity_addr(reinterpret_cast<intptr_t>(source), true);
+  const bool destinationRegionIntact =
+      destination && heap_caps_check_integrity_addr(reinterpret_cast<intptr_t>(destination), true);
+  LOG_INF("DIAG666",
+          "%s slot=%d bytes=%u task=%s src=%p(%s region=%d) dst=%p(%s region=%d); internal free=%u max=%u; "
+          "psram free=%u max=%u",
+          stage, slotIdx, static_cast<unsigned>(byteCount), pcTaskGetName(nullptr), source, carouselPointerPool(source),
+          sourceRegionIntact, destination, carouselPointerPool(destination), destinationRegionIntact, internal.freeHeap,
+          internal.maxAllocHeap, psram.freeHeap, psram.maxAllocHeap);
+  return sourceRegionIntact && destinationRegionIntact;
+}
+#endif
 
 void appendHashedFileStateToKey(std::string& key, const std::string& path) {
   FsFile file;
@@ -503,6 +540,11 @@ void buildCarouselCacheKey(const std::vector<RecentBook>& recentBooks, const boo
                            std::string& key, uint64_t& keyHash) {
   key.clear();
   key.reserve(512);
+  // Framebuffer snapshots include both UI pixels and counter-inverted cover
+  // pixels, so a Light Mode snapshot cannot be reused in Dark Mode (or vice
+  // versa).
+  key += SETTINGS.screenInverted ? "dark:1" : "dark:0";
+  key += '\0';
   // The carousel cache stores the bottom icon row too, so menu visibility must
   // be part of the key alongside book covers/progress.
   appendCarouselMenuStateToKey(key, hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings);
@@ -575,6 +617,10 @@ int getHomeMenuSelectionOffset(const std::vector<RecentBook>& recentBooks) {
 namespace {
 class CarouselCache {
  public:
+  // One frame is 48 KB on current panels. Keep it out of the C3's constrained
+  // internal heap whenever PSRAM is available; the owning buffers are static
+  // because this cache deliberately survives HomeActivity recreation.
+  HeapByteBuffer frameStorage[HomeActivity::kCarouselFrameCount];
   uint8_t* frames[HomeActivity::kCarouselFrameCount] = {};
   int frameBookIdx[HomeActivity::kCarouselFrameCount] = {-1};
   int frameCount = 0;
@@ -591,10 +637,8 @@ class CarouselCache {
 
   void invalidate() {
     for (int i = 0; i < HomeActivity::kCarouselFrameCount; ++i) {
-      if (frames[i]) {
-        free(frames[i]);
-        frames[i] = nullptr;
-      }
+      frameStorage[i].reset();
+      frames[i] = nullptr;
       frameBookIdx[i] = -1;
     }
     frameCount = 0;
@@ -873,6 +917,7 @@ void HomeActivity::onEnter() {
   lastCarouselBookIndex = 0;
   carouselCoverTouchDownIndex = -1;
   carouselCoverTouchDownWasSelected = false;
+  carouselMenuTouchDownIndex = -1;
   minimalMenuOpen = false;
   minimalSuppressInitialFrontRelease = usesMinimalHomeInteraction();
   backPressSeen = false;
@@ -884,11 +929,16 @@ void HomeActivity::onEnter() {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int recentBooksToLoad =
       std::min(kMaxCachedBooks, std::max(metrics.homeRecentBooksCount, HOME_BOOK_SWAP_RECENT_COUNT));
+  RECENT_BOOKS.ensureLoaded();
   loadRecentBooks(recentBooksToLoad);
 
-  if (!APP_STATE.openEpubPath.empty()) {
+  const auto selectInitialBook = [this, &metrics](const std::string& path) {
+    if (path.empty()) {
+      return false;
+    }
+
     for (int i = 0; i < static_cast<int>(recentBooks.size()); ++i) {
-      if (recentBooks[i].path == APP_STATE.openEpubPath) {
+      if (recentBooks[i].path == path) {
         if (metrics.homeRecentBooksCount == 1 && i > 0) {
           std::rotate(recentBooks.begin(), recentBooks.begin() + i, recentBooks.end());
           selectorIndex = 0;
@@ -897,9 +947,14 @@ void HomeActivity::onEnter() {
           selectorIndex = i;
           lastCarouselBookIndex = i;
         }
-        break;
+        return true;
       }
     }
+    return false;
+  };
+
+  if (!selectInitialBook(initialBookPath)) {
+    selectInitialBook(APP_STATE.openEpubPath);
   }
 
   globalStats = GlobalReadingStats::load();
@@ -963,6 +1018,80 @@ std::string HomeActivity::getCurrentBookPath() const {
   return idx >= 0 ? recentBooks[idx].path : std::string{};
 }
 
+std::string HomeActivity::getCurrentBookTitle() const {
+  const int idx = getHighlightedBookIndex();
+  return idx >= 0 ? recentBooks[idx].title : std::string{};
+}
+
+std::unique_ptr<Activity> HomeActivity::createFrontlightReadingStatsActivity() {
+  const std::string path = APP_STATE.openEpubPath;
+  const bool validEpub = FsHelpers::hasEpubExtension(path) && Storage.exists(path.c_str());
+  std::string title = tr(STR_READING_STATS);
+  float progress = -1.0f;
+  if (validEpub) {
+    const auto recent = std::find_if(recentBooks.begin(), recentBooks.end(),
+                                     [&path](const RecentBook& book) { return book.path == path; });
+    if (recent != recentBooks.end()) {
+      title = recent->title;
+      progress = RecentBookProgress::loadCachedEpubPercent(*recent);
+    } else {
+      const size_t slash = path.find_last_of('/');
+      title = slash == std::string::npos ? path : path.substr(slash + 1);
+    }
+  }
+  const std::string cachePath = validEpub ? Epub::cachePathForFilePath(path, "/.crosspoint") : std::string{};
+  const BookReadingStats bookStats = validEpub ? BookReadingStats::load(cachePath) : BookReadingStats{};
+  const GlobalReadingStats deviceStats = GlobalReadingStats::load();
+  if (GlobalReadingStats::hasSyncedStats()) {
+    return makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, title, cachePath, bookStats, progress, false, 0,
+                                                deviceStats, GlobalReadingStats::loadAggregated(deviceStats));
+  }
+  return makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, title, cachePath, bookStats, progress, false, 0,
+                                              deviceStats);
+}
+
+void HomeActivity::onFrontlightPanelClosed() {
+  globalStats = GlobalReadingStats::load();
+  showAllDevicesStats = GlobalReadingStats::hasSyncedStats();
+  allDevicesGlobalStats = showAllDevicesStats ? GlobalReadingStats::loadAggregated(globalStats) : globalStats;
+  bookStatsCached = false;
+  updateHighlightedBookContext();
+  requestUpdate();
+}
+
+bool HomeActivity::handleFrontlightPanelResult(const FrontlightPanelResult& result) {
+  if (result.bookPath.empty() || result.action == FrontlightPanelAction::None) return false;
+  if (result.action != FrontlightPanelAction::SyncProgress && result.action != FrontlightPanelAction::BookOrbitSync &&
+      result.action != FrontlightPanelAction::NearbyPositionSync &&
+      result.action != FrontlightPanelAction::SendNearbyBook) {
+    return false;
+  }
+
+  PendingOverlayResume resume;
+  resume.origin = PendingOverlayOrigin::Home;
+  resume.overlay = PendingOverlayType::FrontlightDrawer;
+  resume.selectedIndex = result.state.selectedAction;
+  resume.bookPath = result.bookPath;
+  resume.returnHomeAfterReaderFlow = result.action == FrontlightPanelAction::NearbyPositionSync;
+  if (result.action == FrontlightPanelAction::SyncProgress) {
+    if (KOREADER_STORE.hasCredentials()) APP_STATE.setPendingOverlayResume(resume);
+    return startGlobalSyncProgress();
+  }
+  if (result.action == FrontlightPanelAction::BookOrbitSync) {
+    if (BOOKORBIT_STORE.hasCredentials()) APP_STATE.setPendingOverlayResume(resume);
+    return startGlobalBookOrbitSync();
+  }
+  if (result.action == FrontlightPanelAction::NearbyPositionSync) {
+    activityManager.goToReaderAndRunMenuAction(result.bookPath,
+                                               static_cast<uint8_t>(EpubReaderMenuAction::NEARBY_POSITION_SYNC));
+    APP_STATE.setPendingOverlayResume(std::move(resume));
+    return true;
+  }
+  if (!activityManager.goToNearbyBookSend(result.bookPath, false)) return false;
+  APP_STATE.setPendingOverlayResume(std::move(resume));
+  return true;
+}
+
 void HomeActivity::updateHighlightedBookContext(const bool allowEpubLoad) {
   currentBookStats = BookReadingStats{};
   currentBookProgressPercent = -1.0f;
@@ -1002,6 +1131,7 @@ void HomeActivity::updateHighlightedBookContext(const bool allowEpubLoad) {
 void HomeActivity::onExit() {
   Activity::onExit();
 
+  carouselMenuTouchDownIndex = -1;
   freeCoverBuffer();
   gCarouselCache.invalidate();
   freeCarouselFrames();
@@ -1032,6 +1162,7 @@ bool HomeActivity::storeCoverBuffer() {
     coverBufferSize = 0;
     return false;
   }
+  coverBufferInverted = SETTINGS.screenInverted != 0;
   return true;
 }
 
@@ -1054,6 +1185,18 @@ void HomeActivity::invalidateCoverCache() {
   freeCoverBuffer();
 }
 
+void HomeActivity::invalidatePolarityMismatchedCaches() {
+  const bool darkModeEnabled = SETTINGS.screenInverted != 0;
+  if (coverBufferStored && coverBufferInverted != darkModeEnabled) {
+    invalidateCoverCache();
+  }
+  if (carouselFramesReady && carouselFramesInverted != darkModeEnabled) {
+    freeCarouselFrames();
+    gCarouselCache.invalidate();
+    carouselWarmupPending = true;
+  }
+}
+
 void HomeActivity::freeCarouselFrames() {
   // Instance pointers are aliases into the static cache — do not free here.
   for (int i = 0; i < kCarouselFrameCount; ++i) carouselFrames[i] = nullptr;
@@ -1062,26 +1205,34 @@ void HomeActivity::freeCarouselFrames() {
 
 bool HomeActivity::allocateCarouselFrameSlots(int targetFrameCount) {
   const size_t bufferSize = renderer.getBufferSize();
+  const bool usePsram = psramHeapAvailable();
   int frameCount = 0;
   for (int attemptFrameCount = targetFrameCount; attemptFrameCount >= 1; --attemptFrameCount) {
     bool allocFailed = false;
     for (int i = 0; i < attemptFrameCount; ++i) {
-      gCarouselCache.frames[i] = static_cast<uint8_t*>(malloc(bufferSize));
-      if (!gCarouselCache.frames[i]) {
+      // This is a full framebuffer-sized cache, too large for stack/static
+      // storage. PSRAM keeps the X4 Pro reader-exit path from fragmenting its
+      // internal heap; C3 continues to use the guarded default heap path.
+      auto frame = usePsram ? makePsramByteBufferNoThrow(bufferSize) : makeHeapByteBufferNoThrow(bufferSize);
+      if (!frame) {
         LOG_ERR("HOME", "preRenderCarouselFrames: malloc failed for frame %d while allocating %d frame(s)", i,
                 attemptFrameCount);
         allocFailed = true;
         break;
       }
-      if (!hasHeapForCarouselFrameCache()) {
+      if (!usePsram && !hasHeapForCarouselFrameCache()) {
         LOG_INF("HOME", "carousel: low heap after frame cache alloc (%u free, %u maxAlloc); skipping cache",
                 ESP.getFreeHeap(), ESP.getMaxAllocHeap());
-        free(gCarouselCache.frames[i]);
-        gCarouselCache.frames[i] = nullptr;
         allocFailed = true;
         break;
       }
+      gCarouselCache.frameStorage[i] = std::move(frame);
+      gCarouselCache.frames[i] = gCarouselCache.frameStorage[i].get();
       gCarouselCache.frameBookIdx[i] = -1;
+#if defined(CROSSINK_ISSUE_666_MEMORY_DIAGNOSTICS) && defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
+      logCarouselMemoryDiagnostic("frame-allocated", i, renderer.getFrameBuffer(), gCarouselCache.frames[i],
+                                  bufferSize);
+#endif
     }
 
     if (!allocFailed) {
@@ -1090,10 +1241,8 @@ bool HomeActivity::allocateCarouselFrameSlots(int targetFrameCount) {
     }
 
     for (int i = 0; i < attemptFrameCount; ++i) {
-      if (gCarouselCache.frames[i]) {
-        free(gCarouselCache.frames[i]);
-        gCarouselCache.frames[i] = nullptr;
-      }
+      gCarouselCache.frameStorage[i].reset();
+      gCarouselCache.frames[i] = nullptr;
       gCarouselCache.frameBookIdx[i] = -1;
     }
   }
@@ -1104,7 +1253,8 @@ bool HomeActivity::allocateCarouselFrameSlots(int targetFrameCount) {
   }
 
   gCarouselCache.frameCount = frameCount;
-  LOG_INF("HOME", "carousel: frame cache capacity %d/%d", frameCount, targetFrameCount);
+  LOG_INF("HOME", "carousel: frame cache capacity %d/%d (%s)", frameCount, targetFrameCount,
+          usePsram ? "PSRAM" : "internal heap");
   return true;
 }
 
@@ -1333,6 +1483,7 @@ bool HomeActivity::preRenderCarouselFrames(bool showProgressPopup) {
   if (newKey == gCarouselCache.key && gCarouselCache.frameCount > 0) {
     for (int i = 0; i < gCarouselCache.frameCount; ++i) carouselFrames[i] = gCarouselCache.frames[i];
     carouselFramesReady = true;
+    carouselFramesInverted = SETTINGS.screenInverted != 0;
     coverRendered = false;
     coverBufferStored = false;
     return false;
@@ -1383,6 +1534,7 @@ bool HomeActivity::preRenderCarouselFrames(bool showProgressPopup) {
   gCarouselCache.key = newKey;
   gCarouselCache.keyHash = diskCacheValid ? newKeyHash : 0;
   carouselFramesReady = true;
+  carouselFramesInverted = SETTINGS.screenInverted != 0;
   coverRendered = false;
   coverBufferStored = false;
 
@@ -1404,6 +1556,23 @@ bool HomeActivity::preRenderCarouselFrames(bool showProgressPopup) {
 }
 
 void HomeActivity::loop() {
+  if (quickActionsLongPowerHandled) {
+    if (!mappedInput.isPressed(MappedInputManager::Button::Power)) {
+      quickActionsLongPowerHandled = false;
+    }
+    return;
+  }
+
+  if (SETTINGS.longPwrBtn == CrossPointSettings::SHORT_PWRBTN::QUICK_ACTIONS &&
+      mappedInput.isPressed(MappedInputManager::Button::Power) &&
+      mappedInput.getHeldTime() >= SETTINGS.getPowerButtonLongPressDuration()) {
+    quickActionsLongPowerHandled = true;
+    handleShortcutAction(CrossPointSettings::SHORT_PWRBTN::QUICK_ACTIONS);
+    return;
+  }
+
+  if (quickActionsPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
+
   if (usesMinimalHomeInteraction()) {
     const int pressedFrontButton = mappedInput.getPressedFrontButton();
     const int releasedFrontButton = mappedInput.getReleasedFrontButton();
@@ -1529,6 +1698,11 @@ void HomeActivity::loop() {
         requestUpdate();
         return;
       case MappedInputManager::SwipeDir::Left:
+        if (mappedInput.hasTouch() && canSwapHomeBook()) {
+          showNextRecentBookOnHome();
+          return;
+        }
+        break;
       case MappedInputManager::SwipeDir::None:
         break;
     }
@@ -1545,16 +1719,22 @@ void HomeActivity::loop() {
       minimalHomeNavIndex = homeNavCount - 1;
     }
 
-    if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
-      minimalHomeNavIndex = minimalHomeNavIndex < 0 ? homeNavCount - 1
-                                                    : ButtonNavigator::previousIndex(minimalHomeNavIndex, homeNavCount);
-      requestUpdate();
-      return;
-    }
-    if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
-      minimalHomeNavIndex = minimalHomeNavIndex < 0 ? 0 : ButtonNavigator::nextIndex(minimalHomeNavIndex, homeNavCount);
-      requestUpdate();
-      return;
+    // Touch readers do not show the front-button hints, so retain their
+    // existing side-button handling without moving the non-touch hint focus.
+    if (mappedInput.hasTouch()) {
+      if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
+        minimalHomeNavIndex = minimalHomeNavIndex < 0
+                                  ? homeNavCount - 1
+                                  : ButtonNavigator::previousIndex(minimalHomeNavIndex, homeNavCount);
+        requestUpdate();
+        return;
+      }
+      if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
+        minimalHomeNavIndex =
+            minimalHomeNavIndex < 0 ? 0 : ButtonNavigator::nextIndex(minimalHomeNavIndex, homeNavCount);
+        requestUpdate();
+        return;
+      }
     }
 
     auto activateMinimalHomeNav = [this](int index) {
@@ -1632,7 +1812,35 @@ void HomeActivity::loop() {
     return;
   }
 
-  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+  const bool isCarousel =
+      static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::LYRA_CAROUSEL;
+  const bool carouselTouchOnly = isCarousel && mappedInput.hasTouchHardware();
+  const int previousHighlightedBookIdx = getHighlightedBookIndex();
+  const int visibleBookCount = getVisibleRecentBookCount();
+  const int carouselMenuItemCount =
+      isCarousel
+          ? static_cast<int>(buildHomeMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings).size())
+          : 0;
+
+  MappedInputManager::SwipeDir carouselSwipe = MappedInputManager::SwipeDir::None;
+  int carouselSwipeStartX = 0;
+  int carouselSwipeStartY = 0;
+  int carouselSwipeEndX = 0;
+  int carouselSwipeEndY = 0;
+  const bool hasCarouselSwipe =
+      carouselTouchOnly && mappedInput.wasSwipeWithPoints(carouselSwipe, carouselSwipeStartX, carouselSwipeStartY,
+                                                          carouselSwipeEndX, carouselSwipeEndY);
+  const bool carouselSwipeStartsInMenu =
+      hasCarouselSwipe && containsPoint(LyraCarouselTheme::buttonMenuTouchRect(renderer, carouselMenuItemCount),
+                                        carouselSwipeStartX, carouselSwipeStartY);
+  if (hasCarouselSwipe && carouselMenuTouchDownIndex >= 0) {
+    carouselMenuTouchDownIndex = -1;
+    requestUpdate();
+  }
+
+  // A touch swipe can also satisfy the generic Back gesture. Keep it in the
+  // carousel path so a left-edge swipe cannot open the selected book instead.
+  if (!hasCarouselSwipe && mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     backPressSeen = true;
   }
 
@@ -1640,15 +1848,11 @@ void HomeActivity::loop() {
   // interaction path above. On other themes, Back opens the most recent book.
   // Requiring a press observed on Home ignores the stale release that can
   // arrive after Back closed the previous activity.
-  if (mappedInput.wasReleased(MappedInputManager::Button::Back) && backPressSeen && !recentBooks.empty()) {
+  if (!carouselTouchOnly && !hasCarouselSwipe && mappedInput.wasReleased(MappedInputManager::Button::Back) &&
+      backPressSeen && !recentBooks.empty()) {
     onContinueReading();
     return;
   }
-
-  const bool isCarousel =
-      static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::LYRA_CAROUSEL;
-  const int previousHighlightedBookIdx = getHighlightedBookIndex();
-  const int visibleBookCount = getVisibleRecentBookCount();
 
   auto activateHomeMenuAction = [this](const HomeMenuAction action) {
     switch (action) {
@@ -1713,27 +1917,31 @@ void HomeActivity::loop() {
     return;
   }
 
+  if (static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::LYRA &&
+      mappedInput.hasTouch() && canSwapHomeBook() && mappedInput.wasSwipe() == MappedInputManager::SwipeDir::Left) {
+    showNextRecentBookOnHome();
+    return;
+  }
+
   if (isCarousel) {
     const int bookCount = visibleBookCount;
-    const int menuItemCount =
-        static_cast<int>(buildHomeMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings).size());
-    const bool inCarouselRow = (selectorIndex < bookCount);
+    const int menuItemCount = carouselMenuItemCount;
+    bool inCarouselRow = (selectorIndex < bookCount);
     const int menuIdx = inCarouselRow ? 0 : (selectorIndex - bookCount);
 
     auto handleTouch = [&](const bool activate) {
       int touchedMenuIndex = -1;
-      if (activate ? mappedInput.wasItemTapped(touchedMenuIndex) : mappedInput.wasItemTouchedDown(touchedMenuIndex)) {
+      if (!activate && mappedInput.wasItemTouchedDown(touchedMenuIndex)) {
         if (touchedMenuIndex < 0 || touchedMenuIndex >= menuItemCount) return false;
-        const int previousSelectorIndex = selectorIndex;
-        selectorIndex = bookCount + touchedMenuIndex;
-        if (selectorIndex != previousSelectorIndex) {
-          invalidateCoverCache();
-        }
-        if (activate) {
-          activateSelectedHomeItem();
-        } else if (selectorIndex != previousSelectorIndex) {
-          requestUpdate();
-        }
+        carouselMenuTouchDownIndex = touchedMenuIndex;
+        requestUpdate();
+        return true;
+      }
+      if (activate && mappedInput.wasItemTapped(touchedMenuIndex)) {
+        if (touchedMenuIndex < 0 || touchedMenuIndex >= menuItemCount) return false;
+        carouselMenuTouchDownIndex = -1;
+        const auto menuItems = buildHomeMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings);
+        activateHomeMenuAction(menuItems[touchedMenuIndex].action);
         return true;
       }
 
@@ -1757,6 +1965,10 @@ void HomeActivity::loop() {
         }
         if (selectorIndex != previousSelectorIndex) {
           invalidateCoverCache();
+          // Touch-down returns early so the selected cover can repaint before
+          // the finger lifts; keep the stats/context used by the next action
+          // in sync with that new selection.
+          updateHighlightedBookContext(false);
         }
         if (shouldActivateBook) {
           activateSelectedHomeItem();
@@ -1768,10 +1980,17 @@ void HomeActivity::loop() {
       return false;
     };
 
-    if (handleTouch(/*activate=*/false)) {
+    if (!hasCarouselSwipe && handleTouch(/*activate=*/false)) {
       return;
     }
-    if (handleTouch(/*activate=*/true)) {
+    if (!hasCarouselSwipe && handleTouch(/*activate=*/true)) {
+      return;
+    }
+    // A release outside the icon strip (including a cancelled tap) must clear
+    // the transient touch highlight without changing carousel selection.
+    if (!hasCarouselSwipe && carouselMenuTouchDownIndex >= 0 && mappedInput.wasScreenTouchReleased()) {
+      carouselMenuTouchDownIndex = -1;
+      requestUpdate();
       return;
     }
 
@@ -1795,42 +2014,64 @@ void HomeActivity::loop() {
     };
 
     bool handledHorizontalNav = false;
-    const auto swipe = mappedInput.wasSwipe();
-    if (swipe == MappedInputManager::SwipeDir::Left) {
-      moveRight();
-      handledHorizontalNav = true;
-    } else if (swipe == MappedInputManager::SwipeDir::Right) {
-      moveLeft();
-      handledHorizontalNav = true;
+    if (hasCarouselSwipe) {
+      // A swipe that starts in the icon strip is consumed. It must not select
+      // an icon or turn into carousel navigation as it passes through one.
+      if (carouselSwipeStartsInMenu) return;
+
+      switch (carouselSwipe) {
+        case MappedInputManager::SwipeDir::Left:
+        case MappedInputManager::SwipeDir::Right:
+          if (bookCount <= 0) return;
+          if (!inCarouselRow) {
+            selectorIndex = std::clamp(lastCarouselBookIndex, 0, bookCount - 1);
+            lastCarouselBookIndex = selectorIndex;
+            inCarouselRow = true;
+            invalidateCoverCache();
+          }
+          if (carouselSwipe == MappedInputManager::SwipeDir::Left) {
+            moveRight();
+          } else {
+            moveLeft();
+          }
+          handledHorizontalNav = true;
+          break;
+        case MappedInputManager::SwipeDir::None:
+        case MappedInputManager::SwipeDir::Up:
+        case MappedInputManager::SwipeDir::Down:
+          break;
+      }
     }
 
-    if (!handledHorizontalNav && mappedInput.wasPressed(MappedInputManager::Button::Right)) {
-      moveRight();
-    }
-    if (!handledHorizontalNav && mappedInput.wasPressed(MappedInputManager::Button::Left)) {
-      moveLeft();
-    }
-    if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
-      if (inCarouselRow) {
-        lastCarouselBookIndex = selectorIndex;
-        selectorIndex = bookCount;
-        invalidateCoverCache();
-      } else {
-        selectorIndex = lastCarouselBookIndex;
-        invalidateCoverCache();
+    if (!carouselTouchOnly) {
+      if (!handledHorizontalNav && mappedInput.wasPressed(MappedInputManager::Button::Right)) {
+        moveRight();
       }
-      requestUpdate();
-    }
-    if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
-      if (inCarouselRow) {
-        lastCarouselBookIndex = selectorIndex;
-        selectorIndex = bookCount;
-        invalidateCoverCache();
-      } else {
-        selectorIndex = lastCarouselBookIndex;
-        invalidateCoverCache();
+      if (!handledHorizontalNav && mappedInput.wasPressed(MappedInputManager::Button::Left)) {
+        moveLeft();
       }
-      requestUpdate();
+      if (mappedInput.wasPressed(MappedInputManager::Button::Down)) {
+        if (inCarouselRow) {
+          lastCarouselBookIndex = selectorIndex;
+          selectorIndex = bookCount;
+          invalidateCoverCache();
+        } else {
+          selectorIndex = lastCarouselBookIndex;
+          invalidateCoverCache();
+        }
+        requestUpdate();
+      }
+      if (mappedInput.wasPressed(MappedInputManager::Button::Up)) {
+        if (inCarouselRow) {
+          lastCarouselBookIndex = selectorIndex;
+          selectorIndex = bookCount;
+          invalidateCoverCache();
+        } else {
+          selectorIndex = lastCarouselBookIndex;
+          invalidateCoverCache();
+        }
+        requestUpdate();
+      }
     }
   } else {
     const auto& metrics = UITheme::getInstance().getMetrics();
@@ -1872,6 +2113,39 @@ void HomeActivity::loop() {
       return;
     }
 
+    // Lyra and Lyra Extended show seven menu rows per page and turn pages by moving the
+    // selection past the last row -- a button motion. On touch boards a vertical swipe that
+    // starts in the menu turns the page instead, so the entries beyond the first page
+    // (Settings, last of nine) stay within reach. The swipe is clamped, not wrapped: reaching
+    // the end of a list should feel like the end, not a jump back to the top.
+    const auto uiTheme = static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme);
+    const bool pagedLyraMenu =
+        uiTheme == CrossPointSettings::UI_THEME::LYRA || uiTheme == CrossPointSettings::UI_THEME::LYRA_3_COVERS;
+    if (pagedLyraMenu && mappedInput.hasTouch()) {
+      MappedInputManager::SwipeDir swipe = MappedInputManager::SwipeDir::None;
+      int startX = 0;
+      int startY = 0;
+      int endX = 0;
+      int endY = 0;
+      const int menuTop = metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
+      if (mappedInput.wasSwipeWithPoints(swipe, startX, startY, endX, endY) && startY >= menuTop &&
+          (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down)) {
+        const int itemCount = static_cast<int>(menuItems.size());
+        if (itemCount > LyraTheme::kMenuPageItems) {
+          const int menuOffset = getHomeMenuSelectionOffset(recentBooks);
+          const int page = std::max(0, selectorIndex - menuOffset) / LyraTheme::kMenuPageItems;
+          const int lastPage = (itemCount - 1) / LyraTheme::kMenuPageItems;
+          const int nextPage =
+              swipe == MappedInputManager::SwipeDir::Up ? std::min(page + 1, lastPage) : std::max(page - 1, 0);
+          if (nextPage != page) {
+            selectorIndex = menuOffset + nextPage * LyraTheme::kMenuPageItems;
+            requestUpdate();
+          }
+        }
+        return;
+      }
+    }
+
     const int menuCount = getMenuItemCount();
     buttonNavigator.onNext([this, menuCount] {
       selectorIndex = ButtonNavigator::nextIndex(selectorIndex, menuCount);
@@ -1887,12 +2161,52 @@ void HomeActivity::loop() {
     updateHighlightedBookContext();
   }
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) && !(isCarousel && mappedInput.hasTouchHardware())) {
     activateSelectedHomeItem();
   }
 }
 
+bool HomeActivity::handleShortcutAction(const CrossPointSettings::SHORT_PWRBTN action) {
+  if (action == CrossPointSettings::SHORT_PWRBTN::FILE_BROWSER) {
+    onFileBrowserOpen();
+    return true;
+  }
+
+  if (action != CrossPointSettings::SHORT_PWRBTN::QUICK_ACTIONS) {
+    return false;
+  }
+
+  if (quickActionsLongPowerHandled && mappedInput.wasReleased(MappedInputManager::Button::Power)) {
+    quickActionsLongPowerHandled = false;
+    return true;
+  }
+
+  QuickActions::showConfiguredPopup(
+      quickActionsPopup, [this] { requestUpdate(); },
+      [this](const auto selectedAction) {
+        if (selectedAction == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH) {
+          // OptionPopup has already dismissed itself. Repaint Home before flushing
+          // so the full refresh cannot preserve the popup in the panel image.
+          initialFullRefresh = true;
+          requestUpdate();
+          return;
+        }
+        dispatchShortcutAction(selectedAction);
+      },
+      [](const auto selectedAction) {
+        return isPowerButtonActionAvailableOutsideReader(selectedAction) ||
+               selectedAction == CrossPointSettings::SHORT_PWRBTN::FILE_BROWSER;
+      });
+  return true;
+}
+
 void HomeActivity::render(RenderLock&&) {
+  if (quickActionsPopup.processRender(renderer, mappedInput)) {
+    return;
+  }
+
+  invalidatePolarityMismatchedCaches();
+
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
@@ -1914,7 +2228,8 @@ void HomeActivity::render(RenderLock&&) {
           [&menuItems](int index) { return menuItems[index].label; },
           [&menuItems](int index) { return menuItems[index].icon; });
       if (showMinimalHomeButtonHints(mappedInput)) {
-        const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+        const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT),
+                                                  tr(STR_DIR_UP), tr(STR_DIR_DOWN));
         GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
       }
       displayHomeBuffer();
@@ -1989,11 +2304,13 @@ void HomeActivity::render(RenderLock&&) {
         static_cast<const LyraCarouselTheme&>(GUI).registerButtonMenuTouchTargets(renderer,
                                                                                   static_cast<int>(menuItems.size()));
       }
-      if (!inCarouselRow) {
-        if (static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) ==
-            CrossPointSettings::UI_THEME::LYRA_CAROUSEL) {
+      if (static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::LYRA_CAROUSEL) {
+        const int menuHighlightIndex = mappedInput.hasTouchHardware()
+                                           ? carouselMenuTouchDownIndex
+                                           : (inCarouselRow ? -1 : selectorIndex - recentBooks.size());
+        if (menuHighlightIndex >= 0) {
           static_cast<const LyraCarouselTheme&>(GUI).drawButtonMenuSelectionOverlay(
-              renderer, static_cast<int>(menuItems.size()), selectorIndex - recentBooks.size(),
+              renderer, static_cast<int>(menuItems.size()), menuHighlightIndex,
               [&menuItems](int index) { return menuItems[index].label; },
               [&menuItems](int index) { return menuItems[index].icon; });
         }
@@ -2052,14 +2369,16 @@ void HomeActivity::render(RenderLock&&) {
   const int menuEndY = pageHeight - metrics.buttonHintsHeight;
   const int menuHeight = std::max(0, menuEndY - menuStartY);
 
+  const bool isCarouselTheme =
+      static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::LYRA_CAROUSEL;
+  const int menuSelectedIndex = isCarouselTheme && mappedInput.hasTouchHardware()
+                                    ? carouselMenuTouchDownIndex
+                                    : selectorIndex - getHomeMenuSelectionOffset(recentBooks);
   GUI.drawButtonMenu(
-      renderer, Rect{0, menuStartY, pageWidth, menuHeight}, static_cast<int>(menuItems.size()),
-      selectorIndex - getHomeMenuSelectionOffset(recentBooks),
+      renderer, Rect{0, menuStartY, pageWidth, menuHeight}, static_cast<int>(menuItems.size()), menuSelectedIndex,
       [&menuItems](int index) { return menuItems[index].label; },
       [&menuItems](int index) { return menuItems[index].icon; });
 
-  const bool isCarouselTheme =
-      static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::LYRA_CAROUSEL;
   const char* readLabel = recentBooks.empty() ? "" : tr(STR_READ);
   const auto labels = isCarouselTheme
                           ? mappedInput.mapLabels(readLabel, tr(STR_SELECT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT))
@@ -2091,10 +2410,28 @@ void HomeActivity::render(RenderLock&&) {
 }
 
 void HomeActivity::renderCarouselFrame(int bookIdx, int slotIdx) {
+  if (slotIdx < 0 || slotIdx >= kCarouselFrameCount) {
+    LOG_ERR("HOME", "carousel: invalid frame slot %d", slotIdx);
+    return;
+  }
   uint8_t* frameBuffer = renderer.getFrameBuffer();
   if (!frameBuffer || !gCarouselCache.frames[slotIdx]) return;
+#if defined(CROSSINK_ISSUE_666_MEMORY_DIAGNOSTICS) && defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
+  const uint8_t* const ownedFrame = gCarouselCache.frameStorage[slotIdx].get();
+  if (ownedFrame != gCarouselCache.frames[slotIdx]) {
+    LOG_ERR("DIAG666", "pre-copy slot=%d cache alias=%p owner=%p", slotIdx, gCarouselCache.frames[slotIdx], ownedFrame);
+    return;
+  }
+#endif
   renderCarouselFrameToCurrentBuffer(bookIdx, nullptr, nullptr, nullptr);
 
+#if defined(CROSSINK_ISSUE_666_MEMORY_DIAGNOSTICS) && defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
+  if (!logCarouselMemoryDiagnostic("pre-copy", slotIdx, frameBuffer, gCarouselCache.frames[slotIdx],
+                                   renderer.getBufferSize())) {
+    LOG_ERR("DIAG666", "pre-copy heap integrity failed; skipping carousel frame copy");
+    return;
+  }
+#endif
   memcpy(gCarouselCache.frames[slotIdx], frameBuffer, renderer.getBufferSize());
   gCarouselCache.frameBookIdx[slotIdx] = bookIdx;
   carouselFrames[slotIdx] = gCarouselCache.frames[slotIdx];
@@ -2108,8 +2445,14 @@ void HomeActivity::updateSlidingWindowCache(int centerIdx, int bookCount) {
 }
 
 void HomeActivity::onSelectBook(const std::string& path) {
-  gCarouselCache.invalidate();
-  freeCarouselFrames();
+  // renderCarouselFrame() uses the same static cache on the render task. Hold
+  // its lock while invalidating so a book selection cannot free a destination
+  // buffer midway through the snapshot copy.
+  {
+    RenderLock lock;
+    gCarouselCache.invalidate();
+    freeCarouselFrames();
+  }
   if (Storage.exists(CAROUSEL_CACHE_TMP_PATH)) {
     Storage.remove(CAROUSEL_CACHE_TMP_PATH);
   }

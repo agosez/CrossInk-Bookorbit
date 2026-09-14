@@ -14,7 +14,20 @@ enum class NetworkBootTarget : uint32_t {
   KOREADER_AUTH = 5,
   FILE_TRANSFER = 6,
   MANAGE_FONTS = 7,
+  BOOKORBIT_SYNC = 8,
 };
+
+// BOOKORBIT_SYNC payload: bit 16 set means bits 0-15 carry the paragraph index of the
+// position being synced. The rest of the position survives the reboot as saved progress
+// on the SD card; the paragraph anchor exists only in reader RAM, so it rides here.
+constexpr uint32_t BOOKORBIT_SYNC_PAYLOAD_HAS_PARAGRAPH = 1u << 16;
+// Bits 17-19 carry the reader's on-screen orientation plus one (0 = no reader
+// override). A per-book orientation lives in SETTINGS only while the reader is open
+// and its teardown restores the global value, so without this the sync screens would
+// come back from the minimal network reboot in the global orientation.
+// (Mirrors the KOReader sync orientation payload.)
+constexpr uint32_t BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_SHIFT = 17u;
+constexpr uint32_t BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_MASK = 0x7u << BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_SHIFT;
 
 constexpr bool isNetworkBootTargetValue(const uint32_t value) {
   switch (static_cast<NetworkBootTarget>(value)) {
@@ -24,6 +37,7 @@ constexpr bool isNetworkBootTargetValue(const uint32_t value) {
     case NetworkBootTarget::KOREADER_AUTH:
     case NetworkBootTarget::FILE_TRANSFER:
     case NetworkBootTarget::MANAGE_FONTS:
+    case NetworkBootTarget::BOOKORBIT_SYNC:
       return true;
   }
   return false;
@@ -34,11 +48,18 @@ static_assert(isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::KOREADER_SYNC)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::KOREADER_AUTH)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::FILE_TRANSFER)) &&
-                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::MANAGE_FONTS)),
+                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::MANAGE_FONTS)) &&
+                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SYNC)),
               "Every network boot target must pass RTC target validation");
 
-void silentRestart();          // home screen
-void silentRestartToReader();  // currently-open EPUB (APP_STATE.openEpubPath)
+void silentRestart();                                            // home screen
+void silentRestartToReader(bool cleanImageBaseOnEntry = false);  // currently-open EPUB (APP_STATE.openEpubPath)
+// Network activities use these after releasing Wi-Fi resources. They retain
+// the fast restart but apply the user's frontlight wake preference.
+void silentRestartAfterNetwork();
+void silentRestartToReaderAfterNetwork(bool cleanImageBaseOnEntry = false);
+// Reboots immediately after an activity releases exclusive raw storage.
+void restartToHomeAfterStorageHandoff();
 void silentRestartToNetwork(NetworkBootTarget target, uint32_t payload = 0);
 void silentRestartToManageFonts();
 

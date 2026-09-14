@@ -3,6 +3,8 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
+#include <algorithm>
+
 #include "MappedInputManager.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
@@ -27,10 +29,11 @@ XtcReaderChapterSelectionActivity::XtcReaderChapterSelectionActivity(GfxRenderer
 
 int XtcReaderChapterSelectionActivity::findChapterIndexForPage(const uint32_t page) const {
   if (!xtc) return 0;
-  const auto chapters = xtc->getChapters();
-  for (size_t i = 0; i < chapters.size(); i++) {
-    if (page >= chapters[i].startPage && page <= chapters[i].endPage) return static_cast<int>(i);
-  }
+  // Page-derived XTC tables are sorted by start page, so the current row can
+  // be found with bounded on-demand reads instead of retaining every row.
+  xtc::ChapterInfo chapter{};
+  size_t chapterIndex = 0;
+  if (xtc->getChapterForPage(page, chapter, &chapterIndex)) return static_cast<int>(chapterIndex);
   return 0;
 }
 
@@ -44,7 +47,7 @@ void XtcReaderChapterSelectionActivity::onEnter() {
   visibleRows = 1;
   initialViewportPending = true;
   uiReady = false;
-  app.setTheme(uiThemeTokens(uiTarget));
+  applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &XtcReaderChapterSelectionActivity::onRowEvent, this);
   app.setScreen(&XtcReaderChapterSelectionActivity::chapterScreen, this);
   requestUpdate();
@@ -56,16 +59,16 @@ void XtcReaderChapterSelectionActivity::onExit() {
 }
 
 void XtcReaderChapterSelectionActivity::selectChapter() {
-  const auto& chapters = xtc->getChapters();
-  if (selectorIndex >= 0 && selectorIndex < static_cast<int>(chapters.size())) {
-    setResult(PageResult{chapters[selectorIndex].startPage});
+  xtc::ChapterInfo chapter{};
+  if (selectorIndex >= 0 && xtc->getChapter(static_cast<size_t>(selectorIndex), chapter)) {
+    setResult(PageResult{chapter.startPage});
     finish();
   }
 }
 
 void XtcReaderChapterSelectionActivity::onRowEvent(const fui::ActionEvent& event, void* user) {
   auto* self = static_cast<XtcReaderChapterSelectionActivity*>(user);
-  const int totalItems = static_cast<int>(self->xtc->getChapters().size());
+  const int totalItems = static_cast<int>(self->xtc->getChapterCount());
   if (event.value < 0 || event.value >= totalItems) return;
   self->selectorIndex = event.value;
   self->app.clearTapFlash();
@@ -73,7 +76,7 @@ void XtcReaderChapterSelectionActivity::onRowEvent(const fui::ActionEvent& event
 }
 
 void XtcReaderChapterSelectionActivity::loop() {
-  const int totalItems = static_cast<int>(xtc->getChapters().size());
+  const int totalItems = static_cast<int>(xtc->getChapterCount());
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   const Rect header{safe.x, safe.y + metrics.topPadding, safe.width,
@@ -134,34 +137,37 @@ void XtcReaderChapterSelectionActivity::buildChapterScreen(UiApp::ScreenType& sc
       static_cast<int16_t>(renderer.getScreenWidth() - safe.x - safe.width),
       static_cast<int16_t>(renderer.getScreenHeight() - safe.y - safe.height), static_cast<int16_t>(safe.x)});
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
-  const auto& chapters = xtc->getChapters();
-  if (chapters.empty()) {
+  const size_t chapterCount = xtc->getChapterCount();
+  if (chapterCount == 0) {
     screen.centeredText(tr(STR_NO_CHAPTERS), screen.theme().bodyText);
     return;
   }
-  std::vector<fui::ListItem> items;
-  items.reserve(chapters.size());
-  for (size_t i = 0; i < chapters.size(); ++i) {
-    fui::ListItem row;
-    row.label = chapters[i].name[0] == '\0' ? tr(STR_UNNAMED) : chapters[i].name;
-    row.actionValue = static_cast<int16_t>(i);
-    items.push_back(row);
-  }
   fui::ListProps props;
-  props.items = items.data();
-  props.count = static_cast<uint16_t>(items.size());
-  props.selectedIndex = static_cast<int16_t>(selectorIndex);
-  props.action = ACTION_ROW;
-  props.inputMask = fui::InputTouch;
   props.labelText = screen.theme().bodyText;
   const auto rows = configureUiList(props, screen.theme(), screen.body());
   visibleRows = rows > 0 ? rows : 1;
-  const int chapterCount = static_cast<int>(chapters.size());
-  topIndex = initialViewportPending ? followListSelection(selectorIndex, 0, visibleRows, chapterCount)
-                                    : scrollListBy(topIndex, 0, visibleRows, chapterCount);
+  const int totalItems = static_cast<int>(chapterCount);
+  topIndex = initialViewportPending ? followListSelection(selectorIndex, 0, visibleRows, totalItems)
+                                    : scrollListBy(topIndex, 0, visibleRows, totalItems);
   initialViewportPending = false;
-  props.topIndex = static_cast<uint16_t>(topIndex);
+  const size_t drawCount =
+      std::min({static_cast<size_t>(visibleRows), CHAPTER_WINDOW_SIZE, chapterCount - static_cast<size_t>(topIndex)});
+  const size_t loaded = xtc->getChapters(static_cast<size_t>(topIndex), chapterWindow.data(), drawCount);
+  for (size_t i = 0; i < loaded; ++i) {
+    itemWindow[i] = fui::ListItem{};
+    itemWindow[i].label = chapterWindow[i].name[0] == '\0' ? tr(STR_UNNAMED) : chapterWindow[i].name;
+    itemWindow[i].actionValue = static_cast<int16_t>(topIndex + static_cast<int>(i));
+  }
+  props.items = itemWindow.data();
+  props.count = static_cast<uint16_t>(loaded);
+  props.selectedIndex = selectorIndex - topIndex;
+  props.action = ACTION_ROW;
+  props.inputMask = fui::InputTouch;
+  props.topIndex = 0;
   screen.list(props);
+  fui::drawListScrollIndicator(screen.target(), screen.body(), chapterCount, visibleRows, topIndex,
+                               screen.theme().listScrollWidth, screen.theme().listScrollSide,
+                               screen.theme().listScrollInset);
 }
 
 void XtcReaderChapterSelectionActivity::render(RenderLock&&) {
@@ -178,7 +184,8 @@ void XtcReaderChapterSelectionActivity::render(RenderLock&&) {
   uiReady = false;
   app.render();
   uiReady = true;
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels =
+      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   renderer.displayBuffer();
 }

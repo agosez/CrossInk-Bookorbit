@@ -20,12 +20,14 @@ constexpr uint8_t CONFIG_VERSION = 2;
 
 void KOReaderCredentialStore::toJson(JsonDocument& doc) const {
   doc["cfgVersion"] = CONFIG_VERSION;
-  doc["username"] = getUsername();
-  doc["password_obf"] = obfuscation::obfuscateToBase64(getPassword());
-  doc["serverUrl"] = getServerUrl();
-  doc["matchMethod"] = static_cast<uint8_t>(getMatchMethod());
-  doc["sendMetadata"] = getSendMetadata();
-  doc["syncBehavior"] = static_cast<uint8_t>(getSyncBehavior());
+  // Serialize fields directly: public getters lazy-load and saveToFile() already
+  // holds the store mutex. Calling a getter here could recursively load while locked.
+  doc["username"] = username;
+  doc["password_obf"] = obfuscation::obfuscateToBase64(password);
+  doc["serverUrl"] = serverUrl;
+  doc["matchMethod"] = static_cast<uint8_t>(matchMethod);
+  doc["sendMetadata"] = sendMetadata;
+  doc["syncBehavior"] = static_cast<uint8_t>(syncBehavior);
 }
 
 bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
@@ -91,11 +93,13 @@ bool KOReaderCredentialStore::fromJson(JsonVariantConst doc) {
 }
 
 void KOReaderCredentialStore::setCredentials(const std::string& user, const std::string& pass) {
+  ensureLoaded();
   username = user;
   password = pass;
 }
 
 std::string KOReaderCredentialStore::getMd5Password() const {
+  ensureLoaded();
   if (password.empty()) {
     return "";
   }
@@ -109,17 +113,18 @@ std::string KOReaderCredentialStore::getMd5Password() const {
   return md5.toString().c_str();
 }
 
-bool KOReaderCredentialStore::hasCredentials() const { return !username.empty() && !password.empty(); }
-
-void KOReaderCredentialStore::clearCredentials() {
-  username.clear();
-  password.clear();
-  saveToFile();
+bool KOReaderCredentialStore::hasCredentials() const {
+  ensureLoaded();
+  return !username.empty() && !password.empty();
 }
 
-void KOReaderCredentialStore::setServerUrl(const std::string& url) { serverUrl = url; }
+void KOReaderCredentialStore::setServerUrl(const std::string& url) {
+  ensureLoaded();
+  serverUrl = url;
+}
 
 std::string KOReaderCredentialStore::getBaseUrl() const {
+  ensureLoaded();
   std::string url;
   if (serverUrl.empty()) {
     url = DEFAULT_SERVER_URL;
@@ -140,11 +145,18 @@ std::string KOReaderCredentialStore::getBaseUrl() const {
 
 bool KOReaderCredentialStore::usesCrossPointSyncServer() const { return getBaseUrl() == DEFAULT_SERVER_URL; }
 
-void KOReaderCredentialStore::setMatchMethod(DocumentMatchMethod method) { matchMethod = method; }
+void KOReaderCredentialStore::setMatchMethod(DocumentMatchMethod method) {
+  ensureLoaded();
+  matchMethod = method;
+}
 
-void KOReaderCredentialStore::setSendMetadata(bool enabled) { sendMetadata = enabled; }
+void KOReaderCredentialStore::setSendMetadata(bool enabled) {
+  ensureLoaded();
+  sendMetadata = enabled;
+}
 
 void KOReaderCredentialStore::setSyncBehavior(KOReaderSyncBehavior behavior) {
+  ensureLoaded();
   if (static_cast<uint8_t>(behavior) > static_cast<uint8_t>(KOReaderSyncBehavior::SMART)) {
     behavior = KOReaderSyncBehavior::ASK_EVERY_TIME;
   }

@@ -5,6 +5,52 @@ This is the canonical repo instruction file.
 
 Project: Open-source e-reader firmware for ESP32-C3 and ESP32-S3 devices.
 
+## Architecture And Fast Navigation
+
+Start narrow. Read the named entry point and its direct collaborators before
+scanning a whole subsystem; `rg` exact symbols and `rg --files <directory>`
+are the default discovery tools. The repository is intentionally split between
+application policy here and reusable hardware/UI implementation in the nested
+SDK.
+
+| Area | Read first | Owns |
+| --- | --- | --- |
+| Boot/runtime | `src/main.cpp`, `src/CrossPointSettings.h`, `src/CrossPointState.h` | Hardware startup, app singletons, global input/power routing, resume and sleep policy. |
+| Screen flow | `src/activities/Activity.h`, `src/activities/ActivityManager.{h,cpp}` | The activity stack, lifecycle, result callbacks, render scheduling, and top-level navigation factories. |
+| Reading | `src/activities/reader/ReaderActivity.h`, the matching `EpubReaderActivity`, `TxtReaderActivity`, or `XtcReaderActivity` | Reader UI, controls, progress, dictionary/clipping flows, and format dispatch. |
+| EPUB engine | `lib/Epub/Epub.{h,cpp}`, `lib/Epub/Epub/` | ZIP/OPF/HTML/CSS parsing, layout, page model, hyphenation, images, and SD cache serialization. |
+| UI and input | `src/components/UITheme.{h,cpp}`, `src/MappedInputManager.{h,cpp}`, `src/QuickActions.{h,cpp}` | App theme policy, logical buttons/gestures, shortcuts, and app-specific touch components. |
+| Hardware boundary | `lib/hal/`, `include/AppCapabilities.h`, `include/DeviceCapabilities.h`, then `freeink-sdk/` | CrossInk HAL wrappers and capability gating; display, storage, input, power, and board drivers live in the SDK. |
+| Network and transfers | `src/activities/network/`, `src/network/CrossPointWebServer.{h,cpp}` | Wi-Fi flow, web/WebDAV/WebSocket transfer, OTA, Calibre, Nearby, and USB Drive activities. |
+| Persistence | `lib/Serialization/`, `src/*Store.*`, `src/clippings/`, `docs/data-cache.md` | Settings/session data plus per-feature SD stores; EPUB cache is a separate layout/cache concern. |
+
+### Runtime Boundaries
+
+- `main.cpp` owns the global `renderer`, `mappedInputManager`, and `activityManager`; it initializes the device and calls the activity loop.
+- `ActivityManager` owns activities with `std::unique_ptr`, applies push/pop/replace changes on the main loop, and renders on a dedicated FreeRTOS task. Do not mutate activity stack or renderer state from arbitrary tasks; use its request/navigation APIs and `RenderLock` contract.
+- Activities are foreground-only screen controllers. Put durable setup in `onEnter()`, release resources in `onExit()`, and use `startActivityForResult()`/`setResult()` for nested flows rather than hand-rolled global state.
+- The app uses `SETTINGS` for persisted preferences and `APP_STATE` for persisted session/runtime context. Before adding another store or global, search these and the existing `*Store` classes.
+- Readers own reader interaction and persistence coordination; `lib/Epub` owns content parsing/layout/cache data. Keep UI policy out of the EPUB library and reusable device behavior out of app activities.
+- App code should use `lib/hal` and FreeInkUI-facing abstractions. Change `freeink-sdk` only when behavior is broadly hardware/UI reusable; a parent-repo change must also advance the submodule gitlink to integrate an SDK fix.
+
+### Directory And Generated-Asset Map
+
+- `src/activities/{boot_sleep,home,reader,settings,network,util}`: screen controllers grouped by user flow.
+- `src/components/`: shared app UI, themes, touch helpers, and generated icon headers. `src/util/` holds app-domain helpers such as dictionaries, cache utilities, navigation, and string/layout helpers.
+- `lib/EpdFont`, `lib/GfxRenderer`, `lib/FsHelpers`, `lib/Memory`, `lib/I18n`, `lib/Serialization`, `lib/Txt`, and `lib/Xtc` are focused local libraries. Prefer extending the closest existing library over adding a cross-cutting helper.
+- `freeink-sdk/` is a submodule providing the FreeInkUI, HAL-backed device drivers, board profiles, and network primitives. Check its pinned SHA with `git submodule status` before diagnosing or claiming an SDK integration.
+- `test/` is a native CMake/CTest suite with isolated target folders; `test/epubs-src/` contains fixture sources and `test/device/` contains device-oriented checks. `scripts/run_simulator_smoke_test.py` is the broad app-flow regression tripwire.
+- `web/templates/`, `web/pages/`, and `web/assets/` are the editable web portal sources. `site/` is repository website content, not firmware UI.
+- Do not edit generated outputs: `src/network/html/*.generated.h` (from `scripts/build_web.py`), `lib/I18n/I18nKeys.h`, `I18nStrings.h`, and `I18nStrings.cpp` (from `scripts/gen_i18n.py`), icon headers listed by `src/components/icons/*.manifest` (from `scripts/generate_icons.py`), or EPUB hyphenation tries under `lib/Epub/Epub/hyphenation/generated/`.
+
+### Target Selection
+
+- `default`: Xteink X3/X4, ESP32-C3, buttons, SPI SD, no touch/PSRAM/USB Drive.
+- `sticky`: reTerminal Sticky, ESP32-S3, touch, SPI SD, PSRAM framebuffer.
+- `x4-pro`: Xteink X4 Pro, ESP32-S3, touch, SDMMC, PSRAM framebuffer, and USB Drive capability.
+- `simulator`, `simulator-X3`, `sticky-simulator`, and `x4-pro-simulator`: native profiles. Match the simulator profile to the capability/device branch being changed.
+- `platformio.ini` is the capability-source build matrix. Read the matching environment's flags before adding `#if` branches; use `AppCapabilities`/device capability helpers rather than duplicating macro checks in activities.
+
 ## Core Rules
 
 - Role: Senior Embedded Systems Engineer for ESP-IDF / Arduino-ESP32 work.
@@ -84,7 +130,7 @@ Project: Open-source e-reader firmware for ESP32-C3 and ESP32-S3 devices.
 
 ## Activity Lifecycle
 
-- Activities are heap-allocated and deleted on exit.
+- Activities are heap-allocated but owned by `ActivityManager` `std::unique_ptr`s; do not manually delete them.
 - Allocate long-lived buffers and tasks in `onEnter()`.
 - Free resources in reverse order in `onExit()`.
 - Delete FreeRTOS tasks before the activity is destroyed.
@@ -123,6 +169,7 @@ Project: Open-source e-reader firmware for ESP32-C3 and ESP32-S3 devices.
 - Do not edit generated files directly.
 - Web portal headers under `src/network/html/*.generated.h` are built by `scripts/build_web.py` from sources in `web/`: pages compose `web/templates/base.html` (shared chrome) with `web/pages/<slug>.{html,css,js}`, plus shared assets `web/assets/style.css` (served at `/style.css`) and `web/assets/logo.png` (served at `/logo.png`). Edit the `web/` sources, never the generated headers.
 - I18n generated files under `lib/I18n/` come from `lib/I18n/translations/*.yaml` via `scripts/gen_i18n.py`.
+- Icon headers are generated from the manifests in `src/components/icons/` with `scripts/generate_icons.py`; hyphenation trie headers are generated under `lib/Epub/Epub/hyphenation/generated/`. Edit their source manifests/data and regenerate.
 
 ## Cache Format
 

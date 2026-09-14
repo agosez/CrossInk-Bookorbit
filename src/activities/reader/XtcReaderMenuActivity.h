@@ -2,10 +2,13 @@
 
 #include <I18n.h>
 
+#include <array>
+#include <cstddef>
 #include <string>
 #include <vector>
 
 #include "activities/Activity.h"
+#include "components/UiAppHost.h"
 #include "util/ButtonNavigator.h"
 
 class XtcReaderMenuActivity final : public Activity {
@@ -32,6 +35,10 @@ class XtcReaderMenuActivity final : public Activity {
   bool allowGlobalHomeGesture() const override { return false; }
 
  private:
+  using UiHost = UiAppHost<8, 2>;
+  using UiApp = UiHost::App;
+  static constexpr size_t kMaxMenuItems = 7;
+
   struct MenuItem {
     MenuAction action;
     StrId labelId;
@@ -43,5 +50,16 @@ class XtcReaderMenuActivity final : public Activity {
   ButtonNavigator buttonNavigator;
   std::string title;
   std::vector<MenuItem> items;
+  std::array<freeink::ui::ListItem, kMaxMenuItems> listItems{};
   int selectedIndex = 0;
+  UiHost ui;
+  int visibleRows = 1;
+  int topIndex = 0;
+  int listHeaderHeight = 0;
+
+  static void listScreen(UiApp::ScreenType& screen, void* user);
+  static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
+  void buildListScreen(UiApp::ScreenType& screen);
+  void refreshListItems();
+  void selectCurrent();
 };

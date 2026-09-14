@@ -71,6 +71,11 @@ void HalDisplay::displayBuffer(HalDisplay::RefreshMode mode, bool turnOffScreen)
   einkDisplay.displayBuffer(convertRefreshMode(mode), turnOffScreen);
 }
 
+void HalDisplay::setInverted(bool inverted) {
+  HalSpiBus::Lock spiLock;
+  einkDisplay.setInverted(inverted);
+}
+
 void HalDisplay::displayBufferAsync(HalDisplay::RefreshMode mode) {
   if (gpio.deviceIsX3() && mode == RefreshMode::HALF_REFRESH) {
     einkDisplay.requestResync(1);
@@ -83,7 +88,17 @@ void HalDisplay::waitRefreshComplete() { einkDisplay.waitRefreshComplete(); }
 
 bool HalDisplay::supportsAsyncRefresh() const { return einkDisplay.supportsAsyncRefresh(); }
 
-bool HalDisplay::supportsAsyncGrayscaleBase() const { return !gpio.deviceIsX3() && einkDisplay.supportsAsyncRefresh(); }
+HalDisplay::GrayscaleCapabilities HalDisplay::grayscaleCapabilities(GrayscaleMode mode) const {
+  return einkDisplay.grayscaleCapabilities(mode);
+}
+
+bool HalDisplay::supportsAsyncGrayscaleBase() const { return grayscaleCapabilities().asyncBase; }
+
+bool HalDisplay::displayGrayscaleBase(GrayscaleMode mode, RefreshMode fallback, bool turnOffScreen) {
+  HalSpiBus::Lock spiLock;
+  if (gpio.deviceIsX3() && fallback == HALF_REFRESH) einkDisplay.requestResync(1);
+  return einkDisplay.displayGrayscaleBase(mode, convertRefreshMode(fallback), turnOffScreen);
+}
 
 void HalDisplay::refreshDisplay(HalDisplay::RefreshMode mode, bool turnOffScreen) {
   HalSpiBus::Lock spiLock;
@@ -94,6 +109,8 @@ void HalDisplay::refreshDisplay(HalDisplay::RefreshMode mode, bool turnOffScreen
 
   einkDisplay.refreshDisplay(convertRefreshMode(mode), turnOffScreen);
 }
+
+bool HalDisplay::isInverted() const { return einkDisplay.isInverted(); }
 
 void HalDisplay::deepSleep() {
   HalSpiBus::Lock spiLock;
@@ -145,6 +162,14 @@ void HalDisplay::writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* rows, ui
   HalSpiBus::Lock spiLock;
   einkDisplay.writeGrayscalePlaneStrip(lsbPlane ? EInkDisplay::GRAY_PLANE_LSB : EInkDisplay::GRAY_PLANE_MSB, rows,
                                        yStart, numRows);
+}
+
+bool HalDisplay::shouldSkipImageBlanking() const {
+  // CrossInk's extra white-image pass is redundant on UC8179. Its driver
+  // always supports async display; the existing query also excludes inverted
+  // output, a pending inversion transition, and an uninitialized driver.
+  return BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8179 &&
+         einkDisplay.supportsAsyncRefresh();
 }
 
 bool HalDisplay::supportsStripGrayscale() const { return einkDisplay.supportsStripGrayscale(); }

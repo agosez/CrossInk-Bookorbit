@@ -4,6 +4,9 @@
 #include <Logging.h>
 #include <Serialization.h>
 
+#include "tables/TableColumnLayout.h"
+#include "tables/TableTextLineOrder.h"
+
 namespace {
 
 constexpr uint16_t MAX_PAGE_ELEMENTS = 1024;
@@ -13,6 +16,13 @@ constexpr uint8_t MAX_TABLE_LINES_PER_CELL = 64;
 static_assert(TableFragmentCell::MAX_SERIALIZED_LINES == MAX_TABLE_LINES_PER_CELL);
 static_assert(TableFragmentRow::MAX_SERIALIZED_CELLS == MAX_TABLE_CELLS_PER_ROW);
 static_assert(PageTableFragment::MAX_SERIALIZED_ROWS == MAX_TABLE_ROWS_PER_FRAGMENT);
+
+uint16_t tableSelectionForLine(const size_t elementIndex, const uint8_t logicalColumn) {
+  if (elementIndex >= MAX_PAGE_ELEMENTS || logicalColumn >= MAX_TABLE_CELLS_PER_ROW) {
+    return UINT16_MAX;
+  }
+  return static_cast<uint16_t>(elementIndex * MAX_TABLE_CELLS_PER_ROW + logicalColumn);
+}
 
 template <typename Predicate>
 void renderFilteredPageElements(const std::vector<std::unique_ptr<PageElement>>& elements, GfxRenderer& renderer,
@@ -150,12 +160,13 @@ std::unique_ptr<PageHorizontalRule> PageHorizontalRule::deserialize(FsFile& file
 }
 
 bool TableFragmentCell::serialize(FsFile& file) const {
-  if (lines.size() > MAX_TABLE_LINES_PER_CELL) {
-    LOG_ERR("PTB", "Serialization failed: cell line count %u exceeds maximum", static_cast<uint32_t>(lines.size()));
+  if (colSpan == 0 || colSpan > MAX_TABLE_CELLS_PER_ROW || lines.size() > MAX_TABLE_LINES_PER_CELL) {
+    LOG_ERR("PTB", "Serialization failed: invalid cell span/line count (span=%u lines=%u)", colSpan,
+            static_cast<uint32_t>(lines.size()));
     return false;
   }
 
-  if (!serialization::tryWritePod(file, isHeader) ||
+  if (!serialization::tryWritePod(file, isHeader) || !serialization::tryWritePod(file, colSpan) ||
       !serialization::tryWritePod(file, static_cast<uint8_t>(lines.size()))) {
     LOG_ERR("PTB", "Serialization failed: could not write table cell header");
     return false;
@@ -171,12 +182,14 @@ bool TableFragmentCell::serialize(FsFile& file) const {
 
 bool TableFragmentCell::deserialize(FsFile& file, TableFragmentCell& outCell) {
   uint8_t lineCount = 0;
-  if (!serialization::tryReadPod(file, outCell.isHeader) || !serialization::tryReadPod(file, lineCount)) {
+  if (!serialization::tryReadPod(file, outCell.isHeader) || !serialization::tryReadPod(file, outCell.colSpan) ||
+      !serialization::tryReadPod(file, lineCount)) {
     LOG_ERR("PTB", "Deserialization failed: truncated table cell metadata");
     return false;
   }
-  if (lineCount > MAX_TABLE_LINES_PER_CELL) {
-    LOG_ERR("PTB", "Deserialization failed: cell line count %u exceeds maximum", lineCount);
+  if (outCell.colSpan == 0 || outCell.colSpan > MAX_TABLE_CELLS_PER_ROW || lineCount > MAX_TABLE_LINES_PER_CELL) {
+    LOG_ERR("PTB", "Deserialization failed: invalid cell span/line count (span=%u lines=%u)", outCell.colSpan,
+            lineCount);
     return false;
   }
 
@@ -197,6 +210,14 @@ bool TableFragmentRow::serialize(FsFile& file) const {
   if (cells.size() > MAX_TABLE_CELLS_PER_ROW) {
     LOG_ERR("PTB", "Serialization failed: row cell count %u exceeds maximum", static_cast<uint32_t>(cells.size()));
     return false;
+  }
+  uint8_t logicalColumns = 0;
+  for (const auto& cell : cells) {
+    if (cell.colSpan == 0 || static_cast<uint8_t>(logicalColumns + cell.colSpan) > MAX_TABLE_CELLS_PER_ROW) {
+      LOG_ERR("PTB", "Serialization failed: row colspan exceeds maximum");
+      return false;
+    }
+    logicalColumns = static_cast<uint8_t>(logicalColumns + cell.colSpan);
   }
 
   if (!serialization::tryWritePod(file, height) || !serialization::tryWritePod(file, headerSeparator) ||
@@ -226,11 +247,17 @@ bool TableFragmentRow::deserialize(FsFile& file, TableFragmentRow& outRow) {
 
   outRow.cells.clear();
   outRow.cells.reserve(cellCount);
+  uint8_t logicalColumns = 0;
   for (uint8_t i = 0; i < cellCount; i++) {
     TableFragmentCell cell;
     if (!TableFragmentCell::deserialize(file, cell)) {
       return false;
     }
+    if (static_cast<uint8_t>(logicalColumns + cell.colSpan) > MAX_TABLE_CELLS_PER_ROW) {
+      LOG_ERR("PTB", "Deserialization failed: row colspan exceeds maximum");
+      return false;
+    }
+    logicalColumns = static_cast<uint8_t>(logicalColumns + cell.colSpan);
     outRow.cells.push_back(std::move(cell));
   }
   return true;
@@ -256,29 +283,53 @@ void PageTableFragment::render(GfxRenderer& renderer, const int fontId, const in
 
   std::vector<int16_t> columnStarts(columnCount + 1);
   for (uint8_t i = 0; i < columnCount; i++) {
-    columnStarts[i] = static_cast<int16_t>((static_cast<uint32_t>(width) * i) / columnCount);
+    columnStarts[i] = static_cast<int16_t>(TableColumnLayout::columnStart(width, columnCount, i));
   }
-  columnStarts[columnCount] = static_cast<int16_t>(width - 1);
+  // Text clips use a half-open right edge; keep the final cell's full width
+  // available while the border itself remains one pixel inside the table.
+  columnStarts[columnCount] = static_cast<int16_t>(TableColumnLayout::columnStart(width, columnCount, columnCount));
 
   renderer.drawRect(drawX, drawY, width, totalHeight, foregroundBlack);
-  for (uint8_t i = 1; i < columnCount; i++) {
-    const int x = drawX + columnStarts[i];
-    renderer.drawLine(x, drawY, x, drawY + totalHeight - 1, foregroundBlack);
-  }
 
   int currentY = 0;
   for (size_t rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
     const auto& row = rows[rowIndex];
 
-    for (size_t colIndex = 0; colIndex < row.cells.size() && colIndex < columnCount; colIndex++) {
-      const auto& cell = row.cells[colIndex];
-      const int cellTextX = drawX + columnStarts[colIndex] + cellPadding;
-      const int cellTextY = drawY + currentY + cellPadding;
+    uint8_t logicalColumn = 0;
 
+    for (size_t colIndex = 0; colIndex < row.cells.size() && colIndex < columnCount; colIndex++) {
+      if (logicalColumn >= columnCount) break;
+      const auto& cell = row.cells[colIndex];
+      const uint8_t span =
+          std::min<uint8_t>(cell.colSpan == 0 ? 1 : cell.colSpan, static_cast<uint8_t>(columnCount - logicalColumn));
+      const int cellTextX = drawX + columnStarts[logicalColumn] + cellPadding;
+      const int cellTextY = drawY + currentY + cellPadding;
+      const int cellTextWidth = columnStarts[logicalColumn + span] - columnStarts[logicalColumn] - cellPadding * 2;
+      const int cellTextHeight = row.height - cellPadding * 2;
+
+      renderer.beginTextClip(cellTextX, cellTextY, cellTextWidth, cellTextHeight);
       for (size_t lineIndex = 0; lineIndex < cell.lines.size(); lineIndex++) {
         cell.lines[lineIndex]->render(renderer, fontId, cellTextX, cellTextY + static_cast<int>(lineIndex) * lineHeight,
                                       foregroundBlack);
       }
+      renderer.endTextClip();
+      logicalColumn = static_cast<uint8_t>(logicalColumn + span);
+    }
+
+    // Colspan cells own the interior vertical boundaries they cover. Draw
+    // only boundaries that are present in this row, preserving the existing
+    // one-column grid for ordinary cells.
+    logicalColumn = 0;
+    for (const auto& cell : row.cells) {
+      if (logicalColumn >= columnCount) break;
+      const uint8_t span =
+          std::min<uint8_t>(cell.colSpan == 0 ? 1 : cell.colSpan, static_cast<uint8_t>(columnCount - logicalColumn));
+      if (logicalColumn + span < columnCount) {
+        const int x = drawX + columnStarts[logicalColumn + span];
+        renderer.drawLine(x, drawY + currentY, x, drawY + currentY + row.height - 1, foregroundBlack);
+      }
+      logicalColumn = static_cast<uint8_t>(logicalColumn + span);
+      if (logicalColumn >= columnCount) break;
     }
 
     currentY += row.height;
@@ -287,6 +338,70 @@ void PageTableFragment::render(GfxRenderer& renderer, const int fontId, const in
       renderer.drawLine(drawX, drawY + currentY, drawX + width - 1, drawY + currentY, lineWidth, foregroundBlack);
     }
   }
+}
+
+bool Page::forEachTextLine(const PageTextLineVisitor visitor, void* context) const {
+  if (!visitor) return false;
+
+  for (size_t elementIndex = 0; elementIndex < elements.size(); ++elementIndex) {
+    const auto& element = elements[elementIndex];
+    if (!element) continue;
+
+    if (element->getTag() == TAG_PageLine) {
+      const auto& line = static_cast<const PageLine&>(*element);
+      if (line.getBlock() && !visitor({line.getBlock().get(), line.xPos, line.yPos}, context)) {
+        return false;
+      }
+      continue;
+    }
+
+    if (element->getTag() != TAG_PageTableFragment) continue;
+    const auto& fragment = static_cast<const PageTableFragment&>(*element);
+    if (fragment.columnCount == 0 || fragment.rows.empty() || fragment.width < 2) continue;
+
+    int currentY = 0;
+    for (const auto& row : fragment.rows) {
+      const bool visited =
+          TableTextLineOrder::forEachCellLineInVisualOrder(row, [&](const size_t cellIndex, const size_t lineIndex) {
+            uint8_t logicalColumn = 0;
+            for (size_t precedingCell = 0; precedingCell < cellIndex; ++precedingCell) {
+              if (logicalColumn >= fragment.columnCount) return true;
+              const auto& cell = row.cells[precedingCell];
+              logicalColumn = static_cast<uint8_t>(
+                  logicalColumn + std::min<uint8_t>(cell.colSpan == 0 ? 1 : cell.colSpan,
+                                                    static_cast<uint8_t>(fragment.columnCount - logicalColumn)));
+            }
+            if (logicalColumn >= fragment.columnCount) return true;
+
+            const auto& cell = row.cells[cellIndex];
+            if (!cell.lines[lineIndex]) return true;
+            const uint8_t span = std::min<uint8_t>(cell.colSpan == 0 ? 1 : cell.colSpan,
+                                                   static_cast<uint8_t>(fragment.columnCount - logicalColumn));
+            const int cellX = fragment.xPos +
+                              TableColumnLayout::columnStart(fragment.width, fragment.columnCount, logicalColumn) +
+                              fragment.cellPadding;
+            const int cellY = fragment.yPos + currentY + fragment.cellPadding;
+            const int cellWidth = TableColumnLayout::innerWidth(fragment.width, fragment.columnCount, logicalColumn,
+                                                                span, fragment.cellPadding);
+            const int cellHeight = std::max(0, static_cast<int>(row.height) - fragment.cellPadding * 2);
+            const int lineY = cellY + static_cast<int>(lineIndex) * fragment.lineHeight;
+            const PageTextLine line{cell.lines[lineIndex].get(),
+                                    cellX,
+                                    lineY,
+                                    cellX,
+                                    cellY,
+                                    cellWidth,
+                                    cellHeight,
+                                    fragment.lineHeight,
+                                    true,
+                                    tableSelectionForLine(elementIndex, logicalColumn)};
+            return visitor(line, context);
+          });
+      if (!visited) return false;
+      currentY += row.height;
+    }
+  }
+  return true;
 }
 
 bool PageTableFragment::serialize(FsFile& file) {
@@ -384,6 +499,42 @@ void Page::renderWithImagePlaceholders(GfxRenderer& renderer, const int fontId, 
       pageImage.render(renderer, fontId, xOffset, yOffset, foregroundBlack);
     }
   }
+}
+
+uint16_t Page::imageEstimateUnits(const uint16_t viewportHeight) const {
+  bool hasImage = false;
+  bool hasReadableContent = false;
+  uint32_t imageHeight = 0;
+  for (const auto& element : elements) {
+    switch (element->getTag()) {
+      case TAG_PageImage: {
+        hasImage = true;
+        const auto& image = static_cast<const PageImage&>(*element).getImageBlock();
+        if (viewportHeight > 0) {
+          const int imageTop = std::max(0, static_cast<int>(element->yPos));
+          const int imageBottom =
+              std::min(static_cast<int>(viewportHeight),
+                       static_cast<int>(element->yPos) + std::max(0, static_cast<int>(image.getHeight())));
+          if (imageBottom > imageTop) {
+            imageHeight += static_cast<uint32_t>(imageBottom - imageTop);
+          }
+        }
+        break;
+      }
+      case TAG_PageLine:
+      case TAG_PageTableFragment:
+        hasReadableContent = true;
+        break;
+      case TAG_PageHorizontalRule:
+        break;
+    }
+  }
+
+  if (!hasImage) return 0;
+  if (!hasReadableContent || viewportHeight == 0) return PageCountEstimator::kUnitsPerPage;
+
+  const uint32_t units = (imageHeight * PageCountEstimator::kUnitsPerPage) / viewportHeight;
+  return static_cast<uint16_t>(std::min<uint32_t>(PageCountEstimator::kUnitsPerPage, units));
 }
 
 bool Page::serialize(FsFile& file) const {
@@ -542,4 +693,12 @@ std::unique_ptr<Page> Page::deserialize(FsFile& file) {
   }
 
   return page;
+}
+
+void Page::prepareImageCaches() const {
+  for (const auto& element : elements) {
+    if (element->getTag() == TAG_PageImage) {
+      static_cast<const PageImage&>(*element).getImageBlock().prepareCache();
+    }
+  }
 }

@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <Memory.h>
 
 #include <cstring>
 
@@ -35,10 +36,8 @@ std::string normalizeDownloadFolder(std::string folder) {
 
 int OpdsServerListActivity::getItemCount() const {
   int count = static_cast<int>(OPDS_STORE.getCount());
-  // In settings mode, append virtual "Add Server" and "Download Folder" items.
-  if (!pickerMode) {
-    count += 2;
-  }
+  // Both modes append "Add Server"; Settings also includes Download Folder.
+  count += pickerMode ? 1 : 2;
   return count;
 }
 
@@ -69,7 +68,7 @@ void OpdsServerListActivity::onEnter() {
   uiReady = false;
   visibleRows = 1;
   topIndex = 0;
-  app.setTheme(uiThemeTokens(uiTarget));
+  applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &OpdsServerListActivity::onRowEvent, this);
   app.setScreen(&OpdsServerListActivity::listScreen, this);
   requestUpdate();
@@ -138,9 +137,21 @@ void OpdsServerListActivity::handleSelection() {
   const auto serverCount = static_cast<int>(OPDS_STORE.getCount());
 
   if (pickerMode) {
-    // Picker mode: selecting a server navigates to the OPDS browser
+    // Picker mode: select a server or add the first one without leaving the flow.
     if (selectedIndex < serverCount) {
       activityManager.goToOpdsServer(static_cast<uint32_t>(selectedIndex));
+    } else {
+      auto editor = makeUniqueNoThrow<OpdsSettingsActivity>(renderer, mappedInput, -1);
+      if (!editor) {
+        LOG_ERR("OPDS", "OOM: OPDS settings activity");
+        return;
+      }
+      startActivityForResult(std::move(editor), [this](const ActivityResult&) {
+        OPDS_STORE.loadFromFile();
+        selectedIndex = 0;
+        topIndex = 0;
+        requestUpdate();
+      });
     }
     return;
   }
@@ -212,12 +223,12 @@ void OpdsServerListActivity::buildListScreen(UiApp::ScreenType& screen) {
     item.actionValue = static_cast<int16_t>(i);
     items.push_back(item);
   }
-  if (!pickerMode) {
-    fui::ListItem addServer;
-    addServer.label = tr(STR_ADD_SERVER);
-    addServer.actionValue = static_cast<int16_t>(serverCount);
-    items.push_back(addServer);
+  fui::ListItem addServer;
+  addServer.label = tr(STR_ADD_SERVER);
+  addServer.actionValue = static_cast<int16_t>(serverCount);
+  items.push_back(addServer);
 
+  if (!pickerMode) {
     fui::ListItem folder;
     folder.label = tr(STR_OPDS_DOWNLOAD_FOLDER);
     folder.subtitle = SETTINGS.opdsDownloadFolder[0] ? SETTINGS.opdsDownloadFolder : tr(STR_OPDS_SD_ROOT);
@@ -257,7 +268,8 @@ void OpdsServerListActivity::render(RenderLock&&) {
   app.render();
   uiReady = true;
 
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels =
+      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer();

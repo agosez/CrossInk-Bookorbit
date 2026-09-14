@@ -450,21 +450,41 @@ void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, 
         TouchRegistry::Button);
   }
 
-  // Ensure button hints always "win" visually even if other elements accidentally render into this area.
-  renderer.fillRect(leftGroupX, outlineY, groupWidth, hintHeight, false);
-  renderer.fillRect(rightGroupX, outlineY, groupWidth, hintHeight, false);
+  const int outerButtonWidth = groupWidth / 2;
+  const int innerButtonWidth = groupWidth - outerButtonWidth;
+  const auto drawHintGroup = [&renderer, outlineY, hintHeight](const int x, const int width) {
+    // Ensure button hints always "win" visually even if other elements accidentally render into this area.
+    renderer.fillRect(x, outlineY, width, hintHeight, false);
+    renderer.drawRoundedRect(x, outlineY, width, hintHeight, 2, kBottomRadius, true);
+  };
+  const auto drawGroupedHints = [&drawHintGroup, outerButtonWidth, innerButtonWidth](
+                                    const int groupX, const char* outerLabel, const char* innerLabel) {
+    if (outerLabel != nullptr && innerLabel != nullptr) {
+      drawHintGroup(groupX, outerButtonWidth + innerButtonWidth);
+    } else if (outerLabel != nullptr) {
+      drawHintGroup(groupX, outerButtonWidth);
+    } else if (innerLabel != nullptr) {
+      drawHintGroup(groupX + outerButtonWidth, innerButtonWidth);
+    }
+  };
 
-  renderer.drawRoundedRect(leftGroupX, outlineY, groupWidth, hintHeight, 2, kBottomRadius, true);
+  // A nullptr means the caller intentionally wants the reader pixels retained.
+  // Empty strings still render an empty group so old hint pixels are cleared.
+  drawGroupedHints(leftGroupX, leftOuterLabel, leftInnerLabel);
+  drawGroupedHints(rightGroupX, rightInnerLabel, rightOuterLabel);
+
   const int selectWidth = renderer.getTextWidth(kGuideFontId, selectText.c_str(), EpdFontFamily::REGULAR);
+  const int upWidth = renderer.getTextWidth(kGuideFontId, upText.c_str(), EpdFontFamily::REGULAR);
   const int downWidth = renderer.getTextWidth(kGuideFontId, downText.c_str(), EpdFontFamily::REGULAR);
   constexpr int innerEdgePadding = 16;
 
   const int backX = leftGroupX + innerEdgePadding;
-  const int selectX = leftGroupX + groupWidth - innerEdgePadding - selectWidth;
-  const int upX = rightGroupX + innerEdgePadding;
-  const int downX = rightGroupX + groupWidth - innerEdgePadding - downWidth;
-
-  renderer.drawRoundedRect(rightGroupX, outlineY, groupWidth, hintHeight, 2, kBottomRadius, true);
+  const int selectX = leftOuterLabel == nullptr ? leftGroupX + outerButtonWidth + (innerButtonWidth - selectWidth) / 2
+                                                : leftGroupX + groupWidth - innerEdgePadding - selectWidth;
+  const int upX =
+      rightOuterLabel == nullptr ? rightGroupX + (outerButtonWidth - upWidth) / 2 : rightGroupX + innerEdgePadding;
+  const int downX = rightInnerLabel == nullptr ? rightGroupX + outerButtonWidth + (innerButtonWidth - downWidth) / 2
+                                               : rightGroupX + groupWidth - innerEdgePadding - downWidth;
 
   renderer.setOrientation(invertText ? GfxRenderer::Orientation::PortraitInverted : GfxRenderer::Orientation::Portrait);
   const int textY = (invertText ? bottomMargin : outlineY) + (hintHeight - renderer.getLineHeight(kGuideFontId)) / 2;

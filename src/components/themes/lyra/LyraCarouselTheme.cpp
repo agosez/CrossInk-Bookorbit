@@ -19,8 +19,8 @@
 #include "components/TouchRegistry.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
-#include "components/icons/chart.h"
 #include "components/icons/cover.h"
+#include "components/icons/readingStatsIcons.h"
 #include "fontIds.h"
 
 namespace {
@@ -595,11 +595,6 @@ void LyraCarouselTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int but
       const UIIcon icon = rowIcon(i);
       if (icon == UIIcon::BookmarkIcon) {
         drawMenuBookmarkIcon(renderer, iconX, iconY, selected);
-      } else if (icon == UIIcon::Chart) {
-        if (selected)
-          renderer.drawIconInverted(ChartIcon, iconX, iconY, kMenuIconSize, kMenuIconSize);
-        else
-          renderer.drawIcon(ChartIcon, iconX, iconY, kMenuIconSize, kMenuIconSize);
       } else {
         const freeink::Icon* bmp = iconForName(icon, kMenuIconSize);
         if (bmp != nullptr) {
@@ -626,11 +621,17 @@ void LyraCarouselTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int but
 void LyraCarouselTheme::registerButtonMenuTouchTargets(const GfxRenderer& renderer, int buttonCount) const {
   if (buttonCount <= 0) return;
   const MenuLayoutMetrics metrics = computeMenuLayout(renderer, buttonCount);
+  const Rect touchRect = buttonMenuTouchRect(renderer, buttonCount);
   for (int i = 0; i < buttonCount; ++i) {
-    TouchRegistry::getInstance().add(
-        Rect{i * metrics.tileW, metrics.labelY, metrics.tileW, metrics.rowY + metrics.tileH - metrics.labelY}, i,
-        TouchRegistry::Item);
+    TouchRegistry::getInstance().add(Rect{i * metrics.tileW, touchRect.y, metrics.tileW, touchRect.height}, i,
+                                     TouchRegistry::Item);
   }
+}
+
+Rect LyraCarouselTheme::buttonMenuTouchRect(const GfxRenderer& renderer, const int buttonCount) {
+  if (buttonCount <= 0) return Rect{0, 0, 0, 0};
+  const MenuLayoutMetrics metrics = computeMenuLayout(renderer, buttonCount);
+  return Rect{0, metrics.labelY, renderer.getScreenWidth(), metrics.rowY + metrics.tileH - metrics.labelY};
 }
 
 void LyraCarouselTheme::drawButtonMenuSelectionOverlay(const GfxRenderer& renderer, int buttonCount, int selectedIndex,
@@ -654,8 +655,6 @@ void LyraCarouselTheme::drawButtonMenuSelectionOverlay(const GfxRenderer& render
     const UIIcon icon = rowIcon(selectedIndex);
     if (icon == UIIcon::BookmarkIcon) {
       drawMenuBookmarkIcon(renderer, iconX, iconY, true);
-    } else if (icon == UIIcon::Chart) {
-      renderer.drawIconInverted(ChartIcon, iconX, iconY, kMenuIconSize, kMenuIconSize);
     } else {
       const freeink::Icon* bmp = iconForName(icon, kMenuIconSize);
       if (bmp != nullptr) {

@@ -1,8 +1,10 @@
 #include "MappedInputManager.h"
 
 #include <GfxRenderer.h>
+#include <I18n.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <utility>
 
@@ -135,6 +137,31 @@ size_t buttonIndex(MappedInputManager::Button button) { return static_cast<size_
 
 }  // namespace
 
+void MappedInputManager::update() const {
+  gpio.update();
+  expireReleaseSuppressions();
+}
+
+bool MappedInputManager::wasPhysicallyReleased(const Button button) const {
+#ifdef SIMULATOR
+  if (simulatorReleased[buttonIndex(button)]) {
+    return true;
+  }
+#endif
+  return mapButton(button, &HalGPIO::wasReleased);
+}
+
+void MappedInputManager::expireReleaseSuppressions() const {
+  ReleaseSuppression::FrameState state;
+  state.backHeld = isPhysicalPressed(Button::Back);
+  state.backReleased = wasPhysicallyReleased(Button::Back);
+  state.confirmHeld = isPhysicalPressed(Button::Confirm);
+  state.confirmReleased = wasPhysicallyReleased(Button::Confirm);
+  state.powerHeld = isPhysicalPressed(Button::Power);
+  state.powerReleased = wasPhysicallyReleased(Button::Power);
+  releaseSuppression.expireAfterReleaseFrame(state);
+}
+
 bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint8_t) const) const {
   const auto sideLayout = static_cast<CrossPointSettings::SIDE_BUTTON_LAYOUT>(SETTINGS.sideButtonLayout);
   const auto side = mapSideLayoutForReaderOrientation(kSideLayouts[sideLayout], readerMode);
@@ -194,6 +221,11 @@ uint8_t MappedInputManager::mappedFrontButtonFor(const Button button) const {
 
 bool MappedInputManager::shouldUsePowerAsConfirmFallback() const { return !readerMode || powerAsConfirmInReaderMode; }
 
+bool MappedInputManager::isFrontNavButtonSwapActive() const {
+  return readerMode && shouldSwapReaderFrontNavButtons(static_cast<CrossPointSettings::FRONT_BUTTON_ORIENTATION_AWARE>(
+                           SETTINGS.frontButtonOrientationAware));
+}
+
 bool MappedInputManager::shouldMirrorPowerAsConfirmHold() const {
   return shouldUsePowerAsConfirmFallback() &&
          !isPowerButtonActionAvailableOutsideReader(static_cast<CrossPointSettings::SHORT_PWRBTN>(SETTINGS.longPwrBtn));
@@ -207,6 +239,55 @@ bool MappedInputManager::touchInputEnabled() const {
 bool MappedInputManager::hasTouch() const { return touchInputEnabled(); }
 
 bool MappedInputManager::hasTouchHardware() const { return gpio.hasTouch(); }
+
+bool MappedInputManager::supportsMultiTouch() const { return touchInputEnabled() && gpio.supportsMultiTouch(); }
+
+bool MappedInputManager::getTwoFingerTouch(int& x1, int& y1, int& x2, int& y2) const {
+  if (!supportsMultiTouch()) return false;
+
+  const auto touch = gpio.getTouchSnapshot();
+  if (touch.count != 2 || touch.reportedCount != 2) return false;
+
+  renderer.tapToLogical(touch.contacts[0].nx, touch.contacts[0].ny, x1, y1);
+  renderer.tapToLogical(touch.contacts[1].nx, touch.contacts[1].ny, x2, y2);
+  return true;
+}
+
+bool MappedInputManager::wasCompletedMultiTouchSwipe(CompletedSwipe& swipe) const {
+  if (!touchInputEnabled()) return false;
+
+  HalGPIO::CompletedMultiTouchSwipe source;
+  if (!gpio.wasCompletedMultiTouchSwipe(source)) return false;
+
+  swipe.contactCount = source.contactCount;
+  swipe.durationMs = source.durationMs;
+  renderer.tapToLogical(source.nxStart, source.nyStart, swipe.startX, swipe.startY);
+  renderer.tapToLogical(source.nxEnd, source.nyEnd, swipe.endX, swipe.endY);
+  const int dx = swipe.endX - swipe.startX;
+  const int dy = swipe.endY - swipe.startY;
+  if (std::abs(dx) >= std::abs(dy)) {
+    swipe.direction = dx < 0 ? SwipeDir::Left : SwipeDir::Right;
+  } else {
+    swipe.direction = dy < 0 ? SwipeDir::Up : SwipeDir::Down;
+  }
+  return true;
+}
+
+bool MappedInputManager::wasCompletedMultiTouchRotation(CompletedRotation& rotation) const {
+  if (!touchInputEnabled()) return false;
+
+  HalGPIO::CompletedMultiTouchRotation source;
+  if (!gpio.wasCompletedMultiTouchRotation(source)) return false;
+
+  rotation.degrees = source.degrees;
+  rotation.durationMs = source.durationMs;
+  renderer.tapToLogical(source.nxCenter, source.nyCenter, rotation.centerX, rotation.centerY);
+  return true;
+}
+
+bool MappedInputManager::isHomeButtonLockedInReader() const {
+  return readerMode && hasHomeKeyHardware() && !SETTINGS.homeButtonInReaderEnabled && !readerTouchscreenOverride;
+}
 
 void MappedInputManager::rememberTouchHeldTime() const {
   touchHeldOverrideValid = true;
@@ -224,6 +305,10 @@ bool MappedInputManager::wasScreenTapped(int& x, int& y) const {
   }
 #ifdef SIMULATOR
   if (simulatorTouch.releasedThisFrame) {
+    if (simulatorTouch.longPressFired) {
+      simulatorTouch.longPressFired = false;
+      return false;
+    }
     x = simulatorTouch.startX;
     y = simulatorTouch.startY;
     rememberTouchHeldTime();
@@ -249,6 +334,25 @@ bool MappedInputManager::isScreenTouchLongPress(int& x, int& y, const unsigned l
   return isScreenTouchTapCandidate(x, y, heldMs) && heldMs >= thresholdMs;
 }
 
+bool MappedInputManager::wasScreenLongPress(int& x, int& y) const {
+  if (!touchInputEnabled()) return false;
+#ifdef SIMULATOR
+  if (suppressSimulatedTouchContact) return false;
+  if (simulatorTouch.pressed && !simulatorTouch.longPressFired && millis() - simulatorTouch.startedAt >= 500UL) {
+    simulatorTouch.longPressFired = true;
+    x = simulatorTouch.startX;
+    y = simulatorTouch.startY;
+    return true;
+  }
+#endif
+  float nx = 0.0f;
+  float ny = 0.0f;
+  if (!gpio.wasTouchLongPress(nx, ny)) return false;
+  gpio.suppressTouchContact();
+  renderer.tapToLogical(nx, ny, x, y);
+  return true;
+}
+
 bool MappedInputManager::isInVerticalEdgeGestureZone(const int y) const {
   const int screenHeight = renderer.getScreenHeight();
   if (screenHeight <= 0) return false;
@@ -260,6 +364,7 @@ bool MappedInputManager::isInVerticalEdgeGestureZone(const int y) const {
 bool MappedInputManager::wasScreenTouchDown(int& x, int& y) const {
   if (!touchInputEnabled()) return false;
 #ifdef SIMULATOR
+  if (suppressSimulatedTouchContact) return false;
   if (simulatorTouch.pressedThisFrame) {
     x = simulatorTouch.startX;
     y = simulatorTouch.startY;
@@ -276,6 +381,7 @@ bool MappedInputManager::wasScreenTouchDown(int& x, int& y) const {
 bool MappedInputManager::isScreenTouchTapCandidate(int& x, int& y, unsigned long& heldMs) const {
   if (!touchInputEnabled()) return false;
 #ifdef SIMULATOR
+  if (suppressSimulatedTouchContact) return false;
   if (simulatorTouch.pressed) {
     x = simulatorTouch.startX;
     y = simulatorTouch.startY;
@@ -293,6 +399,7 @@ bool MappedInputManager::isScreenTouchTapCandidate(int& x, int& y, unsigned long
 bool MappedInputManager::isScreenTouchHeld(int& x, int& y) const {
   if (!touchInputEnabled()) return false;
 #ifdef SIMULATOR
+  if (suppressSimulatedTouchContact) return false;
   if (simulatorTouch.pressed) {
     x = simulatorTouch.currentX;
     y = simulatorTouch.currentY;
@@ -455,6 +562,7 @@ MappedInputManager::RowTouch MappedInputManager::colTouch(int& col, const int le
 bool MappedInputManager::decodeSwipe(int& sx, int& sy, int& ex, int& ey) const {
   if (!touchInputEnabled()) return false;
 #ifdef SIMULATOR
+  if (suppressSimulatedTouchContact) return false;
   if (simulatorTouch.releasedThisFrame) {
     sx = simulatorTouch.startX;
     sy = simulatorTouch.startY;
@@ -501,6 +609,11 @@ MappedInputManager::SwipeDir MappedInputManager::wasSwipe() const {
 
 bool MappedInputManager::wasBackGesture() const {
   if (!touchInputEnabled()) return false;
+  // A disabled previous-page swipe must not fall through to Back/Home.
+  if (readerMode && SETTINGS.previousPageGesture != CrossPointSettings::TAP_AND_SWIPE &&
+      SETTINGS.previousPageGesture != CrossPointSettings::SWIPE_ONLY) {
+    return false;
+  }
   // Back = left-to-right swipe starting near the left edge. Edge-anchored so that
   // mid-screen horizontal swipes stay available to activities that consume
   // SwipeDir::Left/Right (e.g. percent selection, image viewer).
@@ -519,7 +632,7 @@ bool MappedInputManager::wasLeftEdgeGesture() const { return wasBackGesture(); }
 
 bool MappedInputManager::hasHomeKeyHardware() const {
 #ifdef SIMULATOR
-#ifdef SIMULATOR_DEVICE_X4PRO
+#ifdef SIMULATOR_DEVICE_X4_PRO
   return true;
 #else
   return false;
@@ -567,17 +680,52 @@ bool MappedInputManager::wasMenuGesture() const {
 
 bool MappedInputManager::wasReaderMenuGesture() const {
   const SwipeDir direction = wasSwipe();
+#if defined(FREEINK_DEVICE_STICKY) && FREEINK_DEVICE_STICKY
+  return direction == SwipeDir::Up;
+#else
   return hasHomeKeyHardware() ? direction == SwipeDir::Up : direction == SwipeDir::Down;
+#endif
 }
 
-bool MappedInputManager::wasReaderHomeGesture() const { return !hasHomeKeyHardware() && wasSwipe() == SwipeDir::Up; }
+bool MappedInputManager::wasReaderHomeGesture() const {
+  // X4 Pro's capacitive Home key remains the reader's Home action. Only the
+  // touch gesture changes in reader mode: other touch boards use an upward
+  // swipe across the page.
+#if defined(FREEINK_DEVICE_STICKY) && FREEINK_DEVICE_STICKY
+  // Sticky uses swipe up for the bottom reader drawer and swipe down for the
+  // reader-details panel. Home remains available from that panel's header.
+  return false;
+#else
+  if (hasHomeKeyHardware()) {
+    return wasHomeGesture();
+  }
+  return wasSwipe() == SwipeDir::Up;
+#endif
+}
 
 bool MappedInputManager::wasReaderLightPanelGesture() const {
+#if defined(FREEINK_DEVICE_STICKY) && FREEINK_DEVICE_STICKY
+  return wasSwipe() == SwipeDir::Down;
+#else
   return hasHomeKeyHardware() && wasSwipe() == SwipeDir::Down;
+#endif
 }
 
 bool MappedInputManager::wasHomeGesture() const {
   if (!hasHomeKeyHardware()) return wasBottomEdgeUpSwipe();
+  if (isHomeButtonLockedInReader()) {
+    clearDeferredHomeGesture();
+    return false;
+  }
+  if (SETTINGS.homeButtonTapAction != CrossPointSettings::HOME_BUTTON_BACK_HOME) return false;
+  // A swipe starting on the lower bezel can also report a short capacitive Home
+  // tap on the X4 Pro. The screen gesture belongs to the active list/reader, so
+  // give it priority over the global Home route for this release frame.
+  if (wasSwipe() != SwipeDir::None) return false;
+  if (deferredHomeGesture) {
+    deferredHomeGesture = false;
+    return true;
+  }
 #ifdef SIMULATOR
   return simulatorHomeKeyInput.wasTapped();
 #else
@@ -587,6 +735,8 @@ bool MappedInputManager::wasHomeGesture() const {
 
 bool MappedInputManager::wasReaderMenuHold() const {
   if (!hasHomeKeyHardware()) return false;
+  if (isHomeButtonLockedInReader()) return false;
+  if (SETTINGS.homeButtonLongPressAction != CrossPointSettings::HOME_BUTTON_READER_MENU) return false;
 #ifdef SIMULATOR
   return simulatorHomeKeyInput.wasLongPressed();
 #else
@@ -612,6 +762,13 @@ bool MappedInputManager::wasPressed(const Button button) const {
       return true;
     }
 
+    if (powerAsConfirmInReaderMode && gpio.wasPressed(HalGPIO::BTN_POWER)) {
+      // The active reader popup owns this Power press. Keep its configured
+      // short/long action from firing after the popup confirms on press.
+      releaseSuppression.suppressPower();
+      return true;
+    }
+
     return shouldUsePowerAsConfirmFallback() &&
            !isPowerButtonActionAvailableOutsideReader(
                static_cast<CrossPointSettings::SHORT_PWRBTN>(SETTINGS.shortPwrBtn)) &&
@@ -628,10 +785,13 @@ bool MappedInputManager::wasPressed(const Button button) const {
 }
 
 bool MappedInputManager::wasReleased(const Button button) const {
-#ifdef SIMULATOR
-  if (simulatorReleased[buttonIndex(button)]) {
+  if (injectedReleases[static_cast<size_t>(button)]) {
     return true;
   }
+#ifdef SIMULATOR
+  const bool simulatedRelease = simulatorReleased[buttonIndex(button)];
+#else
+  constexpr bool simulatedRelease = false;
 #endif
 
   if (button == Button::Back) {
@@ -640,17 +800,17 @@ bool MappedInputManager::wasReleased(const Button button) const {
     }
 
 #if CROSSINK_APP_CAP_TOUCH
-    if (!mapButton(button, &HalGPIO::wasReleased) && !wasFrontButtonHintTapped(mappedFrontButtonFor(button))) {
+    if (!simulatedRelease && !mapButton(button, &HalGPIO::wasReleased) &&
+        !wasFrontButtonHintTapped(mappedFrontButtonFor(button))) {
       return false;
     }
 #else
-    if (!mapButton(button, &HalGPIO::wasReleased)) {
+    if (!simulatedRelease && !mapButton(button, &HalGPIO::wasReleased)) {
       return false;
     }
 #endif
 
-    if (suppressBackRelease) {
-      suppressBackRelease = false;
+    if (releaseSuppression.consumeBackRelease()) {
       return false;
     }
 
@@ -658,9 +818,9 @@ bool MappedInputManager::wasReleased(const Button button) const {
   }
 
   if (button == Button::Confirm) {
-    if (mapButton(button, &HalGPIO::wasReleased) || wasFrontButtonHintTapped(mappedFrontButtonFor(button))) {
-      if (suppressConfirmRelease) {
-        suppressConfirmRelease = false;
+    if (simulatedRelease || mapButton(button, &HalGPIO::wasReleased) ||
+        wasFrontButtonHintTapped(mappedFrontButtonFor(button))) {
+      if (releaseSuppression.consumeConfirmRelease()) {
         return false;
       }
       return true;
@@ -670,14 +830,11 @@ bool MappedInputManager::wasReleased(const Button button) const {
       return false;
     }
 
-    if (suppressConfirmRelease) {
-      suppressConfirmRelease = false;
-      suppressPowerConfirmRelease = false;
+    if (releaseSuppression.consumeConfirmRelease()) {
       return false;
     }
 
-    if (suppressPowerConfirmRelease) {
-      suppressPowerConfirmRelease = false;
+    if (releaseSuppression.consumePowerConfirmRelease()) {
       return false;
     }
 
@@ -688,12 +845,18 @@ bool MappedInputManager::wasReleased(const Button button) const {
   }
 
   if (button == Button::Power) {
-    if (!mapButton(button, &HalGPIO::wasReleased)) {
+    const bool released = simulatedRelease || mapButton(button, &HalGPIO::wasReleased);
+    if (!released) {
+      // A release edge stays visible for one full input loop. Once that loop
+      // has passed, drop a stale suppression before the next Power press.
       return false;
     }
 
-    if (suppressPowerRelease) {
-      suppressPowerRelease = false;
+    // InputManager exposes the same release edge to every caller in this
+    // loop. Keep the suppression set until the edge expires so the global
+    // shortcut dispatcher cannot consume it first and leave the reader's
+    // later handler to run the configured short-Power action.
+    if (releaseSuppression.consumePowerRelease()) {
       return false;
     }
 
@@ -701,7 +864,7 @@ bool MappedInputManager::wasReleased(const Button button) const {
   }
 
   const uint8_t frontButton = mappedFrontButtonFor(button);
-  return mapButton(button, &HalGPIO::wasReleased) ||
+  return simulatedRelease || mapButton(button, &HalGPIO::wasReleased) ||
          (frontButton != kNoButton && wasFrontButtonHintTapped(frontButton));
 }
 
@@ -726,6 +889,19 @@ bool MappedInputManager::isPressed(const Button button) const {
            gpio.getHeldTime() >= SETTINGS.getPowerButtonLongPressDuration();
   }
 
+  if (button == Button::Power && releaseSuppression.isPowerReleaseSuppressed()) {
+    return false;
+  }
+
+  return mapButton(button, &HalGPIO::isPressed);
+}
+
+bool MappedInputManager::isPhysicalPressed(const Button button) const {
+#ifdef SIMULATOR
+  if (simulatorHeld[buttonIndex(button)]) {
+    return true;
+  }
+#endif
   return mapButton(button, &HalGPIO::isPressed);
 }
 
@@ -780,8 +956,45 @@ unsigned long MappedInputManager::getHeldTime() const {
   return heldTime;
 }
 
-MappedInputManager::Labels MappedInputManager::mapLabels(const char* back, const char* confirm, const char* previous,
-                                                         const char* next) const {
+namespace {
+
+bool isRightToLeftUiLanguage() {
+  const auto language = I18N.getLanguage();
+  return language == Language::AR || language == Language::HE;
+}
+
+}  // namespace
+
+MappedInputManager::Label MappedInputManager::withBackArrow(const char* text) const {
+  if (isRightToLeftUiLanguage()) return Label::withSuffix(tr(STR_ARROW_RIGHT), text);
+  return Label::withPrefix(tr(STR_ARROW_LEFT), text);
+}
+
+MappedInputManager::Label MappedInputManager::withPreviousPageArrow(const char* text) const {
+  if (isRightToLeftUiLanguage()) return Label(text);
+  return Label::withPrefix(tr(STR_ARROW_LEFT), text);
+}
+
+MappedInputManager::Label MappedInputManager::withNextPageArrow(const char* text) const {
+  if (isRightToLeftUiLanguage()) return Label(text);
+  return Label::withSuffix(tr(STR_ARROW_RIGHT), text);
+}
+
+const char* MappedInputManager::resolveLabel(const Label label) const {
+  const char* text = label.text != nullptr ? label.text : "";
+  if (label.placement == Label::Placement::None || label.arrow == nullptr) return text;
+
+  auto& buffer = labelBuffers[0];
+  if (label.placement == Label::Placement::Prefix) {
+    std::snprintf(buffer.data(), buffer.size(), "%s%s", label.arrow, text);
+  } else {
+    std::snprintf(buffer.data(), buffer.size(), "%s%s", text, label.arrow);
+  }
+  return buffer.data();
+}
+
+MappedInputManager::Labels MappedInputManager::mapLabels(const Label back, const Label confirm, const Label previous,
+                                                         const Label next) const {
   const bool useReaderMapping = readerMode && SETTINGS.readerFrontButtonsEnabled;
   const ButtonIndex btnBack = useReaderMapping ? SETTINGS.readerFrontButtonBack : SETTINGS.frontButtonBack;
   const ButtonIndex btnConfirm = useReaderMapping ? SETTINGS.readerFrontButtonConfirm : SETTINGS.frontButtonConfirm;
@@ -792,12 +1005,31 @@ MappedInputManager::Labels MappedInputManager::mapLabels(const char* back, const
   const ButtonIndex mappedLeft = mapFrontButtonForReaderOrientation(btnLeft, btnLeft, btnRight, readerMode);
   const ButtonIndex mappedRight = mapFrontButtonForReaderOrientation(btnRight, btnLeft, btnRight, readerMode);
 
+  // Compose arrow labels into instance-owned buffers so returned pointers
+  // remain valid until the next label mapping on this input manager.
+  auto resolveLabelToBuffer = [&](const Label label, const size_t bufferIndex) -> const char* {
+    const char* text = label.text != nullptr ? label.text : "";
+    if (label.placement == Label::Placement::None || label.arrow == nullptr) return text;
+
+    auto& buffer = labelBuffers[bufferIndex];
+    if (label.placement == Label::Placement::Prefix) {
+      std::snprintf(buffer.data(), buffer.size(), "%s%s", label.arrow, text);
+    } else {
+      std::snprintf(buffer.data(), buffer.size(), "%s%s", text, label.arrow);
+    }
+    return buffer.data();
+  };
+  const char* resolvedBack = resolveLabelToBuffer(back, 0);
+  const char* resolvedConfirm = resolveLabelToBuffer(confirm, 1);
+  const char* resolvedPrevious = resolveLabelToBuffer(previous, 2);
+  const char* resolvedNext = resolveLabelToBuffer(next, 3);
+
   // Build the label order based on the configured hardware mapping.
   auto labelForHardware = [&](ButtonIndex hw) -> const char* {
-    if (hw == mappedBack) return back;
-    if (hw == mappedConfirm) return confirm;
-    if (hw == mappedLeft) return previous;
-    if (hw == mappedRight) return next;
+    if (hw == mappedBack) return resolvedBack;
+    if (hw == mappedConfirm) return resolvedConfirm;
+    if (hw == mappedLeft) return resolvedPrevious;
+    if (hw == mappedRight) return resolvedNext;
     return "";
   };
 
@@ -876,8 +1108,14 @@ void MappedInputManager::simulatorClearInputFrame() {
   simulatorPressed.fill(false);
   simulatorReleased.fill(false);
 #if CROSSINK_APP_CAP_TOUCH
+  const bool suppressedContactReleased = suppressSimulatedTouchContact && simulatorTouch.releasedThisFrame;
   simulatorTouch.pressedThisFrame = false;
   simulatorTouch.releasedThisFrame = false;
+  simulatorTouch.longPressFired = false;
+  if (suppressedContactReleased) {
+    suppressSimulatedTouchContact = false;
+    suppressTouchTap = false;
+  }
 #endif
 }
 

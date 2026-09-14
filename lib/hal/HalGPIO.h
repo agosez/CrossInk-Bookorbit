@@ -26,8 +26,45 @@ class HalGPIO {
 
   bool lastUsbConnected = false;
   bool usbStateChanged = false;
+  bool usbStateSampled = false;
+  unsigned long lastUsbPollMs = 0;
 
  public:
+  // HAL-owned, normalized multi-touch representation. Activities must not
+  // depend on the SDK's controller-specific touch snapshot type.
+  struct TouchContact {
+    uint8_t id = 0;
+    float nx = 0.0f;
+    float ny = 0.0f;
+  };
+
+  struct TouchSnapshot {
+    // Mirror the SDK's bounded capture capacity while keeping app code
+    // independent of its controller-specific snapshot type.
+    static constexpr uint8_t MAX_CONTACTS = InputManager::MAX_TOUCH_CONTACTS;
+    uint8_t count = 0;
+    // Actual controller count. This may exceed count when the SDK truncates a
+    // frame, allowing firmware to opt into exact cardinalities safely.
+    uint8_t reportedCount = 0;
+    TouchContact contacts[MAX_CONTACTS];
+  };
+
+  struct CompletedMultiTouchSwipe {
+    uint8_t contactCount = 0;
+    float nxStart = 0.0f;
+    float nyStart = 0.0f;
+    float nxEnd = 0.0f;
+    float nyEnd = 0.0f;
+    unsigned long durationMs = 0;
+  };
+
+  struct CompletedMultiTouchRotation {
+    float degrees = 0.0f;
+    float nxCenter = 0.0f;
+    float nyCenter = 0.0f;
+    unsigned long durationMs = 0;
+  };
+
   enum class DeviceType : uint8_t { X4, X3 };
 
  private:
@@ -62,6 +99,10 @@ class HalGPIO {
   unsigned long getPowerButtonHeldTime() const;
 #if CROSSINK_APP_CAP_TOUCH
   bool hasTouch() const;
+  bool supportsMultiTouch() const;
+  TouchSnapshot getTouchSnapshot() const;
+  bool wasCompletedMultiTouchSwipe(CompletedMultiTouchSwipe& swipe) const;
+  bool wasCompletedMultiTouchRotation(CompletedMultiTouchRotation& rotation) const;
   // Capacitive home key under the bezel, reported by the touch controller
   // (e.g. X4 Pro's GT911 key). Tap = short press (fires on release, the primary
   // "home" action); LongPress = held ~700ms (a hold shortcut, e.g. reader menu).
@@ -76,22 +117,47 @@ class HalGPIO {
   // pressed state.
   bool wasTouchReleased() const;
   bool isTouchTapCandidate(float& nx, float& ny, unsigned long& heldMs) const;
+  bool wasTouchLongPress(float& nx, float& ny) const;
+  void suppressTouchContact();
   bool isTouchHeldAt(float& nx, float& ny) const;
   unsigned long lastTouchHeldMs() const;
   bool wasSwipe(float& nxStart, float& nyStart, float& nxEnd, float& nyEnd) const;
   bool wasTouchActivity() const;
 #else
   constexpr bool hasTouch() const { return false; }
+  constexpr bool supportsMultiTouch() const { return false; }
+  constexpr TouchSnapshot getTouchSnapshot() const { return {}; }
+  constexpr bool wasCompletedMultiTouchSwipe(CompletedMultiTouchSwipe&) const { return false; }
+  constexpr bool wasCompletedMultiTouchRotation(CompletedMultiTouchRotation&) const { return false; }
+  constexpr bool hasHomeKey() const { return false; }
+  constexpr bool wasHomeKeyPressed() const { return false; }
+  constexpr bool wasHomeKeyTapped() const { return false; }
+  constexpr bool wasHomeKeyLongPressed() const { return false; }
 #endif
   void setSharedConfirmPowerShortPressEmitsPower(bool enabled);
 
-  // Verify power button was held long enough after wakeup.
+  // Verify that the physical power button remains held through input debounce.
+  // A device configured to sleep on a short power press can wake on that same
+  // short press, which has normally ended before firmware reaches this check.
+  // minHoldMs lengthens the window the button must stay held (ignored when
+  // shortPressWakes): a board that stayed powered through sleep reaches this
+  // check far sooner than one that booted from a full power-off, so without it
+  // a brief tap that would never have woken the powered-off board wakes the
+  // latched one.
   // Returns true if verification succeeded, false if device should return to sleep.
   // Should only be called when wakeup reason is PowerButton.
-  bool verifyPowerButtonWakeup(uint16_t requiredDurationMs, bool shortPressAllowed);
+  bool verifyPowerButtonWakeup(bool shortPressWakes, unsigned long minHoldMs = 0);
 
   // Check if USB is connected
   bool isUsbConnected() const;
+
+  // Return the latest loop-owned sample. Before the first update(), fall back
+  // to a direct probe so setup-time callers still report external power.
+  bool isUsbConnectedCached() const;
+
+  // Whether a cold boot with no USB detected can be trusted to mean a held
+  // power button on the active board's power topology.
+  bool coldBootImpliesPowerButton() const;
 
   // Returns true once per edge (plug or unplug) since the last update()
   bool wasUsbStateChanged() const;

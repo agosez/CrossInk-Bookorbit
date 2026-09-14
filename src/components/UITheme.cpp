@@ -6,9 +6,12 @@
 #include <HalStorage.h>
 #include <Logging.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
@@ -26,6 +29,19 @@ constexpr char kHeightPlaceholder[] = "[HEIGHT]";
 constexpr size_t kWidthPlaceholderLength = sizeof(kWidthPlaceholder) - 1;
 constexpr size_t kHeightPlaceholderLength = sizeof(kHeightPlaceholder) - 1;
 
+int drawCenteredTextLines(const GfxRenderer& renderer, const Rect screen, const int fontId, int y,
+                          const std::vector<std::string>& lines, const bool black, const EpdFontFamily::Style style,
+                          const int lineSpacing) {
+  if (lines.empty()) return 0;
+
+  const int lineHeight = renderer.getLineHeight(fontId);
+  for (const auto& line : lines) {
+    UITheme::drawCenteredText(renderer, screen, fontId, y, line.c_str(), black, style);
+    y += lineHeight + lineSpacing;
+  }
+  return lineHeight * static_cast<int>(lines.size()) + lineSpacing * (static_cast<int>(lines.size()) - 1);
+}
+
 std::string addBmpSuffix(const std::string& path, const char* suffix) {
   const size_t extPos = path.rfind(".bmp");
   if (extPos == std::string::npos) {
@@ -39,9 +55,9 @@ std::string addBmpSuffix(const std::string& path, const char* suffix) {
 
 UITheme UITheme::instance;
 
-UITheme::UITheme() {
-  auto themeType = static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme);
-  setTheme(themeType);
+UITheme::UITheme() : currentMetrics(&LyraMetrics::values), currentTheme(std::make_unique<LyraTheme>()) {
+  // Static construction must not log or depend on cross-TU serial initialization;
+  // main.cpp reloads the saved theme after setup.
 }
 
 void UITheme::reload() {
@@ -253,9 +269,41 @@ int UITheme::getProgressBarHeight() {
   return statusBar.showsProgressBar() ? statusBar.progressBarHeightPx + metrics.progressBarMarginTop : 0;
 }
 
+int UITheme::getTopStatusBarInset(const GfxRenderer& renderer) {
+#if defined(FREEINK_DEVICE_STICKY) && FREEINK_DEVICE_STICKY
+  // The Sticky panel remains usable closer to its top edge than the shared
+  // status-bar layout assumes. Keep the clock and battery in that space.
+  (void)renderer;
+  return -5;
+#elif (defined(FREEINK_DEVICE_X4PRO) && FREEINK_DEVICE_X4PRO) || \
+    (defined(FREEINK_DEVICE_X4CLASSIC) && FREEINK_DEVICE_X4CLASSIC)
+  // The X4 Pro and X4 Classic panels sit slightly recessed behind the
+  // portrait top bezel.
+  return renderer.getOrientation() == GfxRenderer::Orientation::Portrait ? 5 : 0;
+#endif
+
+  return 0;
+}
+
 // Centered text implementation that takes the safe area into account
 void UITheme::drawCenteredText(const GfxRenderer& renderer, Rect screen, int fontId, int y, const char* text,
                                bool black, EpdFontFamily::Style style) {
   const int x = screen.x + (screen.width - renderer.getTextWidth(fontId, text, style)) / 2;
   renderer.drawText(fontId, x, y, text, black, style);
+}
+
+int UITheme::drawCenteredWrappedText(const GfxRenderer& renderer, const Rect screen, const int fontId, int y,
+                                     const char* text, const int maxLines, const bool black,
+                                     const EpdFontFamily::Style style, const int lineSpacing) {
+  const auto lines = renderer.wrappedText(fontId, text, screen.width, maxLines, style);
+  return drawCenteredTextLines(renderer, screen, fontId, y, lines, black, style, lineSpacing);
+}
+
+int UITheme::drawCenteredWrappedTextAtCenter(const GfxRenderer& renderer, const Rect screen, const int fontId,
+                                             const int y, const char* text, const int maxLines, const bool black,
+                                             const EpdFontFamily::Style style, const int lineSpacing) {
+  const auto lines = renderer.wrappedText(fontId, text, screen.width, maxLines, style);
+  const int lineStep = renderer.getLineHeight(fontId) + lineSpacing;
+  const int top = y - std::max(0, static_cast<int>(lines.size()) - 1) * lineStep / 2;
+  return drawCenteredTextLines(renderer, screen, fontId, top, lines, black, style, lineSpacing);
 }

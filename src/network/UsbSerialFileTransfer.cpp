@@ -5,15 +5,21 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <esp_rom_crc.h>
-#include <esp_task_wdt.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <string>
 
 #include "CrossPointSettings.h"
+#include "activities/boot_sleep/ImageFolderIndex.h"
 #include "util/BookCacheUtils.h"
+
+#if defined(FREEINK_DEVICE_X4PRO) && FREEINK_DEVICE_X4PRO && !ARDUINO_USB_MODE && !defined(SIMULATOR)
+#define CROSSINK_USB_RX_OVERFLOW_ENABLED
+#include <USBCDC.h>
+#endif
 
 namespace UsbSerialFileTransfer {
 namespace {
@@ -27,10 +33,18 @@ constexpr size_t LINE_BUFFER_SIZE = 80;
 constexpr size_t REMOVE_RECURSIVE_MAX_DEPTH = 8;
 constexpr uint32_t SHORT_TIMEOUT_MS = 1000;
 constexpr uint32_t HEADER_TIMEOUT_MS = 2000;
+constexpr uint32_t CHECKSUM_TIMEOUT_MS = 10000;
 constexpr uint32_t CHUNK_TIMEOUT_MS = 45000;
 constexpr const char* TEMP_UPLOAD_PATH = "/.crosspoint/usb-upload.tmp";
 constexpr const char* INTERNAL_DIR = "/.crosspoint";
 constexpr const char* HIDDEN_ITEMS[] = {"System Volume Information", "XTCache"};
+
+#ifndef CROSSINK_FIRMWARE_DEVICE_TYPE
+#define CROSSINK_FIRMWARE_DEVICE_TYPE "unknown"
+#endif
+#ifndef CROSSINK_VERSION
+#define CROSSINK_VERSION "unknown"
+#endif
 
 uint8_t commandMatchPos = 0;
 char lineBuffer[LINE_BUFFER_SIZE] = {};
@@ -38,6 +52,34 @@ size_t lineBufferPos = 0;
 uint8_t transferBuffer[SERIAL_CHUNK_SIZE];
 // Set once per process() call from the caller's screen context; read by every command handler.
 bool fileTransferAllowed = false;
+
+#if defined(CROSSINK_USB_RX_OVERFLOW_ENABLED)
+std::atomic<uint32_t> rxDroppedBytes{0};
+
+void onCdcEvent(void*, esp_event_base_t, int32_t eventId, void* eventData) {
+  if (eventId != ARDUINO_USB_CDC_RX_OVERFLOW_EVENT || !eventData) return;
+  const auto* const data = static_cast<const arduino_usb_cdc_event_data_t*>(eventData);
+  rxDroppedBytes.fetch_add(static_cast<uint32_t>(data->rx_overflow.dropped_bytes), std::memory_order_relaxed);
+}
+#endif
+
+// Only native USB exposes the CDC overflow event used to reject incomplete uploads.
+#if defined(CROSSINK_USB_RX_OVERFLOW_ENABLED)
+uint32_t rxOverflowCount() { return rxDroppedBytes.load(std::memory_order_relaxed); }
+
+bool rxOverflowedSince(const uint32_t snapshot, uint32_t& dropped) {
+  const uint32_t current = rxOverflowCount();
+  if (current == snapshot) return false;
+  dropped = current - snapshot;
+  return true;
+}
+
+void writeRxOverflowError(const uint32_t snapshot) {
+  uint32_t dropped = 0;
+  (void)rxOverflowedSince(snapshot, dropped);
+  logSerial.printf("ERR:rx_overflow:dropped=%lu\n", static_cast<unsigned long>(dropped));
+}
+#endif
 
 void writeLine(const char* line) { logSerial.print(line); }
 
@@ -84,7 +126,8 @@ bool readExact(uint8_t* buffer, size_t length, uint32_t timeoutMs, size_t* recei
       nextBusyAt = millis() + 5000;
     }
 
-    esp_task_wdt_reset();
+    // USB transfers run on the Arduino loop task, which is intentionally not
+    // subscribed to the task watchdog. Yielding lets the watched idle tasks run.
     yield();
   }
   if (receivedOut) *receivedOut = received;
@@ -251,7 +294,6 @@ bool removeRecursive(const char* path, size_t depth = 0) {
       return false;
     }
 
-    esp_task_wdt_reset();
     yield();
     child = file.openNextFile();
   }
@@ -260,8 +302,9 @@ bool removeRecursive(const char* path, size_t depth = 0) {
 }
 
 void handleStatus() {
-  char response[80];
-  snprintf(response, sizeof(response), "STATUS:free=%u,largest=%u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  char response[160];
+  snprintf(response, sizeof(response), "STATUS:protocol=1,device=%s,firmware=%s,free=%u,largest=%u\n",
+           CROSSINK_FIRMWARE_DEVICE_TYPE, CROSSINK_VERSION, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   writeLine(response);
 }
 
@@ -284,6 +327,18 @@ void handleList() {
     writeLine("ERR:not_directory\n");
     return;
   }
+  root.close();
+
+  if (!FsHelpers::directoryCanBeEnumerated(path)) {
+    writeLine("ERR:list_failed\n");
+    return;
+  }
+
+  root = Storage.open(path);
+  if (!root) {
+    writeLine("ERR:opendir\n");
+    return;
+  }
 
   logSerial.printf("DIR:%s\n", path);
   HalFile file = root.openNextFile();
@@ -298,9 +353,14 @@ void handleList() {
       }
     }
     file.close();
-    esp_task_wdt_reset();
     yield();
     file = root.openNextFile();
+  }
+  if (FsHelpers::directoryIterationFailed(root)) {
+    LOG_ERR("USB", "Directory listing failed before EOF: %s", path);
+    root.close();
+    writeLine("ERR:list_failed\n");
+    return;
   }
   root.close();
   writeLine("END\n");
@@ -315,7 +375,29 @@ void handleMkdir() {
     return;
   }
 
-  if (Storage.mkdir(path, true) || Storage.exists(path)) {
+  const std::string parentDirectory = FsHelpers::extractFolderPath(path);
+  std::string rollbackBoundary = parentDirectory;
+  while (rollbackBoundary != "/" && !Storage.exists(rollbackBoundary.c_str())) {
+    rollbackBoundary = FsHelpers::extractFolderPath(rollbackBoundary);
+  }
+
+  const bool created = Storage.mkdir(path, true);
+  if (created || Storage.exists(path)) {
+    if (created) {
+      const auto visibility = FsHelpers::directoryEntryVisibility(parentDirectory.c_str(), path);
+      if (visibility != FsHelpers::DirectoryEntryVisibility::Visible) {
+        if (visibility == FsHelpers::DirectoryEntryVisibility::Missing) {
+          std::string rollbackPath = path;
+          while (rollbackPath != rollbackBoundary) {
+            Storage.rmdir(rollbackPath.c_str());
+            rollbackPath = FsHelpers::extractFolderPath(rollbackPath);
+          }
+        }
+        writeLine("ERR:mkdir_not_visible\n");
+        return;
+      }
+      ImageFolderIndex::invalidateForPath(path);
+    }
     writeLine("OK\n");
   } else {
     writeLine("ERR:mkdir_failed\n");
@@ -323,8 +405,17 @@ void handleMkdir() {
 }
 
 void handleWrite() {
+#if defined(CROSSINK_USB_RX_OVERFLOW_ENABLED)
+  const uint32_t rxOverflowAtStart = rxOverflowCount();
+#endif
   char path[PATH_BUFFER_SIZE];
   if (!readNormalizedPath(path, sizeof(path))) return;
+#if defined(CROSSINK_USB_RX_OVERFLOW_ENABLED)
+  if (rxOverflowCount() != rxOverflowAtStart) {
+    writeRxOverflowError(rxOverflowAtStart);
+    return;
+  }
+#endif
 
   uint8_t sizeBytes[4];
   if (!readExact(sizeBytes, sizeof(sizeBytes), HEADER_TIMEOUT_MS)) {
@@ -332,6 +423,13 @@ void handleWrite() {
     return;
   }
   const uint32_t expectedSize = readLe32(sizeBytes);
+
+#if defined(CROSSINK_USB_RX_OVERFLOW_ENABLED)
+  if (rxOverflowCount() != rxOverflowAtStart) {
+    writeRxOverflowError(rxOverflowAtStart);
+    return;
+  }
+#endif
 
   if (!ensureFileTransferAllowed()) return;
   if (strcmp(path, "/") == 0 || isProtectedPath(path)) {
@@ -375,12 +473,10 @@ void handleWrite() {
   uint32_t bytesAccepted = 0;
   auto flushFileBuffer = [&]() {
     if (fileBufferPos == 0) return true;
-    esp_task_wdt_reset();
     const size_t bytesToWrite = fileBufferPos;
     logSerial.printf("BUSY:write:%lu\n", static_cast<unsigned long>(bytesAccepted));
     const size_t written = file.write(fileBuffer.get(), bytesToWrite);
     fileBufferPos = 0;
-    esp_task_wdt_reset();
     return written == bytesToWrite;
   };
 
@@ -397,6 +493,15 @@ void handleWrite() {
       logSerial.printf("ERR:timeout:%lu/%lu\n", static_cast<unsigned long>(received), static_cast<unsigned long>(want));
       return;
     }
+
+#if defined(CROSSINK_USB_RX_OVERFLOW_ENABLED)
+    if (rxOverflowCount() != rxOverflowAtStart) {
+      file.close();
+      Storage.remove(TEMP_UPLOAD_PATH);
+      writeRxOverflowError(rxOverflowAtStart);
+      return;
+    }
+#endif
 
     crc = esp_rom_crc32_le(crc, transferBuffer, static_cast<uint32_t>(want));
     if (fileBufferPos + want > FILE_BUFFER_SIZE && !flushFileBuffer()) {
@@ -415,8 +520,9 @@ void handleWrite() {
       writeLine("ERR:write\n");
       return;
     }
-    writeAck();
-    esp_task_wdt_reset();
+    if (remaining > 0) {
+      writeAck();
+    }
     yield();
   }
 
@@ -428,8 +534,23 @@ void handleWrite() {
   }
   file.close();
 
+#if defined(CROSSINK_USB_RX_OVERFLOW_ENABLED)
+  if (rxOverflowCount() != rxOverflowAtStart) {
+    Storage.remove(TEMP_UPLOAD_PATH);
+    writeRxOverflowError(rxOverflowAtStart);
+    return;
+  }
+#endif
+
+  if (expectedSize > 0) {
+    // Tell the host the file is saved and ready for its separately written CRC.
+    writeAck();
+  }
+
   uint8_t crcBytes[4];
-  if (!readExact(crcBytes, sizeof(crcBytes), HEADER_TIMEOUT_MS)) {
+  size_t crcBytesReceived = 0;
+  if (!readExact(crcBytes, sizeof(crcBytes), CHECKSUM_TIMEOUT_MS, &crcBytesReceived)) {
+    LOG_ERR("USB", "CRC read timed out after %zu/%zu bytes", crcBytesReceived, sizeof(crcBytes));
     Storage.remove(TEMP_UPLOAD_PATH);
     writeLine("ERR:crc_missing\n");
     return;
@@ -438,7 +559,8 @@ void handleWrite() {
   const uint32_t expectedCrc = readLe32(crcBytes);
   if (crc != expectedCrc) {
     Storage.remove(TEMP_UPLOAD_PATH);
-    writeLine("ERR:crc\n");
+    logSerial.printf("ERR:crc:expected=%08lX,actual=%08lX,bytes=%lu\n", static_cast<unsigned long>(expectedCrc),
+                     static_cast<unsigned long>(crc), static_cast<unsigned long>(expectedSize));
     return;
   }
 
@@ -452,6 +574,7 @@ void handleWrite() {
   }
 
   clearCachesForPath(path);
+  ImageFolderIndex::invalidateForPath(path);
   writeLine("OK\n");
 }
 
@@ -469,6 +592,7 @@ void handleRemove() {
   }
 
   if (removeRecursive(path)) {
+    ImageFolderIndex::invalidateForPath(path);
     writeLine("OK\n");
   } else {
     writeLine("ERR:remove_failed\n");
@@ -504,6 +628,8 @@ void handleRename() {
   if (Storage.rename(src, dst)) {
     clearCachesForPath(src);
     clearCachesForPath(dst);
+    ImageFolderIndex::invalidateForPath(src);
+    ImageFolderIndex::invalidateForPath(dst);
     writeLine("OK\n");
   } else {
     writeLine("ERR:rename_failed\n");
@@ -553,7 +679,6 @@ void handleRead() {
 
     writeRaw(transferBuffer, static_cast<size_t>(read));
     crc = esp_rom_crc32_le(crc, transferBuffer, static_cast<uint32_t>(read));
-    esp_task_wdt_reset();
     yield();
   }
   file.close();
@@ -608,6 +733,12 @@ ProcessResult handleLine() {
 }
 
 }  // namespace
+
+void registerUsbCdcOverflowHandler() {
+#if defined(CROSSINK_USB_RX_OVERFLOW_ENABLED)
+  logSerial.onEvent(onCdcEvent);
+#endif
+}
 
 ProcessResult process(bool allowed) {
   if (!logSerial) return ProcessResult::None;

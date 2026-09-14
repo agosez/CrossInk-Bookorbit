@@ -1,5 +1,6 @@
 #include "DictionaryRegistry.h"
 
+#include <FsHelpers.h>
 #include <HalStorage.h>
 #include <Logging.h>
 
@@ -23,15 +24,13 @@ bool DictionaryRegistry::discover() {
   entries_.reserve(16);
   root_.clear();
 
-  for (const auto* candidate : DICT_ROOT_CANDIDATES) {
-    auto dir = Storage.open(candidate);
-    if (dir && dir.isDirectory()) {
-      root_ = candidate;
-      dir.close();
-      break;
-    }
-    if (dir) dir.close();
-  }
+  char resolvedRoot[32];
+  const bool foundRoot = std::any_of(
+      DICT_ROOT_CANDIDATES, DICT_ROOT_CANDIDATES + (sizeof(DICT_ROOT_CANDIDATES) / sizeof(*DICT_ROOT_CANDIDATES)),
+      [&](const auto* candidate) {
+        return FsHelpers::resolveRootDirectoryIgnoreCase(candidate, resolvedRoot, sizeof(resolvedRoot));
+      });
+  if (foundRoot) root_ = resolvedRoot;
 
   if (root_.empty()) {
     LOG_DBG("DREG", "No dictionary directory found on SD card");

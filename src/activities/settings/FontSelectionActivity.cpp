@@ -16,6 +16,7 @@
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
+#include "util/FontFamilyLabel.h"
 
 namespace fui = freeink::ui;
 namespace {
@@ -103,13 +104,15 @@ void FontSelectionActivity::onEnter() {
   fonts_.clear();
   fonts_.reserve(CrossPointSettings::BUILTIN_FONT_COUNT + (registry_ ? registry_->getFamilyCount() : 0));
 
-  fonts_.push_back({I18N.get(StrId::STR_LEXEND_DECA), true, 0});
-  fonts_.push_back({I18N.get(StrId::STR_BITTER), true, 1});
+  constexpr FontFamilyPointSizeRange builtinRange{10, 16};
+  fonts_.push_back({fontFamilyLabel(I18N.get(StrId::STR_LEXEND_DECA), builtinRange), true, 0});
+  fonts_.push_back({fontFamilyLabel(I18N.get(StrId::STR_BITTER), builtinRange), true, 1});
 
   if (registry_) {
     const auto& families = registry_->getFamilies();
     for (int i = 0; i < static_cast<int>(families.size()); i++) {
-      fonts_.push_back({families[i].name, false, static_cast<uint8_t>(CrossPointSettings::BUILTIN_FONT_COUNT + i)});
+      fonts_.push_back({fontFamilyLabel(families[i].name, fontFamilyPointSizeRange(families[i])), false,
+                        static_cast<uint8_t>(CrossPointSettings::BUILTIN_FONT_COUNT + i)});
     }
   }
 
@@ -119,7 +122,7 @@ void FontSelectionActivity::onEnter() {
   visibleRows_ = 1;
   initialViewportPending_ = true;
   uiReady_ = false;
-  app_.setTheme(uiThemeTokens(uiTarget_));
+  applySharedUiTheme(app_, uiTarget_);
   app_.on(ACTION_ROW, &FontSelectionActivity::onRowEvent, this);
   app_.setScreen(&FontSelectionActivity::listScreen, this);
 
@@ -342,7 +345,8 @@ void FontSelectionActivity::render(RenderLock&&) {
 
   const bool onPreviewed = selectedIndex_ == previewFontIndex_;
   const char* confirmLabel = onPreviewed ? tr(STR_SELECT) : tr(STR_PREVIEW);
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels =
+      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer();

@@ -14,8 +14,6 @@ void CrashActivity::onEnter() {
   if (panicMessage.empty()) {
     panicMessage = tr(STR_CRASH_NO_REASON);
   }
-  HalSystem::clearPanic();
-
   if (requestUpdateAndWait() != RequestUpdateResult::Rendered) {
     LOG_ERR("CRASH", "Crash screen could not be rendered synchronously");
     requestUpdate();
@@ -59,7 +57,7 @@ void CrashActivity::render(RenderLock&&) {
     y += lineHeight;
   }
 
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer();

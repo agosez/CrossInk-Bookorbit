@@ -9,6 +9,8 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "components/CompactHeader.h"
+#include "components/TouchActionButtons.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -20,22 +22,17 @@ bool hasActiveWifiConnection() { return WiFi.status() == WL_CONNECTED && WiFi.lo
 StrId failureMessageFor(const OtaUpdater::OtaUpdaterError error) {
   if (error == OtaUpdater::HASH_MISMATCH_ERROR) return StrId::STR_UPDATE_HASH_MISMATCH;
   if (error == OtaUpdater::WRONG_DEVICE_ERROR) return StrId::STR_FIRMWARE_WRONG_DEVICE;
+  if (error == OtaUpdater::SD_CARD_FULL_ERROR) return StrId::STR_SD_CARD_FULL;
   return StrId::STR_UPDATE_FAILED;
 }
 
-struct OtaActionRects {
-  Rect cancel;
-  Rect update;
-};
-
-OtaActionRects getOtaActionRects(const GfxRenderer& renderer) {
-  const int top = renderer.getScreenHeight() - 80;
-  const int width = renderer.getScreenWidth() / 2;
-  return {Rect{0, top, width, 80}, Rect{width, top, renderer.getScreenWidth() - width, 80}};
-}
-
-bool contains(const Rect& rect, const int x, const int y) {
-  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+TouchActionButtons::Layout getOtaActionLayout(const GfxRenderer& renderer) {
+  constexpr int sideMargin = 24;
+  constexpr int bottomMargin = 12;
+  constexpr int totalHeight = TouchActionButtons::kDefaultHeight * 2 + TouchActionButtons::kDefaultGap;
+  return TouchActionButtons::vertical(Rect{sideMargin, renderer.getScreenHeight() - bottomMargin - totalHeight,
+                                           std::max(1, renderer.getScreenWidth() - sideMargin * 2), totalHeight},
+                                      2);
 }
 }  // namespace
 
@@ -115,7 +112,7 @@ void OtaUpdateActivity::onExit() {
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
     delay(30);
-    silentRestart();
+    silentRestartAfterNetwork();
   }
 }
 
@@ -128,8 +125,12 @@ void OtaUpdateActivity::render(RenderLock&&) {
 
   const Rect header{0, metrics.topPadding, pageWidth, TouchHeaderBackButton::height(metrics, mappedInput)};
   const bool canGoBack = state == WAITING_CONFIRMATION || state == FAILED || state == NO_UPDATE;
-  if (canGoBack && mappedInput.hasTouchHardware()) {
-    TouchHeaderBackButton::draw(renderer, header, tr(STR_UPDATE), false);
+  if (mappedInput.hasTouchHardware()) {
+    if (canGoBack) {
+      TouchHeaderBackButton::draw(renderer, header, tr(STR_UPDATE), false);
+    } else {
+      CompactHeader::drawTitle(renderer, tr(STR_UPDATE));
+    }
   } else {
     GUI.drawHeader(renderer, header, tr(STR_UPDATE));
   }
@@ -156,13 +157,9 @@ void OtaUpdateActivity::render(RenderLock&&) {
                       (std::string(tr(STR_NEW_VERSION)) + updater.getLatestVersion()).c_str());
 
     if (mappedInput.hasTouch()) {
-      const auto actionRects = getOtaActionRects(renderer);
-      const int cancelTextWidth = renderer.getTextWidth(UI_10_FONT_ID, tr(STR_CANCEL));
-      renderer.drawText(UI_10_FONT_ID, actionRects.cancel.x + (actionRects.cancel.width - cancelTextWidth) / 2,
-                        actionRects.cancel.y + 28, tr(STR_CANCEL));
-      const int updateTextWidth = renderer.getTextWidth(UI_10_FONT_ID, tr(STR_UPDATE));
-      renderer.drawText(UI_10_FONT_ID, actionRects.update.x + (actionRects.update.width - updateTextWidth) / 2,
-                        actionRects.update.y + 28, tr(STR_UPDATE));
+      const auto actions = getOtaActionLayout(renderer);
+      const char* labels[] = {tr(STR_UPDATE), tr(STR_CANCEL)};
+      TouchActionButtons::draw(renderer, actions, labels, 0, -1, UI_10_FONT_ID);
     }
 
     const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_UPDATE), "", "");
@@ -177,19 +174,19 @@ void OtaUpdateActivity::render(RenderLock&&) {
         static_cast<int>(updaterProgress * 100), 100);
 
     y += metrics.progressBarHeight + metrics.verticalSpacing;
-    // Percent label is drawn by BaseTheme::drawProgressBar; this slot is left intentionally empty
-    // so the bytes line below stays at the same Y it was at when the activity drew its own percent.
+    // BaseTheme::drawProgressBar draws the percentage. This line shows the
+    // monotonic combined staging-and-flashing work instead.
     y += height + metrics.verticalSpacing;
     renderer.drawCenteredText(
         UI_10_FONT_ID, y,
         (std::to_string(updater.getProcessedSize()) + " / " + std::to_string(updater.getTotalSize())).c_str());
   } else if (state == NO_UPDATE) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_NO_UPDATE), true, EpdFontFamily::BOLD);
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state == FAILED) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, I18n::getInstance().get(failureMessage), true, EpdFontFamily::BOLD);
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state == FINISHED) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
@@ -262,13 +259,14 @@ void OtaUpdateActivity::loop() {
     int x = 0;
     int y = 0;
     if (mappedInput.wasScreenTapped(x, y)) {
-      const auto actionRects = getOtaActionRects(renderer);
-      if (contains(actionRects.cancel, x, y)) {
-        finish();
+      const auto actions = getOtaActionLayout(renderer);
+      const int action = TouchActionButtons::indexAt(actions, x, y);
+      if (action == 0) {
+        runUpdateInstall();
         return;
       }
-      if (contains(actionRects.update, x, y)) {
-        runUpdateInstall();
+      if (action == 1) {
+        finish();
         return;
       }
     }

@@ -17,7 +17,7 @@ constexpr ThemeMetrics makeValues() {
   v.homeCoverHeight = 600;
   v.homeCoverTileHeight = 660;
   v.homeRecentBooksCount = 3;
-  v.keyboardKeyHeight = 50;
+  v.keyboardKeyHeight = 56;
   v.keyboardCenteredText = true;
   return v;
 }
@@ -53,6 +53,9 @@ class LyraCarouselTheme : public LyraTheme {
   void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                       const std::function<const char*(int index)>& buttonLabel,
                       const std::function<UIIcon(int index)>& rowIcon) const override;
+  // Full touch strip used by the carousel menu, including the label below the icons.
+  // Home uses this same geometry to consume swipes that start over the menu.
+  static Rect buttonMenuTouchRect(const GfxRenderer& renderer, int buttonCount);
   void registerButtonMenuTouchTargets(const GfxRenderer& renderer, int buttonCount) const;
   // LyraTheme has no virtual overlay hook; this is a carousel-only helper.
   void drawButtonMenuSelectionOverlay(const GfxRenderer& renderer, int buttonCount, int selectedIndex,

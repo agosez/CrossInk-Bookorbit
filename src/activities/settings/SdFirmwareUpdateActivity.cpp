@@ -104,7 +104,7 @@ bool SdFirmwareUpdateActivity::validateFirmware() {
       errorMessage = tr(STR_FIRMWARE_TOO_LARGE);
     } else if (vr == firmware_flash::Result::TOO_SMALL) {
       errorMessage = tr(STR_FIRMWARE_TOO_SMALL);
-    } else if (vr == firmware_flash::Result::BAD_CHIP) {
+    } else if (vr == firmware_flash::Result::BAD_CHIP || vr == firmware_flash::Result::WRONG_BOARD) {
       errorMessage = tr(STR_FIRMWARE_WRONG_DEVICE);
     } else {
       errorMessage = tr(STR_INVALID_FIRMWARE);
@@ -170,8 +170,9 @@ void SdFirmwareUpdateActivity::performUpdate() {
   const auto result = firmware_flash::flashFromSdPath(firmwarePath.c_str(), progressCb, this);
   if (result != firmware_flash::Result::OK) {
     LOG_ERR("FW", "flash failed: %s", firmware_flash::resultName(result));
-    errorMessage =
-        result == firmware_flash::Result::BAD_CHIP ? tr(STR_FIRMWARE_WRONG_DEVICE) : tr(STR_FIRMWARE_WRITE_FAILED);
+    errorMessage = result == firmware_flash::Result::BAD_CHIP || result == firmware_flash::Result::WRONG_BOARD
+                       ? tr(STR_FIRMWARE_WRONG_DEVICE)
+                       : tr(STR_FIRMWARE_WRITE_FAILED);
     RenderLock lock(*this);
     state = State::FAILED;
     requestUpdate();
@@ -223,6 +224,7 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
 
   const auto lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
   const auto top = (pageHeight - lineHeight) / 2;
+  const Rect textArea{metrics.contentSidePadding, 0, pageWidth - metrics.contentSidePadding * 2, pageHeight};
 
   if (state == State::VALIDATING) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_VALIDATING_FIRMWARE));
@@ -245,39 +247,23 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
     // Percent label is drawn by BaseTheme::drawProgressBar; this slot is left intentionally empty
     // so the do-not-power-off line below stays at the same Y as before.
     y += lineHeight + metrics.verticalSpacing;
-    renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_FIRMWARE_UPDATE_DO_NOT_POWER_OFF));
+    UITheme::drawCenteredWrappedText(renderer, textArea, UI_10_FONT_ID, y, tr(STR_FIRMWARE_UPDATE_DO_NOT_POWER_OFF), 2);
   } else if (state == State::SUCCESS) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
-    const auto hintLines =
-        renderer.wrappedText(UI_10_FONT_ID, tr(STR_RESTARTING_HINT), pageWidth - metrics.contentSidePadding * 2, 3);
-    int hintY = top + lineHeight + metrics.verticalSpacing;
-    for (const auto& line : hintLines) {
-      renderer.drawCenteredText(UI_10_FONT_ID, hintY, line.c_str());
-      hintY += lineHeight;
-    }
+    UITheme::drawCenteredWrappedText(renderer, textArea, UI_10_FONT_ID, top + lineHeight + metrics.verticalSpacing,
+                                     tr(STR_RESTARTING_HINT), 3);
   } else if (state == State::FAILED) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
     if (!errorMessage.empty()) {
-      const auto errorLines =
-          renderer.wrappedText(UI_10_FONT_ID, errorMessage.c_str(), pageWidth - metrics.contentSidePadding * 2, 3);
-      int errorY = top + lineHeight + metrics.verticalSpacing;
-      for (const auto& line : errorLines) {
-        renderer.drawCenteredText(UI_10_FONT_ID, errorY, line.c_str());
-        errorY += lineHeight;
-      }
+      UITheme::drawCenteredWrappedText(renderer, textArea, UI_10_FONT_ID, top + lineHeight + metrics.verticalSpacing,
+                                       errorMessage.c_str(), 3);
     }
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else {
     // PICKING / CONFIRMING: a sub-activity is on top, nothing to draw.
     if (recoveryMode) {
-      const auto hintLines = renderer.wrappedText(UI_10_FONT_ID, tr(STR_RECOVERY_MODE_HINT),
-                                                  pageWidth - metrics.contentSidePadding * 2, 3);
-      int hintY = top;
-      for (const auto& line : hintLines) {
-        renderer.drawCenteredText(UI_10_FONT_ID, hintY, line.c_str());
-        hintY += lineHeight;
-      }
+      UITheme::drawCenteredWrappedText(renderer, textArea, UI_10_FONT_ID, top, tr(STR_RECOVERY_MODE_HINT), 3);
     }
   }
 

@@ -26,11 +26,17 @@ enum class SettingAction {
   BookOrbitSync,
   OPDSBrowser,
   DisplaySleepScreen,
+  DisplayFrontlight,
   ReaderFontOptions,
   ReaderPageLayout,
+  ScreenMargin,
+  QuickActions,
   ControlsPowerButton,
+  ControlsHomeButton,
   ControlsFrontButtons,
   ControlsSideButtons,
+  ControlsTapsGestures,
+  ControlsTwoFingerSwipe,
   SystemDevice,
   SystemFilesCache,
   SystemReadingStats,
@@ -42,6 +48,7 @@ enum class SettingAction {
   CheckForUpdates,
   SdFirmwareUpdate,
   Language,
+  KeyboardLayouts,
   DownloadFonts,
   ClockSync,
 };
@@ -50,15 +57,16 @@ struct SettingInfo {
   StrId nameId;
   SettingType type;
   uint8_t CrossPointSettings::* valuePtr = nullptr;
+  uint16_t CrossPointSettings::* value16Ptr = nullptr;
   std::vector<StrId> enumValues;
   std::vector<uint8_t> enumRawValues;
   std::vector<std::string> enumStringValues;  // runtime alternative to StrId enumValues (for SD card fonts etc.)
   SettingAction action = SettingAction::None;
 
   struct ValueRange {
-    uint8_t min;
-    uint8_t max;
-    uint8_t step;
+    uint16_t min;
+    uint16_t max;
+    uint16_t step;
   };
   ValueRange valueRange = {};
 
@@ -144,6 +152,18 @@ struct SettingInfo {
     return s;
   }
 
+  static SettingInfo Value16(StrId nameId, uint16_t CrossPointSettings::* ptr, const ValueRange valueRange,
+                             const char* key = nullptr, StrId category = StrId::STR_NONE_OPT) {
+    SettingInfo s;
+    s.nameId = nameId;
+    s.type = SettingType::VALUE;
+    s.value16Ptr = ptr;
+    s.valueRange = valueRange;
+    s.key = key;
+    s.category = category;
+    return s;
+  }
+
   static SettingInfo String(StrId nameId, char* ptr, size_t maxLen, const char* key = nullptr,
                             StrId category = StrId::STR_NONE_OPT) {
     SettingInfo s;
@@ -196,33 +216,16 @@ inline std::string settingEnumOptionLabel(const SettingInfo& setting, const uint
                                                   : std::string();
 }
 
-inline uint8_t settingEnumDisplayIndexForRawValue(const SettingInfo& setting, uint8_t rawValue) {
-  if (setting.enumRawValues.empty()) {
-    return rawValue;
-  }
-
-  auto it = std::find(setting.enumRawValues.begin(), setting.enumRawValues.end(), rawValue);
-  if (it == setting.enumRawValues.end()) {
-    return 0;
-  }
-  return static_cast<uint8_t>(std::distance(setting.enumRawValues.begin(), it));
-}
-
-inline uint8_t settingEnumRawValueForDisplayIndex(const SettingInfo& setting, uint8_t displayIndex) {
-  if (setting.enumRawValues.empty()) {
-    return displayIndex;
-  }
-  if (displayIndex >= setting.enumRawValues.size()) {
-    return setting.enumRawValues.front();
-  }
-  return setting.enumRawValues[displayIndex];
-}
-
 inline bool settingShowsNavigationCaret(const SettingInfo& setting) {
-  return setting.type == SettingType::SUBMENU || setting.action == SettingAction::CustomiseStatusBar;
+  return setting.type == SettingType::SUBMENU || setting.action == SettingAction::CustomiseStatusBar ||
+         setting.action == SettingAction::QuickActions;
 }
 
 class SettingsActivity final : public Activity {
+ public:
+  enum class View : uint8_t { Root, FileBrowser };
+
+ private:
   ButtonNavigator buttonNavigator;
 
   int selectedCategoryIndex = 0;  // Currently selected category
@@ -232,16 +235,22 @@ class SettingsActivity final : public Activity {
   // Per-category settings derived from shared list + device-only actions
   std::vector<SettingInfo> displaySettings;
   std::vector<SettingInfo> displaySleepSettings;
+  std::vector<SettingInfo> displayFrontlightSettings;
   std::vector<SettingInfo> readerSettings;
   std::vector<SettingInfo> readerFontSettings;
   std::vector<SettingInfo> readerPageLayoutSettings;
+  std::vector<SettingInfo> readerScreenMarginSettings;
   std::vector<SettingInfo> controlsSettings;
   std::vector<SettingInfo> controlsPowerSettings;
+  std::vector<SettingInfo> controlsHomeButtonSettings;
   std::vector<SettingInfo> controlsFrontButtonSettings;
   std::vector<SettingInfo> controlsSideButtonSettings;
+  std::vector<SettingInfo> controlsTapsGesturesSettings;
+  std::vector<SettingInfo> controlsTwoFingerSwipeSettings;
   std::vector<SettingInfo> systemSettings;
   std::vector<SettingInfo> systemDeviceSettings;
   std::vector<SettingInfo> systemFilesCacheSettings;
+  std::vector<SettingInfo> fileBrowserSettings;
   std::vector<SettingInfo> systemReadingStatsSettings;
   std::vector<SettingInfo> systemGlobalStatsSettings;
   const std::vector<SettingInfo>* currentSettings = nullptr;
@@ -251,6 +260,13 @@ class SettingsActivity final : public Activity {
   // The frontlight-panel shortcut opens Settings as a transient Home menu.
   // Its swipe-up closes the screen; regular Settings keeps swipe scrolling.
   bool dismissOnUpSwipe = false;
+  // The frontlight drawer pushes Settings over an active reader. Closing that
+  // instance must pop back to the panel instead of replacing the reader with Home.
+  bool returnToParentOnClose = false;
+  View view = View::Root;
+  // Settings can be created over a landscape reader. Its teardown resets the
+  // renderer before this activity enters, so retain the requested layout.
+  GfxRenderer::Orientation entryOrientation;
   bool showSettingSelection = true;
   SettingAction activeSubmenu = SettingAction::None;
   SettingAction parentSubmenu = SettingAction::None;
@@ -276,7 +292,6 @@ class SettingsActivity final : public Activity {
   static void onTabEvent(const freeink::ui::ActionEvent& event, void* user);
   static std::string settingValueText(const SettingInfo& setting);
   void buildSettingsScreen(UiApp::ScreenType& screen);
-  void selectCategory(int categoryIndex);
   void applyUiSettingChange(uint8_t CrossPointSettings::* valuePtr);
 
   void enterCategory(int categoryIndex);
@@ -288,17 +303,23 @@ class SettingsActivity final : public Activity {
   void openEnumOptionPicker(const SettingInfo& setting);
   void maybePromptKeepClockInSleep(const SettingInfo& changed);
   void openScreenMarginPicker(const SettingInfo& setting);
+  void openWordSpacingPicker();
   void openLanguagePicker();
   void openIdleTimeThresholdPicker();
   void toggleCurrentSetting();
   void openSleepTimeoutPicker();
   void openLineHeightPicker();
+  void openFrontlightScheduleTimePicker(uint16_t CrossPointSettings::* valuePtr, StrId titleId);
   void openStringEditor(const SettingInfo& setting);
   void rebuildSettingsLists();
   void syncQuickResumeTimeoutForSleepScreen(bool sleepScreenChanged, bool quickResumeTimeoutChanged);
+  void closeRootSettings();
+  bool isFileBrowserView() const { return view == View::FileBrowser; }
 
  public:
-  explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool dismissOnUpSwipe = false);
+  explicit SettingsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool dismissOnUpSwipe = false,
+                            bool returnToParentOnClose = false, View view = View::Root);
+  bool allowGlobalHomeSwipeGesture() const override { return false; }
   void onEnter() override;
   void onExit() override;
   void loop() override;

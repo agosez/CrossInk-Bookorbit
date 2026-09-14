@@ -11,12 +11,14 @@ permissions:
   contents: write
 
 jobs:
-  build-release:
+  prepare-release:
     runs-on: ubuntu-latest
+    outputs:
+      release_version: ${{ steps.version.outputs.release_version }}
+      asset_version: ${{ steps.version.outputs.asset_version }}
     steps:
       - uses: actions/checkout@v6
         with:
-          submodules: recursive
           fetch-depth: 0
 
       - name: Verify release tag is on main
@@ -25,6 +27,43 @@ jobs:
           git fetch origin main:refs/remotes/origin/main
           TAG_COMMIT="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
           git merge-base --is-ancestor "$TAG_COMMIT" origin/main
+
+      - name: Resolve release version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          VERSION="${VERSION#v}"
+          echo "release_version=$VERSION" >> "$GITHUB_OUTPUT"
+          # scripts/rename_firmware.py sanitises the version for artifact names:
+          # anything outside [A-Za-z0-9._-] becomes '-'. Semver build metadata such
+          # as "+bookorbit.1" therefore reaches the filename as "-bookorbit.1", so
+          # every artifact path below must use the sanitised form, not the version.
+          ASSET_VERSION="$(printf '%s' "$VERSION" | sed 's/[^A-Za-z0-9._-]\{1,\}/-/g')"
+          echo "asset_version=$ASSET_VERSION" >> "$GITHUB_OUTPUT"
+
+  build-release:
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: default
+            firmware: firmware-x3-x4
+          - environment: sticky
+            firmware: firmware-sticky
+          - environment: x4-pro
+            firmware: firmware-x4-pro
+          - environment: x4-classic
+            firmware: firmware-x4-classic
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - uses: actions/setup-python@v6
         with:
@@ -39,36 +78,54 @@ jobs:
       - name: Cache PlatformIO packages
         uses: actions/cache@v4
         with:
-          path: ~/.platformio
-          key: ${{ runner.os }}-platformio-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
-          restore-keys: |
-            ${{ runner.os }}-platformio-
+          # Do not cache PlatformIO's Python virtual environment. It is tied to
+          # the runner's Python and can become invalid when restored elsewhere.
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-platformio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
 
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Resolve release version
+      - name: Configure release version
+        env:
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.release_version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-          else
-            VERSION="${GITHUB_REF_NAME#v}"
-          fi
-          VERSION="${VERSION#v}"
-          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
-          sed -i "s/^version = .*/version = $VERSION/" platformio.ini
-          # scripts/rename_firmware.py sanitises the version for artifact names:
-          # anything outside [A-Za-z0-9._-] becomes '-'. Semver build metadata such
-          # as "+bookorbit.1" therefore reaches the filename as "-bookorbit.1", so
-          # the asset paths below must use the sanitised form, not $VERSION.
-          ASSET_VERSION="$(printf '%s' "$VERSION" | sed 's/[^A-Za-z0-9._-]\{1,\}/-/g')"
-          echo "ASSET_VERSION=$ASSET_VERSION" >> "$GITHUB_ENV"
+          sed -i "/^\[crossink\]$/,/^\[/s/^version = .*/version = $RELEASE_VERSION/" platformio.ini
 
       - name: Build CrossInk
         env:
-          CROSSINK_RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
-        run: pio run -e default -e sticky
+          CROSSINK_RELEASE_VERSION: ${{ needs.prepare-release.outputs.release_version }}
+        run: pio run -j1 -e ${{ matrix.environment }}
 
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-firmware-${{ matrix.environment }}
+          path: .pio/build/${{ matrix.environment }}/${{ matrix.firmware }}-v${{ needs.prepare-release.outputs.asset_version }}.bin
+          if-no-files-found: error
+
+  publish-release:
+    needs:
+      - prepare-release
+      - build-release
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ needs.prepare-release.outputs.release_version }}
+      ASSET_VERSION: ${{ needs.prepare-release.outputs.asset_version }}
+    steps:
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: release-firmware-*
+          merge-multiple: true
+          path: release-firmware
+
+      # Upstream also publishes a signed release catalog to its GitHub Pages
+      # source here (scripts/generate_release_catalog.py). This fork's updater
+      # reads the GitHub releases API directly (CROSSINK_OTA_RELEASE_URL), and
+      # that step needs upstream's commit-signing secret, so it is left out.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -76,5 +133,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           draft: true
           files: |
-            .pio/build/default/firmware-x3-x4-v${{ env.ASSET_VERSION }}.bin
-            .pio/build/sticky/firmware-sticky-v${{ env.ASSET_VERSION }}.bin
+            release-firmware/firmware-x3-x4-v${{ env.ASSET_VERSION }}.bin
+            release-firmware/firmware-sticky-v${{ env.ASSET_VERSION }}.bin
+            release-firmware/firmware-x4-pro-v${{ env.ASSET_VERSION }}.bin
+            release-firmware/firmware-x4-classic-v${{ env.ASSET_VERSION }}.bin

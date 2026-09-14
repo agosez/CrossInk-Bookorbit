@@ -7,6 +7,9 @@
 #include <utility>
 #include <variant>
 
+#include "reader/EpubReaderMenuModel.h"
+#include "util/FrontlightPanelModel.h"
+
 struct WifiResult {
   bool connected = false;
   std::string ssid;
@@ -21,12 +24,18 @@ struct MenuResult {
   int action = -1;
   uint8_t orientation = 0;
   bool settingsChanged = false;
-  uint8_t pageTurnOption = 0;
+  ReaderDrawerState drawerState{};
+  ReaderSettingsChangeMask changeMask = ReaderSettingsChangeMask::None;
+  bool reopenDrawer = false;
+  int16_t drawerValue = -1;
 };
 
 struct ChapterResult {
   int spineIndex = 0;
   std::string anchor;
+  uint8_t orientation = 0;
+  bool settingsChanged = false;
+  ReaderDrawerState drawerState{};
 };
 
 struct PercentResult {
@@ -43,20 +52,6 @@ struct OptionSelectionResult {
 
 struct PageResult {
   uint32_t page = 0;
-};
-
-struct ProgressChangeResult {
-  int spineIndex = 0;
-  int page = 0;
-  int totalPages = 0;
-  std::string xpath;
-  float percentage = 0.0f;
-  bool hasSavedProgress = false;
-};
-
-struct SyncResult {
-  int spineIndex = 0;
-  int page = 0;
 };
 
 enum class NetworkMode;
@@ -93,20 +88,28 @@ struct ReadingStatsResult {
 
 struct ClippingResult {
   std::string text;
-  int fromWordIdx = -1;
-  int toWordIdx = -1;
   uint16_t sectionPage = 0;
   uint16_t endSectionPage = 0;
   uint16_t sectionPageCount = 1;
   uint16_t startPageWordIndex = 0;
   uint16_t endPageWordIndex = 0;
   uint16_t paragraphIndex = UINT16_MAX;
-  std::string startText;
-  std::string endText;
-  std::string beforeStartText;
-  std::string afterEndText;
-  std::string midText;
+  uint16_t tableSelection = UINT16_MAX;
   uint16_t wordCount = 0;
+};
+
+// A dictionary lookup retains the selected page-word range and exact byte
+// boundaries within its outer words. The reader resolves it through its
+// canonical ClipWordStore before creating a clipping.
+struct DictionaryClippingRequest {
+  // Page offsets are relative to the reader page that opened dictionary lookup.
+  // A touch drag may continue from that page onto the next one.
+  uint8_t firstPageOffset = 0;
+  uint16_t firstPageWordOrdinal = 0;
+  uint8_t lastPageOffset = 0;
+  uint16_t lastPageWordOrdinal = 0;
+  uint16_t firstWordByteOffset = 0;
+  uint16_t lastWordByteEndOffset = 0;
 };
 
 struct ClippingJumpResult {
@@ -119,10 +122,11 @@ struct ClippingJumpResult {
   bool settingsChanged = false;
 };
 
-using ResultVariant = std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult,
-                                   IntervalResult, OptionSelectionResult, PageResult, ProgressChangeResult, SyncResult,
-                                   NetworkModeResult, FootnoteResult, BookmarkResult, FileBrowserActionResult,
-                                   FilePathResult, WordResult, ReadingStatsResult, ClippingResult, ClippingJumpResult>;
+using ResultVariant =
+    std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
+                 OptionSelectionResult, PageResult, NetworkModeResult, FootnoteResult, BookmarkResult,
+                 FileBrowserActionResult, FilePathResult, WordResult, ReadingStatsResult, ClippingResult,
+                 DictionaryClippingRequest, ClippingJumpResult, FrontlightPanelResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

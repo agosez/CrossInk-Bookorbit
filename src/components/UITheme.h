@@ -22,6 +22,14 @@ class UITheme {
                          bool hasSideButtonHints = false);
   static void drawCenteredText(const GfxRenderer& renderer, Rect screen, int fontId, int y, const char* text,
                                bool black = true, EpdFontFamily::Style style = EpdFontFamily::REGULAR);
+  // Draw a word-wrapped text block centered within screen. Returns its rendered height.
+  static int drawCenteredWrappedText(const GfxRenderer& renderer, Rect screen, int fontId, int y, const char* text,
+                                     int maxLines, bool black = true,
+                                     EpdFontFamily::Style style = EpdFontFamily::REGULAR, int lineSpacing = 0);
+  // Draw a word-wrapped text block centered around y's line baseline. Returns its rendered height.
+  static int drawCenteredWrappedTextAtCenter(const GfxRenderer& renderer, Rect screen, int fontId, int y,
+                                             const char* text, int maxLines, bool black = true,
+                                             EpdFontFamily::Style style = EpdFontFamily::REGULAR, int lineSpacing = 0);
   void reload();
   void setTheme(CrossPointSettings::UI_THEME type);
   static int getNumberOfItemsPerPage(const GfxRenderer& renderer, bool hasHeader, bool hasTabBar, bool hasButtonHints,
@@ -41,6 +49,8 @@ class UITheme {
   static UIIcon getFileIcon(const std::string& filename);
   static int getStatusBarHeight();
   static int getProgressBarHeight();
+  // Device-specific top offset for the clock, battery, and reserved status-bar lane.
+  static int getTopStatusBarInset(const GfxRenderer& renderer);
 
  private:
   const ThemeMetrics* currentMetrics;

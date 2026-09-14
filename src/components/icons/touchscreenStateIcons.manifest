@@ -1,0 +1,6 @@
+# Tabler touchscreen-state icons. Regenerate with:
+#   python3 scripts/generate_icons.py --library tabler \
+#     --manifest src/components/icons/touchscreenStateIcons.manifest \
+#     --sizes 24 --out src/components/icons/touchscreenStateIcons.h
+device-tablet = device-tablet
+device-tablet-off = device-tablet-off

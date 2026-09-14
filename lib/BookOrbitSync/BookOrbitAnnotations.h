@@ -89,9 +89,11 @@ struct BookOrbitAnnotationKeys {
 inline constexpr size_t BOOKORBIT_ANNOTATION_BATCH = 8;
 inline constexpr size_t BOOKORBIT_ANNOTATION_BATCH_TEXT_BYTES = 5 * 1024;
 
-// Wire-side bound on one annotation's text. Keep equal to CLIPPING_TEXT_MAX: anything longer
-// would be dropped by the clipping store anyway, so trimming at parse time just bounds the
-// RAM the incoming batch can hold.
+// Wire-side bound on one annotation's text, deliberately below CLIPPING_TEXT_MAX since
+// CrossInk raised that to 4 KB for local previews. What this bounds is the RAM an incoming
+// batch holds inside a TLS session, and the collection loop caps entries by nothing at all,
+// so the per-entry trim is the only limit there is. A web highlight longer than this keeps
+// its position and loses the tail of its text.
 inline constexpr size_t BOOKORBIT_ANNOTATION_TEXT_MAX = 2048;
 
 /**

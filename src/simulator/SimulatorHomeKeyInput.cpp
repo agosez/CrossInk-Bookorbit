@@ -10,7 +10,7 @@ void SimulatorHomeKeyInput::update() {
   tappedThisFrame = false;
   longPressedThisFrame = false;
 
-#ifdef SIMULATOR_DEVICE_X4PRO
+#ifdef SIMULATOR_DEVICE_X4_PRO
   const uint8_t* keyboardState = SDL_GetKeyboardState(nullptr);
   updateState(keyboardState != nullptr && keyboardState[SDL_SCANCODE_H], SDL_GetTicks());
 

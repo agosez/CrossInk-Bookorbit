@@ -57,7 +57,10 @@ class Xtc {
   std::string getTitle() const;
   std::string getAuthor() const;
   bool hasChapters() const;
-  xtc::ChapterListView getChapters();
+  size_t getChapterCount() const;
+  size_t getChapters(size_t firstIndex, xtc::ChapterInfo* chapters, size_t capacity) const;
+  bool getChapter(size_t index, xtc::ChapterInfo& chapter) const;
+  bool getChapterForPage(uint32_t page, xtc::ChapterInfo& chapter, size_t* chapterIndex = nullptr) const;
 
   // Cover image support (for sleep screen)
   std::string getCoverBmpPath() const;
@@ -67,7 +70,7 @@ class Xtc {
   std::string getThumbBmpPath() const;
   /**
    * Returns a thumbnail cache path for a height-keyed thumbnail.
-   * @param height Target thumbnail height in pixels; width uses the same 3:5 cache-key ratio as
+   * @param height Target thumbnail height in pixels; width uses the shared 2:3 home-cover cache-key ratio as
    * generateThumbBmp(height).
    * @return The generated width-height cache path, or an existing legacy height-only path.
    * @note Prefer getThumbBmpPath(width, height) when the caller needs exact cache-key control.

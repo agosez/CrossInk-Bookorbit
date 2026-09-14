@@ -1436,6 +1436,8 @@ const DEFAULT_MAX_WIDTH = DEVICE_PROFILES[DEFAULT_DEVICE].width;
 const DEFAULT_MAX_HEIGHT = DEVICE_PROFILES[DEFAULT_DEVICE].height;
 const DEFAULT_JPEG_QUALITY = 85;
 const DEFAULT_ENABLE_GRAYSCALE = true;
+const COVER_MAX_WIDTH = 480;
+const COVER_MAX_HEIGHT = 792;
 const X_DEFAULT_REFERENCE_CHARACTERS_PER_PAGE = 1500;
 // Note: Overlap is now always centered distribution (min 5%)
 
@@ -1454,6 +1456,7 @@ const DEFAULT_UPLOAD_SETTINGS = Object.freeze({
   convertBeforeUpload: false,
   renameFromMetadata: false,
   splitLongSections: true,
+  preserveCoverColor: true,
   quality: DEFAULT_JPEG_QUALITY,
   referenceCharacters: X_DEFAULT_REFERENCE_CHARACTERS_PER_PAGE,
   deviceTarget: "auto",
@@ -1468,6 +1471,7 @@ function getCurrentUploadSettings() {
     convertBeforeUpload: !!document.getElementById("convertBeforeUpload")?.checked,
     renameFromMetadata: !!document.getElementById("renameFromMetadataToggle")?.checked,
     splitLongSections: !!document.getElementById("splitLongSectionsToggle")?.checked,
+    preserveCoverColor: !!document.getElementById("preserveCoverColorToggle")?.checked,
     quality: parseInt(document.getElementById("qualitySlider")?.value || JPEG_QUALITY, 10),
     referenceCharacters: parseInt(
       document.getElementById("referenceCharactersInput")?.value || X_DEFAULT_REFERENCE_CHARACTERS_PER_PAGE,
@@ -1487,6 +1491,7 @@ function applyUploadSettings(settings = {}) {
     document.getElementById("convertBeforeUpload").checked = !!merged.convertBeforeUpload;
     document.getElementById("renameFromMetadataToggle").checked = !!merged.renameFromMetadata;
     document.getElementById("splitLongSectionsToggle").checked = !!merged.splitLongSections;
+    document.getElementById("preserveCoverColorToggle").checked = !!merged.preserveCoverColor;
     document.getElementById("export-log-checkbox").checked = !!merged.exportLog;
     document.getElementById("rememberUploadSettings").checked = !!settings.rememberSettings;
     document.getElementById("referenceCharactersInput").value = normalizedReferenceCharactersPerPage(
@@ -2018,6 +2023,9 @@ const X_LOCATION_WORDS_PER_UNIT = 64;
 const SECTION_SPLIT_WORD_THRESHOLD = 8000;
 const SECTION_SPLIT_BYTE_THRESHOLD = 32768;
 const SECTION_SPLIT_HARD_BYTE_LIMIT = 49152;
+// Let an oversized section run a little past its preferred size when that reaches an
+// author-supplied break. The hard limit still protects the reader's section builder.
+const SECTION_SPLIT_NATURAL_BOUNDARY_LOOKAHEAD_BYTES = 8192;
 const SECTION_SPLIT_SUFFIX_RE = /__ci_section_\d{3}(?=\.[^.]+$)/i;
 const XHTML_NS = "http://www.w3.org/1999/xhtml";
 const OPF_NS = "http://www.idpf.org/2007/opf";
@@ -2318,6 +2326,66 @@ function rewriteImageSrcReferences(content, xhtmlPath, renamed, splitImages = {}
   return { content: rewritten, changed };
 }
 
+/** Remove XML comments from XHTML source text. Returns { text, count, bytes }. */
+function stripComments(xml) {
+  const skippedSections = [
+    { open: "<![CDATA[", close: "]]>" },
+    { open: "<?", close: "?>" },
+  ];
+  const encoder = new TextEncoder();
+  const out = [];
+  let index = 0;
+  let count = 0;
+  let bytes = 0;
+
+  const doctypeEnd = (from) => {
+    const gt = xml.indexOf(">", from);
+    const subset = xml.indexOf("[", from);
+    if (subset < 0 || (gt >= 0 && subset > gt)) return gt < 0 ? xml.length : gt + 1;
+    const close = xml.indexOf("]>", subset);
+    return close < 0 ? xml.length : close + 2;
+  };
+
+  while (index < xml.length) {
+    const next = xml.indexOf("<", index);
+    if (next < 0) {
+      out.push(xml.slice(index));
+      break;
+    }
+    if (next > index) out.push(xml.slice(index, next));
+
+    if (xml.startsWith("<!--", next)) {
+      const close = xml.indexOf("-->", next + 4);
+      const end = close < 0 ? xml.length : close + 3;
+      count++;
+      bytes += encoder.encode(xml.slice(next, end)).length;
+      index = end;
+      continue;
+    }
+
+    if (xml.startsWith("<!DOCTYPE", next)) {
+      const end = doctypeEnd(next + 9);
+      out.push(xml.slice(next, end));
+      index = end;
+      continue;
+    }
+
+    const skipped = skippedSections.find((section) => xml.startsWith(section.open, next));
+    if (skipped) {
+      const close = xml.indexOf(skipped.close, next + skipped.open.length);
+      const end = close < 0 ? xml.length : close + skipped.close.length;
+      out.push(xml.slice(next, end));
+      index = end;
+      continue;
+    }
+
+    out.push("<");
+    index = next + 1;
+  }
+
+  return { text: out.join(""), count, bytes };
+}
+
 /**
  * Serialize an XML doc back to string, preserving the original <?xml?> declaration
  * and cleaning up XMLSerializer namespace prefix noise (xmlns:ns0 etc).
@@ -2594,6 +2662,71 @@ function isIgnorableSectionSplitNode(node) {
   return node?.nodeType === Node.TEXT_NODE && !(node.textContent || "").trim();
 }
 
+function hasNaturalSectionPageBoundary(node) {
+  if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+  const elements = [node, ...node.querySelectorAll("*")];
+  return elements.some((element) => {
+    const name = localName(element);
+    if (name === "hr") return true;
+    const epubType =
+      element.getAttributeNS?.("http://www.idpf.org/2007/ops", "type") || element.getAttribute("epub:type") || "";
+    const role = element.getAttribute("role") || "";
+    const style = element.getAttribute("style") || "";
+    return (
+      /(^|\s)pagebreak(\s|$)/i.test(epubType) ||
+      /(^|\s)doc-pagebreak(\s|$)/i.test(role) ||
+      /(?:^|;)\s*(?:-epub-)?(?:page-break|break)-(?:before|after)\s*:\s*(?:always|page|left|right|recto|verso)\b/i.test(
+        style,
+      )
+    );
+  });
+}
+
+function isNaturalSectionSplitBoundary(previous, next) {
+  return hasNaturalSectionPageBoundary(previous) || hasNaturalSectionPageBoundary(next) || isHeadingElement(next);
+}
+
+function findNaturalSectionSplitIndex(splitChildren, candidateIndex, current, currentBytes, serializer) {
+  const byteLimit = Math.min(
+    SECTION_SPLIT_HARD_BYTE_LIMIT,
+    Math.max(currentBytes, SECTION_SPLIT_BYTE_THRESHOLD) + SECTION_SPLIT_NATURAL_BOUNDARY_LOOKAHEAD_BYTES,
+  );
+  let projectedBytes = currentBytes;
+  for (let index = candidateIndex; index < splitChildren.length; index++) {
+    if (index > candidateIndex) {
+      projectedBytes += utf8ByteLength(serializer.serializeToString(splitChildren[index - 1]));
+    }
+    if (projectedBytes > byteLimit) break;
+    const priorNodes = current.concat(splitChildren.slice(candidateIndex, index));
+    const previous = [...priorNodes].reverse().find((node) => !isIgnorableSectionSplitNode(node));
+    const next = splitChildren[index];
+    const canBreakBefore =
+      !!previous &&
+      isSafeSectionSplitElement(next) &&
+      !shouldKeepSectionSplitCluster(next) &&
+      !isHeadingElement(previous);
+    if (canBreakBefore && isNaturalSectionSplitBoundary(previous, next)) return index;
+  }
+  return candidateIndex;
+}
+
+function findNaturalSectionSplitOffsetInCurrent(current, serializer) {
+  let trailingBytes = 0;
+  for (let offset = current.length - 1; offset > 0; offset--) {
+    trailingBytes += utf8ByteLength(serializer.serializeToString(current[offset]));
+    if (trailingBytes > SECTION_SPLIT_NATURAL_BOUNDARY_LOOKAHEAD_BYTES) break;
+    const previous = [...current.slice(0, offset)].reverse().find((node) => !isIgnorableSectionSplitNode(node));
+    const next = current[offset];
+    const canBreakBefore =
+      !!previous &&
+      isSafeSectionSplitElement(next) &&
+      !shouldKeepSectionSplitCluster(next) &&
+      !isHeadingElement(previous);
+    if (canBreakBefore && isNaturalSectionSplitBoundary(previous, next)) return offset;
+  }
+  return -1;
+}
+
 function chunkHasReaderContent(nodes) {
   const visit = (node, hidden) => {
     if (node.nodeType === Node.TEXT_NODE) return !hidden && !!(node.textContent || "").trim();
@@ -2784,7 +2917,8 @@ function splitLongXhtmlSections(xhtmlFiles, opfContent, opfPath, enabled) {
       currentBytes = fixedBytes;
     };
 
-    for (const child of splitChildren) {
+    for (let childIndex = 0; childIndex < splitChildren.length; childIndex++) {
+      const child = splitChildren[childIndex];
       const childWords = countLocationWords(child.textContent || "");
       const childBytes = utf8ByteLength(serializer.serializeToString(child));
       const lastContentNode = [...current].reverse().find((node) => !isIgnorableSectionSplitNode(node));
@@ -2797,7 +2931,37 @@ function splitLongXhtmlSections(xhtmlFiles, opfContent, opfPath, enabled) {
         isSafeSectionSplitElement(child) &&
         !shouldKeepSectionSplitCluster(child) &&
         !isHeadingElement(lastContentNode);
-      if (wouldExceed && canBreakBefore) flush();
+      const naturalSplitOffset =
+        wouldExceed && currentBytes <= SECTION_SPLIT_HARD_BYTE_LIMIT
+          ? findNaturalSectionSplitOffsetInCurrent(current, serializer)
+          : -1;
+      if (naturalSplitOffset > 0) {
+        const completed = current.splice(0, naturalSplitOffset);
+        chunks.push(completed);
+        currentWords = current.reduce((sum, node) => sum + countLocationWords(node.textContent || ""), 0);
+        currentBytes =
+          fixedBytes + current.reduce((sum, node) => sum + utf8ByteLength(serializer.serializeToString(node)), 0);
+      } else if (wouldExceed && canBreakBefore) {
+        const naturalSplitIndex = findNaturalSectionSplitIndex(
+          splitChildren,
+          childIndex,
+          current,
+          currentBytes,
+          serializer,
+        );
+        if (naturalSplitIndex > childIndex) {
+          for (let index = childIndex; index < naturalSplitIndex; index++) {
+            const node = splitChildren[index];
+            current.push(node);
+            currentWords += countLocationWords(node.textContent || "");
+            currentBytes += utf8ByteLength(serializer.serializeToString(node));
+          }
+          flush();
+          childIndex = naturalSplitIndex - 1;
+          continue;
+        }
+        flush();
+      }
 
       current.push(child);
       currentWords += childWords;
@@ -3504,9 +3668,33 @@ function applyGrayscale(ctx, width, height) {
   ctx.putImageData(imageData, 0, 0);
 }
 
+async function findEpubCoverImagePaths(zip) {
+  const opfPath = await findOPFPath(zip);
+  const entry = opfPath && zip.files[opfPath];
+  if (!entry) return new Set();
+  const doc = new DOMParser().parseFromString(await safeReadText(entry), "application/xml");
+  if (doc.getElementsByTagName("parsererror").length) return new Set();
+
+  const coverId = Array.from(doc.getElementsByTagName("meta"))
+    .find((meta) => meta.getAttribute("name") === "cover")
+    ?.getAttribute("content");
+  const items = Array.from(doc.getElementsByTagName("item"));
+  const coverItem = (coverId && items.find((item) => item.getAttribute("id") === coverId)) ||
+    items.find((item) => (item.getAttribute("properties") || "").split(/\s+/).includes("cover-image")) ||
+    items.find((item) => {
+    const properties = item.getAttribute("properties") || "";
+    const id = item.getAttribute("id") || "";
+    const href = item.getAttribute("href") || "";
+    return !properties.includes("cover-image") &&
+      (item.getAttribute("media-type") || "").startsWith("image/") && /cover/i.test(`${id} ${href}`);
+    });
+  const href = coverItem?.getAttribute("href");
+  return href ? new Set([resolvePath(opfPath, decodeHref(href.split("#")[0]))]) : new Set();
+}
+
 // Process single image - returns array of {data, suffix} objects
 const IMAGE_LOAD_TIMEOUT_MS = 30000; // 30 second timeout for image loading
-async function processImage(data, imageState = 0, imagePath = "") {
+async function processImage(data, imageState = 0, imagePath = "", preserveColor = false) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(new Blob([data], { type: imageMimeType(imagePath) }));
     const img = new Image();
@@ -3522,6 +3710,28 @@ async function processImage(data, imageState = 0, imagePath = "") {
       URL.revokeObjectURL(url);
       const origW = img.width,
         origH = img.height;
+
+      if (preserveColor) {
+        const scale = Math.min(1, COVER_MAX_WIDTH / origW, COVER_MAX_HEIGHT / origH);
+        const width = Math.max(1, Math.round(origW * scale));
+        const height = Math.max(1, Math.round(origH * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = "high";
+        context.fillStyle = "#FFF";
+        context.fillRect(0, 0, width, height);
+        context.drawImage(img, 0, 0, width, height);
+        const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", JPEG_QUALITY / 100));
+        const output = await blob.arrayBuffer();
+        resolve({
+          parts: [{ data: output, suffix: "", width, height, size: output.byteLength }],
+          meta: { origW, origH, origSize, wasSplit: false, rotated: false, finalW: width, finalH: height, finalSize: output.byteLength, imageState: 0 },
+        });
+        return;
+      }
 
       // imageState: 0=Normal, 1=H-Split (CW/CCW), 2=V-Split, 3=Rotate & Fit
       // ========================================================================
@@ -3958,6 +4168,236 @@ function imageMimeType(filename) {
   return "image/jpeg";
 }
 
+const CROSSINK_OPTIMIZER_MANIFEST_PATH = "META-INF/crossink/optimizer-v1.json";
+const CROSSINK_PXC_DIR = "META-INF/crossink/pxc";
+const CROSSINK_BAYER_4X4 = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+function crossInkPxcRules(text) {
+  const rules = [];
+  for (const match of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const declarations = {};
+    for (const declaration of match[2].matchAll(/(?:^|;)\s*([\w-]+)\s*:\s*([^;]+)/g)) {
+      declarations[declaration[1].toLowerCase()] = declaration[2].trim().toLowerCase();
+    }
+    if (Object.keys(declarations).length === 0) continue;
+    for (const selector of match[1].split(",")) rules.push({ selector: selector.trim(), declarations });
+  }
+  return rules;
+}
+
+function crossInkPxcStyle(rules, image) {
+  const style = {};
+  for (const rule of rules) {
+    try {
+      if (image.matches(rule.selector)) Object.assign(style, rule.declarations);
+    } catch (_) {
+      // Unsupported/invalid selectors must not style unrelated images.
+    }
+  }
+  const inline = crossInkPxcRules(`x{${image.getAttribute("style") || ""}}`)[0];
+  if (inline) Object.assign(style, inline.declarations);
+  return style;
+}
+
+function crossInkPxcLength(value, relative) {
+  if (!value) return undefined;
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  if (value.endsWith("%") || value.endsWith("vw")) return Math.max(1, Math.round(relative * parsed / 100));
+  if (!value.endsWith("px") && !/^\d+(?:\.\d+)?$/.test(value)) return undefined;
+  return Math.max(1, Math.round(parsed));
+}
+
+function crossInkPxcSize(width, height, style, viewportWidth, viewportHeight) {
+  let resolvedWidth = crossInkPxcLength(style.width, viewportWidth);
+  let resolvedHeight = crossInkPxcLength(style.height, viewportHeight);
+  if (!resolvedWidth && !resolvedHeight) return { width, height };
+  if (!resolvedWidth) resolvedWidth = Math.max(1, Math.round(resolvedHeight * width / height));
+  if (!resolvedHeight) resolvedHeight = Math.max(1, Math.round(resolvedWidth * height / width));
+  if (resolvedWidth > viewportWidth || resolvedHeight > viewportHeight) {
+    const scale = Math.min(viewportWidth / resolvedWidth, viewportHeight / resolvedHeight);
+    resolvedWidth = Math.max(1, Math.round(resolvedWidth * scale));
+    resolvedHeight = Math.max(1, Math.round(resolvedHeight * scale));
+  }
+  return { width: resolvedWidth, height: resolvedHeight };
+}
+
+function crossInkPxcPathKey(value) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index++) hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193) >>> 0;
+  return hash.toString(16).padStart(8, "0");
+}
+
+function crossInkCrc32(data) {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function crossInkPackBits(data) {
+  const out = [];
+  let i = 0;
+  while (i < data.length) {
+    let run = 1;
+    while (run < 128 && i + run < data.length && data[i + run] === data[i]) run++;
+    if (run >= 3) { out.push(257 - run, data[i]); i += run; continue; }
+    const start = i;
+    while (i < data.length && i - start < 128) {
+      if (i + 2 < data.length && data[i] === data[i + 1] && data[i] === data[i + 2]) break;
+      i++;
+    }
+    out.push(i - start - 1, ...data.subarray(start, i));
+  }
+  return new Uint8Array(out);
+}
+
+function encodeCrossInkPxc2(legacy) {
+  const input = new DataView(legacy.buffer, legacy.byteOffset, legacy.byteLength);
+  const width = input.getUint16(0, true), height = input.getUint16(2, true);
+  const raw = legacy.subarray(4), rowBytes = Math.ceil(width / 4);
+  if (!width || !height || width > 1024 || height > 1024 || raw.length !== rowBytes * height || raw.length > 131072)
+    throw new Error("Unsupported optimized image dimensions");
+  const blocks = [];
+  let size = 32;
+  for (let offset = 0; offset < raw.length; offset += 2048) {
+    const block = raw.subarray(offset, offset + 2048);
+    let encoded = crossInkPackBits(block), codec = 2;
+    if (encoded.length >= block.length) { encoded = block; codec = 0; }
+    blocks.push({ block, encoded, codec }); size += 12 + encoded.length;
+  }
+  const out = new Uint8Array(size), view = new DataView(out.buffer);
+  out.set([80, 88, 67, 50, 2, 1]); view.setUint16(6, 32, true);
+  view.setUint16(8, width, true); view.setUint16(10, height, true); view.setUint16(12, rowBytes, true);
+  view.setUint16(14, 2048, true); view.setUint16(16, blocks.length, true);
+  view.setUint32(20, raw.length, true); view.setUint32(24, crossInkCrc32(raw), true); view.setUint32(28, size, true);
+  let offset = 32;
+  blocks.forEach(({ block, encoded, codec }, sequence) => {
+    out[offset] = codec; view.setUint16(offset + 2, block.length, true);
+    view.setUint16(offset + 4, encoded.length, true); view.setUint16(offset + 6, sequence, true);
+    view.setUint32(offset + 8, crossInkCrc32(block), true); out.set(encoded, offset + 12); offset += 12 + encoded.length;
+  });
+  return out;
+}
+
+function crossInkIndexPath(path, limit) {
+  return path && !path.startsWith("/") && !path.includes("..") && !/[\x00-\x1f\\:%]/.test(path) &&
+    new TextEncoder().encode(path).length <= limit;
+}
+
+function buildCrossInkImageIndex(manifest, entries) {
+  if (entries.length > 256) throw new Error("Too many optimizer index records");
+  const out = new Uint8Array(32 + 208 * entries.length), view = new DataView(out.buffer), encoder = new TextEncoder();
+  const seen = new Set();
+  entries.forEach((e, i) => {
+    if (seen.has(e.href) || !crossInkIndexPath(e.href, 128) || !crossInkIndexPath(e.pxc, 64))
+      throw new Error("Invalid optimizer index path");
+    seen.add(e.href);
+    const at = 32 + 208 * i;
+    out.set(encoder.encode(e.href), at); out.set(encoder.encode(e.pxc), at + 129);
+    view.setUint16(at + 194, e.width, true); view.setUint16(at + 196, e.height, true); out[at + 198] = 2;
+    view.setUint32(at + 200, e.pxcBytes, true); view.setUint32(at + 204, e.pixelCrc32, true);
+  });
+  out.set([67, 79, 73, 88]); view.setUint16(4, 1, true); view.setUint16(6, 32, true);
+  view.setUint16(8, 208, true); view.setUint16(10, entries.length, true);
+  view.setUint32(16, crossInkCrc32(manifest), true); view.setUint32(20, manifest.length, true);
+  view.setUint32(24, crossInkCrc32(out.subarray(32)), true); view.setUint32(28, crossInkCrc32(out.subarray(0, 28)), true);
+  return out;
+}
+
+async function buildCrossInkPxc(data, width, height) {
+  const bitmap = await createImageBitmap(new Blob([data]));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  if (bitmap.close) bitmap.close();
+  const pixels = ctx.getImageData(0, 0, width, height).data;
+  const rowBytes = Math.ceil(width / 4);
+  const output = new Uint8Array(4 + rowBytes * height);
+  const view = new DataView(output.buffer);
+  view.setUint16(0, width, true);
+  view.setUint16(2, height, true);
+  let offset = 4;
+  for (let y = 0; y < height; y++) {
+    let packed = 0;
+    let shift = 6;
+    for (let x = 0; x < width; x++) {
+      const index = (y * width + x) * 4;
+      const grayBase = Math.round(pixels[index] * 0.299 + pixels[index + 1] * 0.587 + pixels[index + 2] * 0.114);
+      const gray = Math.max(0, Math.min(255, grayBase + (CROSSINK_BAYER_4X4[y & 3][x & 3] - 8) * 5));
+      const level = gray < 64 ? 0 : gray < 128 ? 1 : gray < 192 ? 2 : 3;
+      packed |= level << shift;
+      if (shift === 0) {
+        output[offset++] = packed;
+        packed = 0;
+        shift = 6;
+      } else {
+        shift -= 2;
+      }
+    }
+    if (shift !== 6) output[offset++] = packed;
+  }
+  return encodeCrossInkPxc2(output);
+}
+
+function resolveCrossInkPxcPath(basePath, reference) {
+  const source = decodeHref((reference || "").split("#")[0]);
+  if (!source || source.startsWith("data:")) return "";
+  return resolvePath(basePath, source);
+}
+
+async function buildCrossInkPxcSidecars(out, zip, xhtmlFiles) {
+  const cssRules = new Map();
+  for (const [path, fileObj] of Object.entries(zip.files)) {
+    if (!fileObj.dir && path.toLowerCase().endsWith(".css")) cssRules.set(path, crossInkPxcRules(await safeReadText(fileObj)));
+  }
+  const entries = [];
+  const seen = new Set();
+  // The display is landscape while the UI's conversion bounds are portrait.
+  const viewportWidth = MAX_HEIGHT;
+  const viewportHeight = MAX_WIDTH;
+  for (const [xhtmlPath, xhtml] of Object.entries(xhtmlFiles)) {
+    const doc = new DOMParser().parseFromString(xhtml, "text/html");
+    const rules = [];
+    doc.querySelectorAll('link[rel="stylesheet"]').forEach((link) => {
+      rules.push(...(cssRules.get(resolveCrossInkPxcPath(xhtmlPath, link.getAttribute("href"))) || []));
+    });
+    doc.querySelectorAll("style").forEach((style) => rules.push(...crossInkPxcRules(style.textContent || "")));
+    for (const image of doc.querySelectorAll("img")) {
+      const href = resolveCrossInkPxcPath(xhtmlPath, image.getAttribute("src"));
+      const imageFile = href && out.file(href);
+      if (!imageFile) continue;
+      try {
+        const data = await imageFile.async("arraybuffer");
+        const bitmap = await createImageBitmap(new Blob([data]));
+        const sourceWidth = bitmap.width;
+        const sourceHeight = bitmap.height;
+        if (bitmap.close) bitmap.close();
+        if (!sourceWidth || !sourceHeight) continue;
+        const size = crossInkPxcSize(sourceWidth, sourceHeight, crossInkPxcStyle(rules, image), viewportWidth, viewportHeight);
+        if (entries.length >= 256 || entries.some((e) => e.href === href) || !crossInkIndexPath(href, 128)) continue;
+        const key = `${href}:${size.width}x${size.height}`;
+        if (seen.has(key)) continue;
+        const pxcPath = `${CROSSINK_PXC_DIR}/${crossInkPxcPathKey(key)}.pxc2`;
+        const payload = await buildCrossInkPxc(data, size.width, size.height);
+        out.file(pxcPath, payload, { compression: "STORE", createFolders: false });
+        seen.add(key);
+        entries.push({ href, pxc: pxcPath, ...size, pxcFormat: "pxc2", pxcBytes: payload.length,
+          pixelCrc32: new DataView(payload.buffer).getUint32(24, true) });
+      } catch (_) {
+        // Sidecars are optional; keep the source EPUB image when a browser cannot decode it.
+      }
+    }
+  }
+  return entries;
+}
+
 // Convert EPUB file - returns converted blob
 async function convertEpubFile(file, progressCallback) {
   const startTime = Date.now();
@@ -3984,6 +4424,9 @@ async function convertEpubFile(file, progressCallback) {
 
   const out = new JSZip();
   const entries = Object.entries(zip.files);
+  const coverImagePaths = document.getElementById("preserveCoverColorToggle")?.checked
+    ? await findEpubCoverImagePaths(zip)
+    : new Set();
   const splitImages = {};
   const xhtmlFiles = {};
   let processedXhtmlFiles = {};
@@ -3991,6 +4434,7 @@ async function convertEpubFile(file, progressCallback) {
   let opfPath = null,
     opfContent = null;
   let mainIdentifier = null;
+  let optimizedOpfContent = null;
 
   // Write mimetype FIRST per EPUB OCF spec
   if (zip.files["mimetype"]) {
@@ -4011,7 +4455,7 @@ async function convertEpubFile(file, progressCallback) {
 
       let result;
       try {
-        result = await processImage(data, imageState, path);
+        result = await processImage(data, imageState, path, coverImagePaths.has(path));
       } catch (imageError) {
         // Log error but continue with original image
         console.error(`Failed to process image ${path}:`, imageError);
@@ -4088,6 +4532,13 @@ async function convertEpubFile(file, progressCallback) {
   for (const [xhtmlPath, content] of Object.entries(xhtmlFiles)) {
     if (operationCancelled) throw new Error("Cancelled by user");
     let t = scrubEpubTextResource(xhtmlPath, content);
+
+    const stripped = stripComments(t);
+    if (stripped.count) {
+      t = stripped.text;
+      logFix(`Comments (${stripped.count}, ${formatBytes(stripped.bytes)})`, xhtmlPath.split("/").pop());
+    }
+
     const r = fixSvgCover(t);
     if (r.fixed) {
       t = r.c;
@@ -4316,6 +4767,7 @@ async function convertEpubFile(file, progressCallback) {
     t = fixOPF(t, opfContent, opfDir, splitImages);
     t = addSplitSectionsToOpf(t, opfPath, sectionSplitResult.splitSections);
     t = rewriteSplitSectionReferences(t, opfPath, sectionSplitResult.anchorTargets);
+    optimizedOpfContent = t;
     if (t !== opfContent) logFix("OPF", "manifest updated");
     out.file(opfPath, t, DEFLATE_OPTS);
 
@@ -4342,12 +4794,28 @@ async function convertEpubFile(file, progressCallback) {
     out.file(xhtmlPath, content, DEFLATE_OPTS);
   }
 
+  const imageCacheEntries = await buildCrossInkPxcSidecars(out, zip, processedXhtmlFiles);
+  if (optimizedOpfContent) {
+    const manifest = new TextEncoder().encode(JSON.stringify({
+      format: "crossink-optimizer",
+      version: 1,
+      target: { device: ACTIVE_DEVICE.toLowerCase(), width: MAX_HEIGHT, height: MAX_WIDTH, grayscaleLevels: 4 },
+      generator: "crossink-web-uploader",
+      features: { htmlNormalized: true, cssFlattened: false, xLocations: true, prebuiltPxc: imageCacheEntries.length > 0 },
+      images: imageCacheEntries,
+    }));
+    out.file(CROSSINK_OPTIMIZER_MANIFEST_PATH, manifest, { compression: "STORE", createFolders: false });
+    out.file("META-INF/crossink/optimizer-images-v1.idx", buildCrossInkImageIndex(manifest, imageCacheEntries),
+      { compression: "STORE", createFolders: false });
+  }
+
   // Copy remaining files
   for (const [path, fileObj] of entries) {
     if (operationCancelled) throw new Error("Cancelled by user");
     if (fileObj.dir || path === "mimetype") continue;
     const low = path.toLowerCase();
-    if (low === X_LOCATION_MANIFEST_PATH.toLowerCase()) continue;
+    if (low === X_LOCATION_MANIFEST_PATH.toLowerCase() || low === CROSSINK_OPTIMIZER_MANIFEST_PATH.toLowerCase() || low === "meta-inf/crossink/optimizer-images-v1.idx" ||
+        low.startsWith(`${CROSSINK_PXC_DIR.toLowerCase()}/`)) continue;
     if (low.match(/\.(png|gif|webp|bmp|jpg|jpeg|svg)$/) || low.match(/\.(xhtml|html|htm)$/) || low.endsWith(".opf"))
       continue;
 

@@ -19,11 +19,22 @@ const char* I18n::get(StrId id) const {
   }
 
   // Use generated helper function - no hardcoded switch needed!
-  const LangStrings lang = getLanguageStrings(_language);
+  LangStrings lang = getLanguageStrings(_language);
 
-  // If bit 15 of the offset is set, apply the offset to the English lookup table
-  const uint16_t off = lang.offsets[index];
-  if (off & 0x8000) return STRINGS_EN_DATA + (off & 0x7FFF);
+  // Bit 15 means "my base language spells this the same, ask it instead": the
+  // string is stored once, in the deepest language of the chain that differs.
+  // Most languages base on English directly, so that is one hop; a variant
+  // (Valencian -> Catalan -> English) takes two. Chains always end at English,
+  // whose table never sets the bit; the counter only stops a malformed table
+  // from looping forever.
+  uint16_t off = lang.offsets[index];
+  for (uint8_t hops = 0; (off & 0x8000) != 0 && hops < static_cast<uint8_t>(Language::_COUNT); ++hops) {
+    lang = getLanguageStrings(lang.base);
+    off = lang.offsets[index];
+  }
+  if ((off & 0x8000) != 0) {
+    return "???";
+  }
   return lang.data + off;
 }
 

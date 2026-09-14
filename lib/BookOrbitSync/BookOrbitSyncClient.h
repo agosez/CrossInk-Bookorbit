@@ -49,6 +49,20 @@ class BookOrbitSyncClient {
   static constexpr Error LOW_MEMORY = KOReaderSyncClient::LOW_MEMORY;
 
   /**
+   * The identifier this reader reports to BookOrbit as device_id / deviceId.
+   *
+   * "crossink-" followed by the twelve hex digits of the chip's factory MAC, so two
+   * CrossInk readers on the same account are told apart. The server keys everything
+   * per device on this id alone — which highlights a device has seen (and therefore
+   * which ones it is deemed to have deleted), reading-session ids, device retirement,
+   * progress resets; the human-readable device name only appears on progress rows.
+   * Two readers sharing one id would silently delete each other's highlights.
+   *
+   * Stable across reboots and firmware updates; the buffer lives for the program.
+   */
+  static const char* deviceId();
+
+  /**
    * Keeps one TLS connection open across the requests of a single sync.
    *
    * A sync makes several requests to the same host in a row, and a handshake costs a second
@@ -102,6 +116,29 @@ class BookOrbitSyncClient {
    */
   static Error uploadPageStats(const std::string& documentHash, const std::string& deviceModel,
                                const BookOrbitStatEvent* events, size_t count);
+
+  /**
+   * Record a completed sync on the server (POST /plugin/sweeps), the same call BookOrbit's
+   * own KOReader plugin makes at the end of a sweep.
+   *
+   * The sweep is this device's declaration that it uploads its own page timings. A device
+   * with no sweep in the server's recent-sweep window is treated as a plain KOReader
+   * install, and the server fabricates estimated reading sessions from every advancing
+   * progress push — duplicating the measured sessions uploadPageStats already carried.
+   * Recording the sweep suppresses that estimation and makes the server retire estimates
+   * that measured sessions overlap.
+   *
+   * The counters are informational telemetry mirroring the plugin's report of what the
+   * sync did; the sweep row itself is what matters.
+   *
+   * @param deviceModel Human-readable device name reported alongside the sweep
+   * @param booksMatched Books the server recognised this sync (0 or 1: a sync covers one book)
+   * @param pageStatsUploaded Reading-session events the server accepted this sync
+   * @param annotationsUpserted Highlights sent to the server this sync
+   * @return OK on success, error code on failure
+   */
+  static Error completeSweep(const std::string& deviceModel, uint32_t booksMatched, uint32_t pageStatsUploaded,
+                             uint32_t annotationsUpserted);
 
   /**
    * Send one batch of local highlight changes to BookOrbit's annotation exchange

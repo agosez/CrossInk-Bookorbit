@@ -19,6 +19,7 @@
 #include "I18n.h"
 #include "RecentBooksStore.h"
 #include "activities/reader/BookReadingStats.h"
+#include "components/TouchActionButtons.h"
 #include "components/TouchRegistry.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
@@ -87,7 +88,9 @@ void BaseTheme::drawBatteryLeft(const GfxRenderer& renderer, Rect rect, const bo
                                 const bool foregroundBlack) const {
   // Left aligned: icon on left, percentage on right (reader mode)
   const uint16_t percentage = powerManager.getBatteryPercentage();
-  const int y = rect.y + 6;
+  // The icon's nub makes its visual center sit slightly below its bounding
+  // box. Lift it one pixel to center it with the percentage text.
+  const int y = rect.y + 5;
 
   if (showPercentage) {
     const auto percentageText = std::to_string(percentage) + "%";
@@ -105,7 +108,7 @@ void BaseTheme::drawBatteryRight(const GfxRenderer& renderer, Rect rect, const b
   // Right aligned: percentage on left, icon on right (UI headers)
   // rect.x is already positioned for the icon (drawHeader calculated it)
   const uint16_t percentage = powerManager.getBatteryPercentage();
-  const int y = rect.y + 6;
+  const int y = rect.y + 5;
 
   if (showPercentage) {
     const auto percentageText = std::to_string(percentage) + "%";
@@ -154,9 +157,12 @@ void BaseTheme::drawProgressBar(const GfxRenderer& renderer, Rect rect, const si
     renderer.fillRect(rect.x + 2, rect.y + 2, fillWidth, rect.height - 4);
   }
 
-  // Draw percentage text centered below bar
-  const std::string percentText = std::to_string(percent) + "%";
-  renderer.drawCenteredText(UI_10_FONT_ID, rect.y + rect.height + 15, percentText.c_str());
+  // Draw percentage text centered below bar. snprintf into a stack buffer, not a
+  // std::string: this runs on every progress repaint, including mid-download while
+  // the TLS session needs its own tight heap headroom (see HttpDownloader heap notes).
+  char percentText[8];
+  snprintf(percentText, sizeof(percentText), "%d%%", percent);
+  renderer.drawCenteredText(UI_10_FONT_ID, rect.y + rect.height + 15, percentText);
 }
 
 void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
@@ -186,7 +192,7 @@ void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
                                        TouchRegistry::Button);
       renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, false);
       renderer.drawRect(x, pageHeight - buttonY, buttonWidth, buttonHeight);
-    } else {
+    } else if (labels[i] != nullptr) {
       // Fast refreshes retain the previous hint pixels. Clear a label that was
       // present on the last screen before leaving this button slot inactive.
       renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, false);
@@ -466,6 +472,13 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   const bool roundedRaffCompactHeader = !readerContext &&
                                         SETTINGS.uiTheme == CrossPointSettings::UI_THEME::ROUNDEDRAFF &&
                                         rect.height != metrics.homeTopPadding;
+  const bool lyraHeader = SETTINGS.uiTheme == CrossPointSettings::UI_THEME::LYRA ||
+                          SETTINGS.uiTheme == CrossPointSettings::UI_THEME::LYRA_3_COVERS ||
+                          SETTINGS.uiTheme == CrossPointSettings::UI_THEME::LYRA_CAROUSEL;
+  const bool roundedRaffHeader = !readerContext && SETTINGS.uiTheme == CrossPointSettings::UI_THEME::ROUNDEDRAFF;
+  const int clockYOffset = roundedRaffHeader
+                               ? roundedRaffHeaderClockYOffset
+                               : (!hasVisibleTitle && !readerContext ? homeHeaderClockTextYOffset(renderer) : 0);
   if (batteryDetached) {
     const int titleLineHeight = ui.target.lineHeight(fui::GfxRendererTarget::FONT_TITLE);
     const int titleTop = static_cast<int>(band.height) - tokens.headerUnderline - tokens.spaceMd - titleLineHeight;
@@ -487,13 +500,24 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   const int16_t batteryEdgeInset = batteryDetached ? 12 : tokens.headerSidePadding;
   const int16_t batteryX = batteryLeft ? static_cast<int16_t>(band.x + batteryEdgeInset)
                                        : static_cast<int16_t>(band.right() - batteryEdgeInset - batteryReserve);
-  // RoundedRaff's Home header is taller than ordinary headers. Shift compact
-  // headers to its battery baseline; Home already has that extra height.
-  const int16_t batteryY = static_cast<int16_t>(
-      band.y +
-      (batteryDetached
-           ? detachedHeaderBatteryTopInset
-           : (roundedRaffCompactHeader ? std::max(0, (metrics.homeTopPadding - metrics.headerHeight) / 2) : 0)));
+  // Lyra places its battery in the top status lane. Align the percentage text
+  // to the clock's text row, while the shared icon helper keeps the glyph
+  // vertically aligned with that label.
+  const int16_t batteryY = [&] {
+    if (batteryDetached && lyraHeader) {
+      const int statusBarHeight = std::max(UITheme::getStatusBarHeight(), metrics.statusBarVerticalMargin);
+      return static_cast<int16_t>(rect.y + (statusBarHeight - renderer.getLineHeight(SMALL_FONT_ID)) / 2 +
+                                  UITheme::getTopStatusBarInset(renderer) + clockYOffset);
+    }
+
+    // RoundedRaff's Home header is taller than ordinary headers. Shift compact
+    // headers to its battery baseline; Home already has that extra height.
+    return static_cast<int16_t>(
+        band.y + UITheme::getTopStatusBarInset(renderer) +
+        (batteryDetached
+             ? detachedHeaderBatteryTopInset
+             : (roundedRaffCompactHeader ? std::max(0, (metrics.homeTopPadding - metrics.headerHeight) / 2) : 0)));
+  }();
   const int16_t batteryIconX =
       batteryLeft ? batteryX : static_cast<int16_t>(batteryX + batteryReserve - metrics.batteryWidth - batteryNubWidth);
   const Rect batteryRect{batteryIconX, batteryY, metrics.batteryWidth, metrics.batteryHeight};
@@ -503,10 +527,6 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
     drawBatteryRight(renderer, batteryRect, showBatteryPercentage);
   }
 
-  const bool roundedRaffHeader = !readerContext && SETTINGS.uiTheme == CrossPointSettings::UI_THEME::ROUNDEDRAFF;
-  const int clockYOffset = roundedRaffHeader
-                               ? roundedRaffHeaderClockYOffset
-                               : (!hasVisibleTitle && !readerContext ? homeHeaderClockTextYOffset(renderer) : 0);
   drawTopStatusBarClock(renderer, rect.y, nullptr, readerContext, clockYOffset);
 }
 
@@ -874,7 +894,7 @@ void BaseTheme::fillPopupProgress(const GfxRenderer& renderer, const Rect& layou
 }
 
 void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage,
-                              const int pageCount, std::string title, const int paddingBottom, const int textYOffset,
+                              const int pageCount, const char* title, const int paddingBottom, const int textYOffset,
                               const bool isPageBookmarked, const char* timeLeftLabel, const bool darkMode,
                               const float chapterProgressPercent, const int stableCurrentPage,
                               const int stablePageCount, const bool showProgress, const bool pageCountEstimated) const {
@@ -895,18 +915,17 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   if (showProgress && (statusBar.showBookProgressPercent || statusBar.showChapterPageCount || showStablePageNumbers)) {
     // Right aligned text for progress counter
     char progressStr[48];
-    // Prefix the section page count with "~" while a still-building spine only yields an estimated total.
-    const char* estimatePrefix = pageCountEstimated ? "~" : "";
+    // Draw the estimate marker separately so it is legible on lower-PPI displays.
+    const bool showEstimate = pageCountEstimated && statusBar.showChapterPageCount;
 
     if (statusBar.showChapterPageCount && showStablePageNumbers && statusBar.showBookProgressPercent) {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d  %d/%d  %.0f%%", estimatePrefix, currentPage, pageCount,
-               stableCurrentPage, stablePageCount, bookProgress);
+      snprintf(progressStr, sizeof(progressStr), "%d/%d  %d/%d  %.0f%%", currentPage, pageCount, stableCurrentPage,
+               stablePageCount, bookProgress);
     } else if (statusBar.showChapterPageCount && showStablePageNumbers) {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d  %d/%d", estimatePrefix, currentPage, pageCount,
-               stableCurrentPage, stablePageCount);
+      snprintf(progressStr, sizeof(progressStr), "%d/%d  %d/%d", currentPage, pageCount, stableCurrentPage,
+               stablePageCount);
     } else if (statusBar.showChapterPageCount && statusBar.showBookProgressPercent) {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d  %.0f%%", estimatePrefix, currentPage, pageCount,
-               bookProgress);
+      snprintf(progressStr, sizeof(progressStr), "%d/%d  %.0f%%", currentPage, pageCount, bookProgress);
     } else if (showStablePageNumbers && statusBar.showBookProgressPercent) {
       snprintf(progressStr, sizeof(progressStr), "%d/%d  %.0f%%", stableCurrentPage, stablePageCount, bookProgress);
     } else if (statusBar.showBookProgressPercent) {
@@ -914,14 +933,21 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     } else if (showStablePageNumbers) {
       snprintf(progressStr, sizeof(progressStr), "%d/%d", stableCurrentPage, stablePageCount);
     } else {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d", estimatePrefix, currentPage, pageCount);
+      snprintf(progressStr, sizeof(progressStr), "%d/%d", currentPage, pageCount);
     }
 
     progressTextWidth = renderer.getTextWidth(SMALL_FONT_ID, progressStr);
-    renderer.drawText(
-        SMALL_FONT_ID,
-        renderer.getScreenWidth() - metrics.statusBarHorizontalMargin - orientedMarginRight - progressTextWidth, textY,
-        progressStr, foregroundBlack);
+    const int estimateWidth = showEstimate ? renderer.getTextWidth(UI_10_FONT_ID, "~") : 0;
+    constexpr int estimateGap = 2;
+    const int estimateSpacing = showEstimate ? estimateGap : 0;
+    const int progressX = renderer.getScreenWidth() - metrics.statusBarHorizontalMargin - orientedMarginRight -
+                          estimateWidth - estimateSpacing - progressTextWidth;
+    if (showEstimate) {
+      const int estimateY = textY + (renderer.getLineHeight(SMALL_FONT_ID) - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
+      renderer.drawText(UI_10_FONT_ID, progressX, estimateY, "~");
+    }
+    renderer.drawText(SMALL_FONT_ID, progressX + estimateWidth + estimateSpacing, textY, progressStr);
+    progressTextWidth += estimateWidth + estimateSpacing;
   }
 
   // Draw Progress Bar
@@ -990,7 +1016,7 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
   }
 
   // Draw Title
-  if (!title.empty()) {
+  if (title && title[0] != '\0') {
     textY -= textYOffset;
     // Centered chapter title text
     // Page width minus existing content with 30px padding on each side
@@ -1006,27 +1032,32 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     int availableTitleSpace = rendererableScreenWidth - 2 * titleMarginLeftAdjusted;
 
     int titleWidth;
-    titleWidth = renderer.getTextWidth(SMALL_FONT_ID, title.c_str());
+    titleWidth = renderer.getTextWidth(SMALL_FONT_ID, title);
     if (titleWidth > availableTitleSpace) {
       // Not enough space to center on the screen, center it within the remaining space instead
       availableTitleSpace = rendererableScreenWidth - titleMarginLeft - titleMarginRight;
       titleMarginLeftAdjusted = titleMarginLeft;
     }
+    // Only the overflow path needs storage, and it must outlive the drawText below.
+    std::string truncated;
     if (titleWidth > availableTitleSpace) {
-      title = renderer.truncatedText(SMALL_FONT_ID, title.c_str(), availableTitleSpace);
-      titleWidth = renderer.getTextWidth(SMALL_FONT_ID, title.c_str());
+      truncated = renderer.truncatedText(SMALL_FONT_ID, title, availableTitleSpace);
+      title = truncated.c_str();
+      titleWidth = renderer.getTextWidth(SMALL_FONT_ID, title);
     }
 
     renderer.drawText(SMALL_FONT_ID,
                       titleMarginLeftAdjusted + metrics.statusBarHorizontalMargin + orientedMarginLeft +
                           (availableTitleSpace - titleWidth) / 2,
-                      textY, title.c_str(), foregroundBlack);
+                      textY, title, foregroundBlack);
   }
 }
 
 void BaseTheme::drawTopStatusBarClock(const GfxRenderer& renderer, int topY, const char* previewTime,
-                                      const bool readerContext, const int textYOffset, const bool darkMode) const {
-  if (!(readerContext ? SETTINGS.shouldShowClockInReader() : SETTINGS.shouldShowClockOutsideReader())) {
+                                      const bool readerContext, const int textYOffset, const bool darkMode,
+                                      const bool forceVisible) const {
+  if (!forceVisible &&
+      !(readerContext ? SETTINGS.shouldShowClockInReader() : SETTINGS.shouldShowClockOutsideReader())) {
     return;
   }
 
@@ -1055,7 +1086,8 @@ void BaseTheme::drawTopStatusBarClock(const GfxRenderer& renderer, int topY, con
   const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, timeText);
   const int lineHeight = renderer.getLineHeight(SMALL_FONT_ID);
   const int textX = (renderer.getScreenWidth() - textWidth) / 2;
-  const int effectiveTextYOffset = textYOffset + (readerContext ? homeHeaderClockTextYOffset(renderer) : 0);
+  const int effectiveTextYOffset = textYOffset + UITheme::getTopStatusBarInset(renderer) +
+                                   (readerContext ? homeHeaderClockTextYOffset(renderer) : 0);
   const int baseTopY = topY >= 0 ? topY : orientedMarginTop + metrics.topPadding;
   const int textY = baseTopY + (statusBarHeight - lineHeight) / 2 + effectiveTextYOffset;
   renderer.drawText(SMALL_FONT_ID, textX, textY, timeText, !darkMode);
@@ -1085,28 +1117,52 @@ void BaseTheme::drawTextField(const GfxRenderer& renderer, Rect rect, const int 
 }
 
 void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, const std::vector<std::string>& options,
-                                int selectedIndex) const {
+                                int selectedIndex, const bool showConfirmationFooter, const char* cancelLabel,
+                                const char* saveLabel, const bool saveFocused, const int primaryOptionIndex,
+                                const char* noteLabel, const char* noteBody, const std::vector<bool>& disabledOptions,
+                                const int firstOptionIndex) const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
-  const int optionFontId = metrics.optionPopupUseSmallFont ? UI_10_FONT_ID : UI_12_FONT_ID;
+  const int optionFontId = uiScaleSpec().bodyFontId;
   const EpdFontFamily::Style optionStyle =
       metrics.optionPopupOptionFontBold ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR;
 
+#if CROSSINK_APP_CAP_TOUCH
+  const bool touchActionStyle = gpio.hasTouch() && primaryOptionIndex >= 0 && options.size() == 2;
+  const int itemSpacing = touchActionStyle ? TouchActionButtons::kDefaultGap : metrics.optionPopupItemSpacing;
+#else
   const int itemSpacing = metrics.optionPopupItemSpacing;
+#endif
   const int innerPadding = metrics.optionPopupInnerPadding;
   const int selectionHPadding = metrics.optionPopupSelectionHPadding;
   const int selectionVPadding = metrics.optionPopupSelectionVPadding;
 
   const int optionLineHeight = renderer.getLineHeight(optionFontId);
   const int titleLineHeight = renderer.getLineHeight(UI_12_FONT_ID);
+  const bool hasNote = noteLabel && noteBody;
+  const int noteLineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const int noteHeight = hasNote ? noteLineHeight * 2 + metrics.optionPopupTitleGap : 0;
+#if CROSSINK_APP_CAP_TOUCH
+  const int rowHeight =
+      touchActionStyle ? TouchActionButtons::kDefaultHeight : optionLineHeight + selectionVPadding * 2;
+#else
   const int rowHeight = optionLineHeight + selectionVPadding * 2;
+#endif
 
   int maxTextWidth = renderer.getTextWidth(UI_12_FONT_ID, title, EpdFontFamily::BOLD);
-  for (const auto& opt : options) {
-    int w = renderer.getTextWidth(optionFontId, opt.c_str(), optionStyle);
+  for (size_t i = 0; i < options.size(); ++i) {
+    const auto& opt = options[i];
+    const auto style = primaryOptionIndex == static_cast<int>(i) ? EpdFontFamily::BOLD : optionStyle;
+    int w = renderer.getTextWidth(optionFontId, opt.c_str(), style);
     if (w > maxTextWidth) maxTextWidth = w;
+  }
+  if (hasNote) {
+    const int noteLabelWidth = renderer.getTextWidth(UI_10_FONT_ID, noteLabel, EpdFontFamily::BOLD);
+    const int noteBodyWidth = renderer.getTextWidth(UI_10_FONT_ID, noteBody);
+    const int noteWidth = noteLabelWidth + renderer.getSpaceWidth(UI_10_FONT_ID) + noteBodyWidth;
+    maxTextWidth = std::max(maxTextWidth, noteWidth);
   }
 
   const int optionCount = static_cast<int>(options.size());
@@ -1114,8 +1170,11 @@ void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, 
     return;
   }
 
-  const int maxDialogH = std::max(rowHeight + titleLineHeight + metrics.optionPopupTitleGap + innerPadding * 2,
-                                  pageHeight - metrics.buttonHintsHeight - metrics.optionPopupDialogSideMargin * 2);
+  constexpr int footerHeight = 56;
+  const int footerSpace = showConfirmationFooter ? footerHeight : 0;
+  const int maxDialogH =
+      std::max(rowHeight + titleLineHeight + metrics.optionPopupTitleGap + noteHeight + innerPadding * 2 + footerSpace,
+               pageHeight - metrics.buttonHintsHeight - metrics.optionPopupDialogSideMargin * 2);
   // Reserve the narrow scroll gutter up front. A wrapped title may reduce the
   // number of visible options, so deciding this after title layout would make
   // the draw and cached touch geometry disagree.
@@ -1125,24 +1184,27 @@ void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, 
                                pageWidth - metrics.optionPopupDialogSideMargin * 2);
   const int titleContentWidth = std::max(1, dialogW - innerPadding * 2);
   const int maxTitleLines =
-      std::max(1, (maxDialogH - innerPadding * 2 - metrics.optionPopupTitleGap - rowHeight) / titleLineHeight);
+      std::max(1, (maxDialogH - innerPadding * 2 - metrics.optionPopupTitleGap - noteHeight - rowHeight - footerSpace) /
+                      titleLineHeight);
   const auto titleLines =
       renderer.wrappedText(UI_12_FONT_ID, title, titleContentWidth, maxTitleLines, EpdFontFamily::BOLD);
   const int titleHeight = static_cast<int>(titleLines.size()) * titleLineHeight;
-  const int maxListHeight =
-      std::max(rowHeight, maxDialogH - innerPadding * 2 - titleHeight - metrics.optionPopupTitleGap);
+  const int maxListHeight = std::max(
+      rowHeight, maxDialogH - innerPadding * 2 - titleHeight - metrics.optionPopupTitleGap - noteHeight - footerSpace);
   const int rowStep = rowHeight + itemSpacing;
   const int maxVisibleOptions = std::max(1, std::min(optionCount, (maxListHeight + itemSpacing) / rowStep));
   const int safeSelectedIndex = std::clamp(selectedIndex, 0, optionCount - 1);
-  const int visibleStart = std::clamp(safeSelectedIndex - maxVisibleOptions / 2, 0, optionCount - maxVisibleOptions);
+  const int centeredStart = std::clamp(safeSelectedIndex - maxVisibleOptions / 2, 0, optionCount - maxVisibleOptions);
+  const int visibleStart =
+      firstOptionIndex < 0 ? centeredStart : std::clamp(firstOptionIndex, 0, optionCount - maxVisibleOptions);
   const int visibleEnd = visibleStart + maxVisibleOptions;
   const int visibleCount = visibleEnd - visibleStart;
   const int listHeight = rowHeight * visibleCount + itemSpacing * (visibleCount - 1);
   const bool hasHiddenOptions = visibleCount < optionCount;
   const int scrollBarGutter =
       hasHiddenOptions ? metrics.scrollBarWidth + metrics.scrollBarRightOffset + selectionHPadding : 0;
-  const int contentHeight = titleHeight + metrics.optionPopupTitleGap + listHeight;
-  const int dialogH = contentHeight + innerPadding * 2;
+  const int contentHeight = titleHeight + metrics.optionPopupTitleGap + noteHeight + listHeight;
+  const int dialogH = contentHeight + innerPadding * 2 + footerSpace;
   const int dialogX = (pageWidth - dialogW) / 2;
   const int dialogY = (pageHeight - dialogH) / 2;
 
@@ -1170,12 +1232,44 @@ void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, 
     y += titleLineHeight;
   }
 
-  if (metrics.optionPopupTitleSeparator) {
+  if (metrics.optionPopupTitleSeparator || hasNote) {
     const int sepY = y + metrics.optionPopupTitleGap / 2;
     renderer.drawLine(dialogX + innerPadding, sepY, dialogX + dialogW - innerPadding, sepY, true);
   }
 
   y += metrics.optionPopupTitleGap;
+
+  if (hasNote) {
+    const int noteContentWidth = std::max(1, dialogW - innerPadding * 2);
+    const std::string noteText = std::string(noteLabel) + " " + noteBody;
+    const auto noteLines = renderer.wrappedText(UI_10_FONT_ID, noteText.c_str(), noteContentWidth, 2);
+    const int labelWidth = renderer.getTextWidth(UI_10_FONT_ID, noteLabel, EpdFontFamily::BOLD);
+    const int spaceWidth = renderer.getSpaceWidth(UI_10_FONT_ID);
+    const std::string labelPrefix = std::string(noteLabel) + " ";
+    for (size_t i = 0; i < noteLines.size(); ++i) {
+      const auto& line = noteLines[i];
+      if (i == 0 && (line == noteLabel || line.rfind(labelPrefix, 0) == 0)) {
+        const std::string bodyLine = line.size() > labelPrefix.size() ? line.substr(labelPrefix.size()) : std::string();
+        const int bodyWidth =
+            bodyLine.empty() ? 0 : spaceWidth + renderer.getTextWidth(UI_10_FONT_ID, bodyLine.c_str());
+        const int lineWidth = labelWidth + bodyWidth;
+        const int noteX = dialogX + (dialogW - lineWidth) / 2;
+        renderer.drawText(UI_10_FONT_ID, noteX, y, noteLabel, true, EpdFontFamily::BOLD);
+        if (!bodyLine.empty()) {
+          renderer.drawText(UI_10_FONT_ID, noteX + labelWidth + spaceWidth, y, bodyLine.c_str());
+        }
+      } else {
+        const int lineWidth = renderer.getTextWidth(UI_10_FONT_ID, line.c_str());
+        renderer.drawText(UI_10_FONT_ID, dialogX + (dialogW - lineWidth) / 2, y, line.c_str());
+      }
+      y += noteLineHeight;
+    }
+    while (noteLines.size() < 2) y += noteLineHeight;
+
+    const int separatorY = y + metrics.optionPopupTitleGap / 2;
+    renderer.drawLine(dialogX + innerPadding, separatorY, dialogX + dialogW - innerPadding, separatorY, true);
+    y += metrics.optionPopupTitleGap;
+  }
 
   const int itemRectX = dialogX + innerPadding;
   const int itemRectW = std::max(1, dialogW - innerPadding * 2 - scrollBarGutter);
@@ -1191,33 +1285,80 @@ void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, 
     renderer.fillRect(scrollBarX - metrics.scrollBarWidth, scrollBarY, metrics.scrollBarWidth, scrollBarHeight, true);
   }
 
-  for (int visibleIndex = 0; visibleIndex < visibleCount; visibleIndex++) {
-    const int optionIndex = visibleStart + visibleIndex;
-    const int itemY = y + visibleIndex * (rowHeight + itemSpacing);
-    const bool selected = (optionIndex == safeSelectedIndex);
-    const char* labelText = options[optionIndex].c_str();
+#if CROSSINK_APP_CAP_TOUCH
+  if (touchActionStyle && visibleCount == 2) {
+    const auto actionLayout = TouchActionButtons::vertical(Rect{itemRectX, y, itemRectW, listHeight},
+                                                           static_cast<uint8_t>(visibleCount), rowHeight, itemSpacing);
+    const int primaryOffset = primaryOptionIndex - visibleStart;
+    const int secondaryOffset = primaryOffset == 0 ? 1 : 0;
+    const char* labels[] = {options[visibleStart + primaryOffset].c_str(),
+                            options[visibleStart + secondaryOffset].c_str()};
+    const int selectedVisualIndex = safeSelectedIndex == primaryOptionIndex ? 0 : 1;
+    TouchActionButtons::draw(renderer, actionLayout, labels, 0, saveFocused ? -1 : selectedVisualIndex, optionFontId);
+  } else
+#endif
+  {
+    for (int visibleIndex = 0; visibleIndex < visibleCount; visibleIndex++) {
+      const int optionIndex = visibleStart + visibleIndex;
+      const int itemY = y + visibleIndex * (rowHeight + itemSpacing);
+      const bool selected = !saveFocused && optionIndex == safeSelectedIndex;
+      const bool disabled = optionIndex < static_cast<int>(disabledOptions.size()) && disabledOptions[optionIndex];
+      const char* labelText = options[optionIndex].c_str();
 
-    if (metrics.optionPopupDrawAllRows || selected) {
-      Color rowColor;
-      if (selected) {
-        rowColor = metrics.optionPopupSelectionLight ? Color::LightGray : Color::Black;
-      } else {
-        rowColor = Color::White;
+      if (metrics.optionPopupDrawAllRows || selected || disabled) {
+        Color rowColor;
+        if (disabled) {
+          rowColor = Color::LightGray;
+        } else if (selected) {
+          rowColor = metrics.optionPopupSelectionLight ? Color::LightGray : Color::Black;
+        } else {
+          rowColor = Color::White;
+        }
+        if (selectionRadius > 0) {
+          renderer.fillRoundedRect(itemRectX, itemY, itemRectW, rowHeight, selectionRadius, rowColor);
+        } else {
+          renderer.fillRect(itemRectX, itemY, itemRectW, rowHeight, rowColor == Color::Black);
+        }
       }
-      if (selectionRadius > 0) {
-        renderer.fillRoundedRect(itemRectX, itemY, itemRectW, rowHeight, selectionRadius, rowColor);
-      } else {
-        renderer.fillRect(itemRectX, itemY, itemRectW, rowHeight, rowColor == Color::Black);
-      }
+
+      const auto style = primaryOptionIndex == optionIndex ? EpdFontFamily::BOLD : optionStyle;
+      const int textW = renderer.getTextWidth(optionFontId, labelText, style);
+      const int textY = itemY + (rowHeight - optionLineHeight) / 2;
+      const int textX = itemRectX + (itemRectW - textW) / 2;
+      // Unselected items: text is dark (invert=true means draw on white bg).
+      // Selected on dark bg: text must be white (invert=false).
+      // Selected on light bg: text stays dark (invert=true).
+      const bool invertText = disabled || (selected ? metrics.optionPopupSelectionLight : true);
+      renderer.drawText(optionFontId, textX, textY, labelText, invertText, style);
     }
+  }
 
-    const int textW = renderer.getTextWidth(optionFontId, labelText, optionStyle);
-    const int textY = itemY + (rowHeight - optionLineHeight) / 2;
-    const int textX = itemRectX + (itemRectW - textW) / 2;
-    // Unselected items: text is dark (invert=true means draw on white bg).
-    // Selected on dark bg: text must be white (invert=false).
-    // Selected on light bg: text stays dark (invert=true).
-    const bool invertText = selected ? metrics.optionPopupSelectionLight : true;
-    renderer.drawText(optionFontId, textX, textY, labelText, invertText, optionStyle);
+  if (showConfirmationFooter) {
+    const int footerY = dialogY + dialogH - footerHeight;
+#if CROSSINK_APP_CAP_TOUCH
+    const char* leftLabel = cancelLabel ? cancelLabel : "";
+#endif
+    const char* rightLabel = saveLabel ? saveLabel : "";
+    // Button devices already map Back to cancel, so the on-screen action can
+    // use the full footer width for Save.
+    renderer.drawLine(dialogX, footerY, dialogX + dialogW, footerY, true);
+    const int labelY = footerY + (footerHeight - renderer.getLineHeight(UI_12_FONT_ID)) / 2;
+#if CROSSINK_APP_CAP_TOUCH
+    if (gpio.hasTouch()) {
+      const int dividerX = dialogX + dialogW / 2;
+      renderer.drawLine(dividerX, footerY, dividerX, dialogY + dialogH, true);
+      if (saveFocused) renderer.fillRect(dividerX, footerY + 1, dialogX + dialogW - dividerX, footerHeight - 1, true);
+      renderer.drawText(UI_12_FONT_ID, dialogX + (dialogW / 2 - renderer.getTextWidth(UI_12_FONT_ID, leftLabel)) / 2,
+                        labelY, leftLabel, true, EpdFontFamily::REGULAR);
+      renderer.drawText(UI_12_FONT_ID, dividerX + (dialogW / 2 - renderer.getTextWidth(UI_12_FONT_ID, rightLabel)) / 2,
+                        labelY, rightLabel, !saveFocused, EpdFontFamily::BOLD);
+    } else {
+#endif
+      if (saveFocused) renderer.fillRect(dialogX, footerY + 1, dialogW, footerHeight - 1, true);
+      renderer.drawText(UI_12_FONT_ID, dialogX + (dialogW - renderer.getTextWidth(UI_12_FONT_ID, rightLabel)) / 2,
+                        labelY, rightLabel, !saveFocused, EpdFontFamily::BOLD);
+#if CROSSINK_APP_CAP_TOUCH
+    }
+#endif
   }
 }

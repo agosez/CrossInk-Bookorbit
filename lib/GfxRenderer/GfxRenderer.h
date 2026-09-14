@@ -46,6 +46,7 @@ class GfxRenderer {
 
   HalDisplay& display;
   RenderMode renderMode;
+  mutable bool absoluteGrayPlanes = false;
   Orientation orientation;
   bool fadingFix;
   uint8_t* frameBuffer = nullptr;
@@ -70,6 +71,15 @@ class GfxRenderer {
   mutable int _stripY0 = 0;
   mutable int _stripRows = 0;
   mutable bool _stripActive = false;
+
+  // Optional logical-space clip used while a TextBlock is rendered inside a
+  // table cell. Glyph bitmaps and background fills both pass through this
+  // guard, so an emergency oversized codepoint cannot paint into a neighbour.
+  mutable bool textClipActive_ = false;
+  mutable int textClipLeft_ = 0;
+  mutable int textClipTop_ = 0;
+  mutable int textClipRight_ = 0;   // half-open
+  mutable int textClipBottom_ = 0;  // half-open
 
   class BitmapScratchLock {
     const GfxRenderer& renderer_;
@@ -249,9 +259,12 @@ class GfxRenderer {
   void drawIcon(const uint8_t bitmap[], int x, int y, int width, int height) const;
   void drawIconInverted(const uint8_t bitmap[], int x, int y, int size) const;
   void drawIconInverted(const uint8_t bitmap[], int x, int y, int width, int height) const;
-  void drawBitmap(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight, float cropX = 0,
+  bool drawBitmap(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight, float cropX = 0,
                   float cropY = 0) const;
-  void drawBitmap1Bit(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight) const;
+  bool drawBitmap1Bit(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight) const;
+  // Counter-invert content images in the logical framebuffer so output-level
+  // Dark Mode leaves their original polarity unchanged.
+  void preserveImagePolarity(int x, int y, int width, int height) const;
   // Trapezoidal blit used by Flow/iPod-style carousels. Fits the bitmap into a
   // bounding box of width `w` and height `max(hL, hR)` whose top-left is (x, y).
   void drawPerspectiveBitmap(const Bitmap& bitmap, int x, int y, int w, int hL, int hR) const;
@@ -271,6 +284,11 @@ class GfxRenderer {
   void drawText(int fontId, int x, int y, const char* text, bool black = true,
                 EpdFontFamily::Style style = EpdFontFamily::REGULAR,
                 BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO) const;
+  // Guard text/background pixels while a table cell is rendered. The guard is
+  // intentionally single-level and scoped by the caller; nested use is a
+  // programming error caught in debug builds.
+  void beginTextClip(int x, int y, int width, int height) const;
+  void endTextClip() const;
   int getSpaceWidth(int fontId, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   /// Returns the total inter-word advance: fp4::toPixel(spaceAdvance + kern(leftCp,' ') + kern(' ',rightCp)).
   /// Using a single snap avoids the +/-1 px rounding error that arises when space advance and kern are
@@ -298,7 +316,10 @@ class GfxRenderer {
   int getTextHeight(int fontId) const;
 
   // Grayscale functions
-  void setRenderMode(const RenderMode mode) { this->renderMode = mode; }
+  void setRenderMode(RenderMode mode);
+  bool grayPlanesAreAbsolute() const { return absoluteGrayPlanes; }
+  bool supportsAbsoluteGrayscale() const;
+  bool displayAbsoluteGrayscaleBase(HalDisplay::RefreshMode fallback = HalDisplay::HALF_REFRESH) const;
   RenderMode getRenderMode() const { return renderMode; }
   // Grayscale preconditioning settle pass (no-op on X4). The rect overload
   // takes the gray region in LOGICAL screen coordinates and rotates it to the
@@ -315,6 +336,7 @@ class GfxRenderer {
   void copyGrayscaleMsbBuffers() const;
   void displayGrayBuffer(bool turnOffScreen = false) const;
   void writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* scratch, int yStart, int numRows) const;
+  bool shouldSkipImageBlanking() const;
   bool supportsStripGrayscale() const;
   bool storeBwBuffer();    // Returns true if buffer was stored successfully
   void restoreBwBuffer();  // Restore and free the stored buffer

@@ -18,6 +18,7 @@
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
+#include "components/TouchHeaderBackButton.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
@@ -68,14 +69,12 @@ void OpdsBookBrowserActivity::onEnter() {
   searchTemplate = "";
   currentPath = "";
   selectorIndex = 0;
-  consumeConfirm = false;
-  consumeBack = false;
   errorMessage.clear();
   statusMessage = tr(STR_CHECKING_WIFI);
 
   uiReady = false;
   visibleRows = 1;
-  app.setTheme(uiThemeTokens(uiTarget));
+  applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &OpdsBookBrowserActivity::onRowEvent, this);
   app.on(ACTION_SEARCH, &OpdsBookBrowserActivity::onSearchEvent, this);
   app.on(ACTION_CANCEL, &OpdsBookBrowserActivity::onCancelEvent, this);
@@ -110,7 +109,7 @@ void OpdsBookBrowserActivity::onExit() {
   }
   // OPDS launches from minimal network boot, so restore the full app state
   // even if setup failed before WiFi was started.
-  silentRestart();
+  silentRestartAfterNetwork();
 #endif
 }
 
@@ -147,15 +146,6 @@ void OpdsBookBrowserActivity::onCancelEvent(const fui::ActionEvent&, void* user)
 
 void OpdsBookBrowserActivity::loop() {
   if (state == BrowserState::WIFI_SELECTION || state == BrowserState::SEARCH_INPUT) {
-    return;
-  }
-
-  if (consumeConfirm && mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    consumeConfirm = false;
-    return;
-  }
-  if (consumeBack && mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    consumeBack = false;
     return;
   }
 
@@ -198,6 +188,10 @@ void OpdsBookBrowserActivity::loop() {
   }
 
   if (state == BrowserState::BROWSING) {
+    if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
+      navigateBack();
+      return;
+    }
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       activateSelected();
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
@@ -289,19 +283,52 @@ void OpdsBookBrowserActivity::rootScreen(UiApp::ScreenType& screen, void* user) 
 // draw the themed header (padding, centering, and rule come from the theme).
 void OpdsBookBrowserActivity::screenHeader(UiApp::ScreenType& screen, const bool withSearch) {
   screen.takeBottom(static_cast<int16_t>(UITheme::getInstance().getMetrics().buttonHintsHeight));
-  fui::HeaderProps header;
-  header.title = server.name.empty() ? tr(STR_OPDS_BROWSER) : server.name.c_str();
-  header.borderEdges = fui::EdgeBottom;
-  if (withSearch && !searchTemplate.empty()) {
-    header.trailingIcon = fui::bitmapFromIcon(icon_search_32);
-    header.trailingAction = ACTION_SEARCH;
-    // Optically align the icon with the title glyphs: text hangs low in its
-    // line cell by the font's internal leading; drop the button to match.
-    const int titleFontId = uiScaleSpec().titleFontId;
-    header.actionOffsetY =
-        static_cast<int16_t>((renderer.getLineHeight(titleFontId) - renderer.getTextHeight(titleFontId)) / 2);
+  const bool useTouchBackHeader = state == BrowserState::BROWSING && mappedInput.hasTouchHardware();
+  if (useTouchBackHeader) {
+    const Rect headerRect = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+    const auto backLayout = TouchHeaderBackButton::layout(headerRect);
+    const bool showSearch = withSearch && !searchTemplate.empty();
+    TouchHeaderBackButton::draw(renderer, uiTarget, headerRect,
+                                server.name.empty() ? tr(STR_OPDS_BROWSER) : server.name.c_str(), false,
+                                showSearch ? static_cast<int>(backLayout.iconRect.width + 8) : 0);
+    screen.takeTop(static_cast<int16_t>(headerRect.height));
+
+    if (showSearch) {
+      fui::ButtonProps search;
+      search.action = ACTION_SEARCH;
+      search.styles = fui::plainStyles(fui::Paint::solid(fui::Color::Black));
+      search.minTouchSize = screen.theme().minTouchSize;
+      search.radius = 8;
+      const fui::Rect searchRect{static_cast<int16_t>(headerRect.x + headerRect.width - backLayout.iconRect.width),
+                                 static_cast<int16_t>(backLayout.iconRect.y),
+                                 static_cast<int16_t>(backLayout.iconRect.width),
+                                 static_cast<int16_t>(backLayout.iconRect.height)};
+      screen.button(search, searchRect);
+      // Keep the touch target clear of the divider, but draw the glyph on the
+      // shared Back/title baseline instead of at the top of its action lane.
+      const int16_t iconX =
+          static_cast<int16_t>(searchRect.x + (searchRect.width - TouchHeaderBackButton::ICON_SIZE) / 2);
+      const int16_t iconY = static_cast<int16_t>(backLayout.iconRect.y + TouchHeaderBackButton::TITLE_VERTICAL_OFFSET +
+                                                 (backLayout.iconRect.height - TouchHeaderBackButton::ICON_SIZE) / 2);
+      screen.target().bitmap(
+          fui::Rect{iconX, iconY, TouchHeaderBackButton::ICON_SIZE, TouchHeaderBackButton::ICON_SIZE},
+          fui::bitmapFromIcon(icon_search_32), fui::BitmapMode::Center, fui::Paint::solid(fui::Color::Black));
+    }
+  } else {
+    fui::HeaderProps header;
+    header.title = server.name.empty() ? tr(STR_OPDS_BROWSER) : server.name.c_str();
+    header.borderEdges = fui::EdgeBottom;
+    if (withSearch && !searchTemplate.empty()) {
+      header.trailingIcon = fui::bitmapFromIcon(icon_search_32);
+      header.trailingAction = ACTION_SEARCH;
+      // Optically align the icon with the title glyphs: text hangs low in its
+      // line cell by the font's internal leading; drop the button to match.
+      const int titleFontId = uiScaleSpec().titleFontId;
+      header.actionOffsetY =
+          static_cast<int16_t>((renderer.getLineHeight(titleFontId) - renderer.getTextHeight(titleFontId)) / 2);
+    }
+    screen.header(header);
   }
-  screen.header(header);
   // Same breathing room between header and content as the legacy screens.
   screen.spacer(static_cast<int16_t>(UITheme::getInstance().getMetrics().verticalSpacing));
 }
@@ -408,17 +435,18 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
       const char* confirmLabel =
           (entryCount > 0 && entries[selectorIndex].type == OpdsEntryType::BOOK) ? tr(STR_DOWNLOAD) : tr(STR_OPEN);
       const char* searchLabel = (!searchTemplate.empty() && selectorIndex == 0) ? tr(STR_SEARCH) : tr(STR_DIR_UP);
-      labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, searchLabel, tr(STR_DIR_DOWN));
+      labels =
+          mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), confirmLabel, searchLabel, tr(STR_DIR_DOWN));
       break;
     }
     case BrowserState::DOWNLOADING:
       labels = mappedInput.mapLabels(tr(STR_CANCEL), "", "", "");
       break;
     case BrowserState::ERROR:
-      labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_RETRY), "", "");
+      labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_RETRY), "", "");
       break;
     default:
-      labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+      labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
       break;
   }
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -517,10 +545,15 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     for (size_t i = entryCount; i > 0; --i) {
       entries[i] = std::move(entries[i - 1]);
     }
-    entries[0] = OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_PREV_PAGE), "", prevUrl, ""};
+    entries[0] = OpdsEntry{OpdsEntryType::NAVIGATION,
+                           std::string(mappedInput.resolveLabel(mappedInput.withPreviousPageArrow(tr(STR_PREV_PAGE)))),
+                           "", prevUrl, ""};
     entryCount++;
   }
-  if (!nextUrl.empty() && !appendEntry(OpdsEntry{OpdsEntryType::NAVIGATION, tr(STR_NEXT_PAGE), "", nextUrl, ""})) {
+  if (!nextUrl.empty() &&
+      !appendEntry(OpdsEntry{OpdsEntryType::NAVIGATION,
+                             std::string(mappedInput.resolveLabel(mappedInput.withNextPageArrow(tr(STR_NEXT_PAGE)))),
+                             "", nextUrl, ""})) {
     LOG_DBG("OPDS", "No room for next-page entry");
   }
 
@@ -688,7 +721,6 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
 }
 
 void OpdsBookBrowserActivity::launchSearch() {
-  consumeConfirm = true;
   state = BrowserState::SEARCH_INPUT;
   requestUpdate();
 

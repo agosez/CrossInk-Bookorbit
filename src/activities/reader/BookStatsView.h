@@ -14,6 +14,8 @@ constexpr int DateFieldBase = 10;
 constexpr int DateFieldCount = 6;
 constexpr int DateAdjustUp = 20;
 constexpr int DateAdjustDown = 21;
+constexpr int DateSave = 22;
+constexpr int DateCancel = 23;
 
 constexpr int dateField(const int index) { return DateFieldBase + index; }
 }  // namespace BookStatsTouchTarget

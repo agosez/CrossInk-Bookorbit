@@ -85,7 +85,10 @@ class BookmarkStore {
   bool dirty = false;
 
   bool readFromFile();
-  bool readFromFile(const std::string& path, std::vector<Bookmark>& out, bool& needsRewrite) const;
+  // enforceStoredPath rejects a file whose header names another book; pass false only when
+  // reading a content-keyed store, whose filename already proves the book's identity.
+  bool readFromFile(const std::string& path, std::vector<Bookmark>& out, bool& needsRewrite,
+                    bool enforceStoredPath = true) const;
   bool writeToFile() const;
 };
 

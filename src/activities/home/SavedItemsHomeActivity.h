@@ -39,10 +39,6 @@ class SavedItemsHomeActivity final : public Activity {
   std::atomic<bool> uiReady{false};
   int visibleRows = 1;
   int topIndex = 0;
-  int listTop = 0;
-  int listBottom = 0;
-  int listRowHeight = 0;
-  int listRowStep = 0;
 
   static void listScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);

@@ -25,4 +25,5 @@ class ClearCacheActivity final : public Activity {
   int clearedCount = 0;
   int failedCount = 0;
   void clearCache();
+  void startClearing();
 };

@@ -32,6 +32,10 @@ class ImageToFramebufferDecoder {
 
   virtual const char* getFormatName() const = 0;
 
+  // Decode callbacks can run for seconds on large, valid source images. Yield
+  // occasionally so the watchdog's idle task can run without changing limits.
+  static void yieldDuringDecode(uint32_t& lastYieldMs);
+
  protected:
   // Size validation helpers
   static constexpr int MAX_SOURCE_WIDTH = 2048;

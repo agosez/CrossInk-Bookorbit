@@ -3,6 +3,7 @@
 #include <FreeInkUIGfxRenderer.h>
 #include <Xtc.h>
 
+#include <array>
 #include <atomic>
 #include <memory>
 
@@ -22,6 +23,9 @@ class XtcReaderChapterSelectionActivity final : public Activity {
   int visibleRows = 1;
   int topIndex = 0;
   bool initialViewportPending = true;
+  static constexpr size_t CHAPTER_WINDOW_SIZE = 20;
+  std::array<xtc::ChapterInfo, CHAPTER_WINDOW_SIZE> chapterWindow{};
+  std::array<freeink::ui::ListItem, CHAPTER_WINDOW_SIZE> itemWindow{};
 
   static void chapterScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);

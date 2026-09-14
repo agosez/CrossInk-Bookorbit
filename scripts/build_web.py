@@ -78,7 +78,17 @@ def read(*parts):
         return f.read()
 
 def emit_gzip(path, ident, text):
-    gz = gzip.compress(text.encode("utf-8"), compresslevel=9)
+    raw = text.encode("utf-8")
+    # zopfli emits standard gzip streams the firmware decompresses unchanged,
+    # ~4% smaller than gzip -9. It matters: the X3/X4 partition margin is a few
+    # KB, so a build without zopfli is bigger than a release built with it.
+    try:
+        import zopfli.gzip as _zg
+        gz = _zg.compress(raw, numiterations=35)
+    except ImportError:
+        print("build_web: zopfli not installed, falling back to gzip -9 "
+              "(+~2.7 KB firmware; pip install zopfli)")
+        gz = gzip.compress(raw, compresslevel=9)
     emit_header(path, ident, gz, original_len=len(text))
     return len(text), len(gz)
 

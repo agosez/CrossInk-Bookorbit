@@ -15,7 +15,9 @@
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
+#include "activities/boot_sleep/ImageFolderIndex.h"
 #include "activities/home/FileBrowserActivity.h"
+#include "components/TouchActionButtons.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -34,33 +36,14 @@ constexpr uint8_t RESULT_OK = 0;
 constexpr uint8_t RESULT_FAILED = 1;
 constexpr uint8_t REJECT_USER = 1;
 constexpr uint8_t REJECT_STORAGE = 2;
-constexpr int TOUCH_ACTION_BUTTON_WIDTH = 120;
-constexpr int TOUCH_ACTION_BUTTON_HEIGHT = 48;
-constexpr int TOUCH_COLLISION_BUTTON_WIDTH = 280;
-constexpr int TOUCH_COLLISION_BUTTON_HEIGHT = 52;
-constexpr int TOUCH_COLLISION_BUTTON_GAP = 16;
-
-Rect touchActionButtonRect(const Rect& screen, const bool accept) {
-  constexpr int SIDE_MARGIN = 46;
-  return Rect{accept ? screen.x + screen.width - SIDE_MARGIN - TOUCH_ACTION_BUTTON_WIDTH : screen.x + SIDE_MARGIN,
-              screen.y + screen.height - TOUCH_ACTION_BUTTON_HEIGHT - 28, TOUCH_ACTION_BUTTON_WIDTH,
-              TOUCH_ACTION_BUTTON_HEIGHT};
-}
-
-Rect touchCollisionButtonRect(const Rect& screen, const int index) {
-  constexpr int SIDE_MARGIN = 32;
-  constexpr int BUTTON_COUNT = 3;
-  const int width = std::min(TOUCH_COLLISION_BUTTON_WIDTH, screen.width - SIDE_MARGIN * 2);
+TouchActionButtons::Layout touchActionLayout(const Rect& screen, const uint8_t count) {
+  constexpr int sideMargin = 24;
+  constexpr int bottomMargin = 12;
   const int totalHeight =
-      TOUCH_COLLISION_BUTTON_HEIGHT * BUTTON_COUNT + TOUCH_COLLISION_BUTTON_GAP * (BUTTON_COUNT - 1);
-  return Rect{screen.x + (screen.width - width) / 2,
-              screen.y + (screen.height - totalHeight) / 2 + TOUCH_ACTION_BUTTON_HEIGHT +
-                  index * (TOUCH_COLLISION_BUTTON_HEIGHT + TOUCH_COLLISION_BUTTON_GAP),
-              width, TOUCH_COLLISION_BUTTON_HEIGHT};
-}
-
-bool contains(const Rect& rect, const int x, const int y) {
-  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+      TouchActionButtons::kDefaultHeight * count + TouchActionButtons::kDefaultGap * (count > 0 ? count - 1 : 0);
+  return TouchActionButtons::vertical(Rect{screen.x + sideMargin, screen.y + screen.height - bottomMargin - totalHeight,
+                                           std::max(1, screen.width - sideMargin * 2), totalHeight},
+                                      count);
 }
 
 bool sameMac(const std::array<uint8_t, nearby::MAC_BYTES>& lhs, const uint8_t* rhs) {
@@ -122,7 +105,7 @@ void NearbyBookTransferActivity::onEnter() {
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
   destinationFolder_ = SETTINGS.nearbyReceiveFolder[0] ? SETTINGS.nearbyReceiveFolder : "/";
   uiReady_ = false;
-  app_.setTheme(uiThemeTokens(uiTarget_));
+  applySharedUiTheme(app_, uiTarget_);
   app_.on(ACTION_ROW, &NearbyBookTransferActivity::onRowEvent, this);
   app_.setScreen(&NearbyBookTransferActivity::menuScreen, this);
 
@@ -530,6 +513,7 @@ bool NearbyBookTransferActivity::finishReceivedFile(const uint64_t expectedBytes
     return false;
   }
   if (replacing) Storage.remove(backupPath_.c_str());
+  ImageFolderIndex::invalidateForPath(finalPath_.c_str());
   return true;
 }
 
@@ -784,24 +768,27 @@ void NearbyBookTransferActivity::loop() {
       mappedInput.wasScreenTouchDown(tx, ty)) {
     const Rect safeArea = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
     if (state_ == State::CollisionPrompt) {
-      for (int index = 0; index < 3; ++index) {
-        if (!contains(touchCollisionButtonRect(safeArea, index), tx, ty)) continue;
+      const auto actions = touchActionLayout(safeArea, 3);
+      const int index = TouchActionButtons::indexAt(actions, tx, ty);
+      if (index >= 0) {
         selectedIndex_ = index;
         activateSelected();
-        return;
       }
-    }
-    if ((state_ == State::OfferPrompt || mode_ == Mode::Receive) &&
-        contains(touchActionButtonRect(safeArea, false), tx, ty)) {
-      if (state_ == State::Success) {
-        exitAfterRadio();
-        return;
-      }
-      rejectOffer();
       return;
     }
-    if (contains(touchActionButtonRect(safeArea, true), tx, ty)) {
-      activateSelected();
+    const uint8_t actionCount = state_ == State::Success && mode_ != Mode::Receive ? 1 : 2;
+    const auto actions = touchActionLayout(safeArea, actionCount);
+    const int action = TouchActionButtons::indexAt(actions, tx, ty);
+    if (action >= 0) {
+      if (actionCount == 2 && action == 1) {
+        if (state_ == State::Success) {
+          exitAfterRadio();
+        } else {
+          rejectOffer();
+        }
+      } else {
+        activateSelected();
+      }
       return;
     }
   }
@@ -835,30 +822,15 @@ void NearbyBookTransferActivity::render(RenderLock&&) {
     GUI.drawHeader(renderer, header, tr(STR_NEARBY_BOOK_TRANSFER));
   }
 
-  const int textWidth = width - metrics.contentSidePadding * 2;
-  auto centered = [this, height](const char* text, const int offset = 0, const int font = UI_10_FONT_ID) {
-    renderer.drawCenteredText(font, height / 2 + offset, text, true,
-                              offset == 0 ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
+  const Rect textArea{metrics.contentSidePadding, 0, width - metrics.contentSidePadding * 2, height};
+  auto centered = [this, height, textArea](const char* text, const int offset = 0, const int font = UI_10_FONT_ID) {
+    UITheme::drawCenteredWrappedTextAtCenter(renderer, textArea, font, height / 2 + offset, text, 2, true,
+                                             offset == 0 ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
   };
-  auto centeredWrapped = [this, height, textWidth](const char* text, const int offset, const int maxLines,
-                                                   const int font = UI_10_FONT_ID) {
-    const auto lines = renderer.wrappedText(font, text, textWidth, maxLines);
-    const int lineHeight = renderer.getLineHeight(font);
-    const int extraLines = std::max(0, static_cast<int>(lines.size()) - 1);
-    int y = height / 2 + offset - extraLines * lineHeight / 2;
-    for (const auto& line : lines) {
-      renderer.drawCenteredText(font, y, line.c_str());
-      y += lineHeight;
-    }
+  auto centeredWrapped = [this, height, textArea](const char* text, const int offset, const int maxLines,
+                                                  const int font = UI_10_FONT_ID) {
+    UITheme::drawCenteredWrappedTextAtCenter(renderer, textArea, font, height / 2 + offset, text, maxLines);
   };
-  auto drawTouchButton = [this](const Rect& rect, const char* label) {
-    renderer.fillRectDither(rect.x, rect.y, rect.width, rect.height, Color::White);
-    renderer.drawRect(rect.x, rect.y, rect.width, rect.height, true);
-    const int x = rect.x + (rect.width - renderer.getTextWidth(UI_10_FONT_ID, label)) / 2;
-    const int y = rect.y + (rect.height - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
-    renderer.drawText(UI_10_FONT_ID, x, y, label);
-  };
-
   uiReady_ = false;
   if (isMenuState()) {
     app_.render();
@@ -901,6 +873,7 @@ void NearbyBookTransferActivity::render(RenderLock&&) {
     centeredWrapped(errorMessage_.c_str(), renderer.getLineHeight(UI_10_FONT_ID) + 10, 3, SMALL_FONT_ID);
   }
 
+  std::array<char, 128> backLabelBuffer{};
   const char* back = tr(STR_CANCEL);
   const char* confirm = "";
   if (state_ == State::ChooseReceiveAction || state_ == State::DeviceList || state_ == State::CollisionPrompt)
@@ -908,7 +881,9 @@ void NearbyBookTransferActivity::render(RenderLock&&) {
   else if (state_ == State::OfferPrompt)
     confirm = tr(STR_ACCEPT);
   else if (state_ == State::Success && mode_ == Mode::Receive) {
-    back = tr(STR_BACK);
+    std::snprintf(backLabelBuffer.data(), backLabelBuffer.size(), "%s",
+                  mappedInput.resolveLabel(mappedInput.withBackArrow(tr(STR_BACK))));
+    back = backLabelBuffer.data();
     confirm =
         FsHelpers::hasPngExtension(finalPath_) || FsHelpers::hasBmpExtension(finalPath_) ? tr(STR_OPEN) : tr(STR_READ);
   } else if (state_ == State::Success) {
@@ -921,14 +896,16 @@ void NearbyBookTransferActivity::render(RenderLock&&) {
   const bool showTouchActions = mappedInput.hasTouch() && (state_ == State::OfferPrompt || state_ == State::Success);
   if (showTouchCollisionActions) {
     const Rect safeArea = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
-    drawTouchButton(touchCollisionButtonRect(safeArea, 0), tr(STR_REPLACE));
-    drawTouchButton(touchCollisionButtonRect(safeArea, 1), tr(STR_KEEP_BOTH));
-    drawTouchButton(touchCollisionButtonRect(safeArea, 2), tr(STR_CANCEL));
+    const auto actions = touchActionLayout(safeArea, 3);
+    const char* actionLabels[] = {tr(STR_REPLACE), tr(STR_KEEP_BOTH), tr(STR_CANCEL)};
+    TouchActionButtons::draw(renderer, actions, actionLabels, 0, -1, UI_10_FONT_ID);
   } else if (showTouchActions) {
     const Rect safeArea = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
-    if (state_ == State::OfferPrompt || mode_ == Mode::Receive)
-      drawTouchButton(touchActionButtonRect(safeArea, false), back);
-    drawTouchButton(touchActionButtonRect(safeArea, true), confirm);
+    const bool hasBack = state_ == State::OfferPrompt || mode_ == Mode::Receive;
+    const uint8_t actionCount = hasBack ? 2 : 1;
+    const auto actions = touchActionLayout(safeArea, actionCount);
+    const char* actionLabels[] = {confirm, hasBack ? back : nullptr};
+    TouchActionButtons::draw(renderer, actions, actionLabels, 0, -1, UI_10_FONT_ID);
   } else {
     const auto labels = mappedInput.mapLabels(back, confirm, showNavigation ? tr(STR_DIR_UP) : "",
                                               showNavigation ? tr(STR_DIR_DOWN) : "");

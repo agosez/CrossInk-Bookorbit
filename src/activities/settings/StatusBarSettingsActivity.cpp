@@ -196,7 +196,7 @@ void StatusBarSettingsActivity::onEnter() {
   uiReady = false;
   visibleRows = 1;
   topIndex = 0;
-  app.setTheme(uiThemeTokens(uiTarget));
+  applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &StatusBarSettingsActivity::onRowEvent, this);
   app.setScreen(&StatusBarSettingsActivity::settingsScreen, this);
 
@@ -432,8 +432,9 @@ void StatusBarSettingsActivity::render(RenderLock&&) {
   const int previewLabelLineHeight = renderer.getLineHeight(UI_10_FONT_ID);
   constexpr int previewLabelGap = 18;
 
-  const auto labels = mappedInput.mapLabels(
-      tr(STR_BACK), selectedItemUsesOptionMenu() ? tr(STR_SELECT) : tr(STR_TOGGLE), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)),
+                                            selectedItemUsesOptionMenu() ? tr(STR_SELECT) : tr(STR_TOGGLE),
+                                            tr(STR_DIR_UP), tr(STR_DIR_DOWN));
 
   int bottomPreviewPadding = metrics.buttonHintsHeight + metrics.verticalSpacing;
 
@@ -474,7 +475,7 @@ void StatusBarSettingsActivity::render(RenderLock&&) {
   const int previewLabelY = bottomPreviewTop - previewLabelLineHeight - previewLabelGap;
 
   renderer.drawText(UI_10_FONT_ID, previewX, previewLabelY, tr(STR_PREVIEW));
-  GUI.drawStatusBar(renderer, 75, 8, 32, title, bottomPreviewPadding, 0, false, timeLeftPreview, false, -1.0f,
+  GUI.drawStatusBar(renderer, 75, 8, 32, title.c_str(), bottomPreviewPadding, 0, false, timeLeftPreview, false, -1.0f,
                     stablePageNumbersAvailable ? 120 : 0, stablePageNumbersAvailable ? 540 : 0);
 
   renderer.displayBuffer();

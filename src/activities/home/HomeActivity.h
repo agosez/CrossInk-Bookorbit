@@ -2,12 +2,16 @@
 #include <array>
 #include <functional>
 #include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "./FileBrowserActivity.h"
+#include "QuickActions.h"
 #include "activities/Activity.h"
 #include "activities/reader/BookReadingStats.h"
 #include "activities/reader/GlobalReadingStats.h"
+#include "components/OptionPopup.h"
 #include "util/ButtonNavigator.h"
 
 struct RecentBook;
@@ -27,6 +31,9 @@ class HomeActivity final : public Activity {
   int lastCarouselBookIndex = 0;  // remembered position when leaving carousel row
   int carouselCoverTouchDownIndex = -1;
   bool carouselCoverTouchDownWasSelected = false;
+  // Touch menus use a momentary pressed state. Keep it separate from the
+  // keyboard selection so a returned Home screen cannot retain an icon tint.
+  int carouselMenuTouchDownIndex = -1;
   bool recentsLoading = false;
   bool recentsLoaded = false;
   bool firstRenderDone = false;
@@ -40,13 +47,18 @@ class HomeActivity final : public Activity {
   bool minimalMenuOpen = false;
   bool minimalSuppressInitialFrontRelease = false;
   bool homeBookSwapLongPressHandled = false;
+  bool quickActionsLongPowerHandled = false;
   int minimalMenuIndex = 0;
   int minimalHomeNavIndex = -1;
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
+  // Cached cover pixels already include Dark Mode's image-polarity correction.
+  // They must be redrawn rather than reused when the output polarity changes.
+  bool coverBufferInverted = false;
   // Home can be entered while Back is still held (e.g. leaving Settings with
   // Back): ignore that stale release until a fresh press is seen here.
   bool backPressSeen = false;
+  OptionPopup quickActionsPopup;
   uint8_t* coverBuffer = nullptr;  // HomeActivity's own buffer for cover image
   size_t coverBufferSize = 0;      // Bytes allocated to coverBuffer
   // Logical rect last passed to drawRecentBookCover. The cover snapshot only
@@ -70,10 +82,12 @@ class HomeActivity final : public Activity {
 
   uint8_t* carouselFrames[kCarouselFrameCount] = {};
   bool carouselFramesReady = false;
+  bool carouselFramesInverted = false;
   bool carouselWarmupPending = false;
 
   std::vector<RecentBook> recentBooks;
   const HomeMenuItem initialMenuItem;
+  std::string initialBookPath;
 
   void onSelectBook(const std::string& path);
   void onFileBrowserOpen();
@@ -90,6 +104,7 @@ class HomeActivity final : public Activity {
   bool restoreCoverBuffer();  // Restore frame buffer from stored cover
   void freeCoverBuffer();     // Free the stored cover buffer
   void invalidateCoverCache();
+  void invalidatePolarityMismatchedCaches();
   bool preRenderCarouselFrames(bool showProgressPopup = false);
   void freeCarouselFrames();
   bool allocateCarouselFrameSlots(int targetFrameCount);
@@ -113,14 +128,23 @@ class HomeActivity final : public Activity {
 
  public:
   explicit HomeActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                        HomeMenuItem initialMenuItemValue = HomeMenuItem::NONE, bool initialFullRefreshValue = false)
+                        HomeMenuItem initialMenuItemValue = HomeMenuItem::NONE, bool initialFullRefreshValue = false,
+                        std::string initialBookPathValue = {})
       : Activity("Home", renderer, mappedInput),
         initialFullRefresh(initialFullRefreshValue),
-        initialMenuItem(initialMenuItemValue) {}
+        initialMenuItem(initialMenuItemValue),
+        initialBookPath(std::move(initialBookPathValue)) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
   bool isHomeActivity() const override { return true; }
+  bool allowPowerAsConfirmInReaderMode() const override { return quickActionsPopup.isActive(); }
+  bool blocksGlobalInput() const override { return quickActionsPopup.isActive(); }
+  bool handleShortcutAction(CrossPointSettings::SHORT_PWRBTN action) override;
   std::string getCurrentBookPath() const override;
+  std::string getCurrentBookTitle() const override;
+  std::unique_ptr<Activity> createFrontlightReadingStatsActivity() override;
+  void onFrontlightPanelClosed() override;
+  bool handleFrontlightPanelResult(const FrontlightPanelResult& result) override;
 };

@@ -28,6 +28,7 @@ add_library(crosspoint_test_common INTERFACE)
 target_include_directories(crosspoint_test_common INTERFACE
   ${REPO_ROOT}
   ${REPO_ROOT}/lib
+  ${REPO_ROOT}/lib/MemoryBudget
 )
 target_compile_options(crosspoint_test_common INTERFACE
   -Wall
@@ -48,5 +49,40 @@ add_subdirectory(combining_marks)
 add_subdirectory(preview_block_locator)
 add_subdirectory(text_pool)
 add_subdirectory(clip_word_store)
+add_subdirectory(clipping_preview)
 add_subdirectory(dict_layout)
 add_subdirectory(reader_progress_save_debouncer)
+add_subdirectory(manual_page_turn_queue)
+add_subdirectory(page_count_estimator)
+add_subdirectory(section_page_index)
+add_subdirectory(section_persistence)
+add_subdirectory(compact_table_layout)
+add_subdirectory(quick_lock)
+add_subdirectory(frontlight_schedule)
+add_subdirectory(pinch_font_resize)
+add_subdirectory(reader_status_bar_tap_target)
+add_subdirectory(two_finger_swipe)
+add_subdirectory(option_popup)
+add_subdirectory(sleep_wake_policy)
+add_subdirectory(firmware_board_tag)
+add_subdirectory(ota_staging_guard)
+add_subdirectory(font_cache_manager)
+add_subdirectory(reader_drawer_model)
+add_subdirectory(touch_reader_preview)
+add_subdirectory(ligature_guard)
+add_subdirectory(chapter_html_slim_parser)
+add_subdirectory(input_release_guard)
+add_subdirectory(release_suppression)
+add_subdirectory(bitmap_resample)
+
+add_subdirectory(pxc_v2)
+add_subdirectory(memory_policy)
+
+add_subdirectory(epub_grayscale)
+
+add_subdirectory(ui_symbol_fallback)
+
+add_subdirectory(absolute_grayscale)
+
+add_subdirectory(buffered_file)
+add_subdirectory(ota_boot_switch)

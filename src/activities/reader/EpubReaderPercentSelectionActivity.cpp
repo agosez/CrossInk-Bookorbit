@@ -9,39 +9,42 @@
 
 #include "DeviceCapabilities.h"
 #include "MappedInputManager.h"
+#include "components/SliderValue.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
+#include "components/UIThemeTokens.h"
+#include "components/UiAppHelpers.h"
 #include "fontIds.h"
 
+namespace fui = freeink::ui;
+
 namespace {
-// Fine/coarse slider step sizes for percent adjustments.
+constexpr fui::ActionId ACTION_SLIDER = 1;
+constexpr fui::ActionId ACTION_STEP = 2;
+constexpr fui::ActionId ACTION_CANCEL = 3;
+constexpr fui::ActionId ACTION_CONFIRM = 4;
+// Fine/coarse step sizes for physical input and the four touch step controls.
 constexpr int kSmallStep = 1;
 constexpr int kLargeStep = 10;
-constexpr int kTouchStepButtonSize = 56;
-constexpr int kTouchStepButtonGap = 32;
-constexpr int kTouchActionButtonWidth = 120;
-constexpr int kTouchActionButtonHeight = 48;
-
-Rect touchStepButtonRect(const Rect& screen, const int y, const int index) {
-  const int totalWidth = kTouchStepButtonSize * 4 + kTouchStepButtonGap * 3;
-  const int x = screen.x + (screen.width - totalWidth) / 2 + index * (kTouchStepButtonSize + kTouchStepButtonGap);
-  return Rect{x, y, kTouchStepButtonSize, kTouchStepButtonSize};
-}
-
-Rect touchActionButtonRect(const Rect& screen, const bool confirm) {
-  constexpr int sideMargin = 46;
-  return Rect{confirm ? screen.x + screen.width - sideMargin - kTouchActionButtonWidth : screen.x + sideMargin,
-              screen.y + screen.height - kTouchActionButtonHeight - 28, kTouchActionButtonWidth,
-              kTouchActionButtonHeight};
-}
-
-bool contains(const Rect& rect, const int x, const int y) {
-  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
-}
 }  // namespace
+
+EpubReaderPercentSelectionActivity::EpubReaderPercentSelectionActivity(GfxRenderer& renderer,
+                                                                       MappedInputManager& mappedInput,
+                                                                       const int initialPercent)
+    : Activity("EpubReaderPercentSelection", renderer, mappedInput),
+      percent(initialPercent),
+      uiTarget(makeUiTarget(renderer)),
+      app(uiTarget, uiTarget.deviceContext()) {}
 
 void EpubReaderPercentSelectionActivity::onEnter() {
   Activity::onEnter();
+  uiReady = false;
+  applySharedUiTheme(app, uiTarget);
+  app.on(ACTION_SLIDER, &EpubReaderPercentSelectionActivity::onSliderEvent, this);
+  app.on(ACTION_STEP, &EpubReaderPercentSelectionActivity::onStepEvent, this);
+  app.on(ACTION_CANCEL, &EpubReaderPercentSelectionActivity::onCancelEvent, this);
+  app.on(ACTION_CONFIRM, &EpubReaderPercentSelectionActivity::onConfirmEvent, this);
+  app.setScreen(&EpubReaderPercentSelectionActivity::percentScreen, this);
   // Set up rendering task and mark first frame dirty.
   requestUpdate();
 }
@@ -60,90 +63,87 @@ void EpubReaderPercentSelectionActivity::adjustPercent(const int delta) {
   requestUpdate();
 }
 
-void EpubReaderPercentSelectionActivity::loop() {
-  auto& theme = UITheme::getInstance();
-  auto metrics = theme.getMetrics();
-  Rect screen = theme.getScreenSafeArea(renderer, true, false);
-  const int contentTop =
-      screen.y + metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing * 4;
-  constexpr int barWidth = 360;
-  constexpr int barHeight = 16;
-  const int barX = screen.x + (screen.width - barWidth) / 2;
-  const int barY = contentTop + metrics.verticalSpacing * 2;
-  int tx = 0;
-  int ty = 0;
+void EpubReaderPercentSelectionActivity::setPercent(const int value) {
+  const int clamped = std::clamp(value, 0, 100);
+  if (clamped == percent) return;
+  percent = clamped;
+  requestUpdate();
+}
 
-  // Live drag on the slider: once a touch lands on the bar, the percent follows the
-  // finger until release. Runs before the Back handler because the release of a drag
-  // can also register as a swipe (e.g. the left-edge rightward back gesture) — the
-  // drag must consume it so it can't cancel the dialog or step the percent.
-  if (mappedInput.isScreenTouchHeld(tx, ty)) {
-    if (draggingBar ||
-        (tx >= barX - 20 && tx < barX + barWidth + 20 && ty >= barY - 24 && ty < barY + barHeight + 24)) {
-      draggingBar = true;
-      const int dragged = std::clamp((tx - barX) * 100 / barWidth, 0, 100);
-      if (dragged != percent) {
-        percent = dragged;
-        requestUpdate();
+void EpubReaderPercentSelectionActivity::onSliderEvent(const fui::ActionEvent& event, void* user) {
+  auto* self = static_cast<EpubReaderPercentSelectionActivity*>(user);
+  if (event.dragPermille < 0) return;
+  const int value = (static_cast<int>(event.dragPermille) * 100 + 500) / 1000;
+  self->setPercent(self->sliderTapPending ? snapSliderTapValue(value, 0, 100, 5) : value);
+}
+
+void EpubReaderPercentSelectionActivity::onStepEvent(const fui::ActionEvent& event, void* user) {
+  static_cast<EpubReaderPercentSelectionActivity*>(user)->adjustPercent(event.value);
+}
+
+void EpubReaderPercentSelectionActivity::onCancelEvent(const fui::ActionEvent&, void* user) {
+  auto* self = static_cast<EpubReaderPercentSelectionActivity*>(user);
+  self->app.clearTapFlash();
+  self->cancel();
+}
+
+void EpubReaderPercentSelectionActivity::onConfirmEvent(const fui::ActionEvent&, void* user) {
+  auto* self = static_cast<EpubReaderPercentSelectionActivity*>(user);
+  self->app.clearTapFlash();
+  self->confirm();
+}
+
+void EpubReaderPercentSelectionActivity::cancel() {
+  ActivityResult result;
+  result.isCancelled = true;
+  setResult(std::move(result));
+  finish();
+}
+
+void EpubReaderPercentSelectionActivity::confirm() {
+  setResult(PercentResult{percent});
+  finish();
+}
+
+void EpubReaderPercentSelectionActivity::loop() {
+  // Touch goes through the FreeInkApp: render() registered the slider, step controls,
+  // and actions; the slider follows the finger via InputDrag (dragPermille per held frame).
+  // Runs before the Back handler because the release of a drag can also register as a
+  // swipe (e.g. the left-edge rightward back gesture), so the drag must consume it so it
+  // can't cancel the dialog or step the percent.
+  fui::InputSnapshot snap{};
+  if (uiReady) {
+    snap = touchSnapshotFrom(mappedInput);
+    if (snap.touchPressed || snap.touchHeld || snap.touchReleased) {
+      sliderTapPending = snap.touchReleased && snap.touchX >= 0;
+      const auto event = app.route(snap);
+      sliderTapPending = false;
+      if (app.invalidated()) requestUpdate();
+      if (event) {
+        if (event.dragPermille >= 0) draggingSlider = true;
+        return;
       }
+    }
+    if (draggingSlider) {
+      // Drag ended (possibly off the slider): swallow the tap/swipe events it produced.
+      if (!snap.touchHeld) draggingSlider = false;
       return;
     }
-  } else if (draggingBar) {
-    // Release frame of a drag: swallow the tap/swipe events it produced.
-    draggingBar = false;
-    return;
   }
 
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   const Rect header{screen.x, screen.y + metrics.topPadding, screen.width,
                     TouchHeaderBackButton::height(metrics, mappedInput)};
   if (TouchHeaderBackButton::wasTapped(mappedInput, header)) {
-    ActivityResult result;
-    result.isCancelled = true;
-    setResult(std::move(result));
-    finish();
+    cancel();
     return;
-  }
-
-  if (mappedInput.hasTouch() && mappedInput.wasScreenTouchDown(tx, ty)) {
-    if (contains(touchActionButtonRect(screen, false), tx, ty)) {
-      ActivityResult result;
-      result.isCancelled = true;
-      setResult(std::move(result));
-      finish();
-      return;
-    }
-    if (contains(touchActionButtonRect(screen, true), tx, ty)) {
-      setResult(PercentResult{percent});
-      finish();
-      return;
-    }
   }
 
   // Back cancels, confirm selects, arrows adjust the percent.
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    ActivityResult result;
-    result.isCancelled = true;
-    setResult(std::move(result));
-    finish();
+    cancel();
     return;
-  }
-
-  if (mappedInput.wasScreenTapped(tx, ty)) {
-    if (tx >= barX - 20 && tx < barX + barWidth + 20 && ty >= barY - 24 && ty < barY + barHeight + 24) {
-      percent = std::clamp((tx - barX) * 100 / barWidth, 0, 100);
-      requestUpdate();
-      return;
-    }
-    if (mappedInput.hasTouch()) {
-      constexpr int deltas[] = {-1, -1, 1, 1};
-      for (int index = 0; index < 4; ++index) {
-        if (!contains(touchStepButtonRect(screen, barY + 80, index), tx, ty)) continue;
-        const int step = (index == 0 || index == 3) ? kLargeStep : kSmallStep;
-        adjustPercent(deltas[index] * step);
-        return;
-      }
-      return;
-    }
   }
 
   const auto swipe = mappedInput.wasSwipe();
@@ -157,8 +157,7 @@ void EpubReaderPercentSelectionActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    setResult(PercentResult{percent});
-    finish();
+    confirm();
     return;
   }
 
@@ -173,6 +172,103 @@ void EpubReaderPercentSelectionActivity::loop() {
   buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Up}, [this, upDelta] { adjustPercent(upDelta); });
   buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Down},
                                        [this, downDelta] { adjustPercent(downDelta); });
+}
+
+void EpubReaderPercentSelectionActivity::percentScreen(UiApp::ScreenType& screen, void* user) {
+  static_cast<EpubReaderPercentSelectionActivity*>(user)->buildPercentScreen(screen);
+}
+
+void EpubReaderPercentSelectionActivity::buildPercentScreen(UiApp::ScreenType& screen) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto& theme = screen.theme();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  // Start below CrossInk's shared back header; its touch-device height differs from
+  // the legacy theme header height.
+  screen.setContentMargin(fui::Insets{
+      static_cast<int16_t>(safe.y + metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) +
+                           metrics.verticalSpacing * 4),
+      static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
+      static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height)), static_cast<int16_t>(safe.x)});
+
+  char line[64];
+
+  // Percent readout, centered above the slider.
+  fui::TextStyle readout = theme.titleText;
+  readout.align = fui::TextAlign::Center;
+  const int16_t readoutLh = screen.target().lineHeight(readout.font);
+  snprintf(line, sizeof(line), "%d%%", percent);
+  screen.target().text(screen.takeTop(readoutLh, theme.spaceLg), line, readout);
+
+  // The slider owns the full row. FreeInkUI expands the hit rect to the theme's
+  // minimum touch size and keeps a drag captured after the finger leaves the track.
+  const fui::Insets sideInset{0, static_cast<int16_t>(theme.spaceLg * 2), 0, static_cast<int16_t>(theme.spaceLg * 2)};
+  const fui::Rect row = screen.takeTop(theme.rowHeight, theme.spaceLg).inset(sideInset);
+
+  fui::SliderProps props;
+  props.value = percent;
+  props.max = 100;
+  props.action = ACTION_SLIDER;
+  props.inputMask = fui::InputTouch | fui::InputDrag;
+  fui::slider(screen.frame(), row, props);
+
+  if (mappedInput.hasTouch()) {
+    // Preserve CrossInk's four direct coarse/fine step controls, but let the
+    // FreeInkApp own both their rendering and hit testing.
+    constexpr int16_t deltas[] = {-kLargeStep, -kSmallStep, kSmallStep, kLargeStep};
+    constexpr const char* labels[] = {"-10", "-1", "+1", "+10"};
+    const fui::Rect stepBand = screen.takeTop(theme.rowHeight, theme.spaceLg);
+    const int16_t gap = theme.spaceMd;
+    const int16_t width = static_cast<int16_t>((stepBand.width - gap * 3) / 4);
+    for (int index = 0; index < 4; ++index) {
+      fui::ButtonProps button;
+      button.label = labels[index];
+      button.action = ACTION_STEP;
+      button.value = deltas[index];
+      button.inputMask = fui::InputTouch;
+      screen.button(button, fui::Rect{static_cast<int16_t>(stepBand.x + index * (width + gap)), stepBand.y, width,
+                                      stepBand.height});
+    }
+
+    const int16_t actionGap = theme.spaceMd;
+    // Reserve at least as much vertical space as each button needs. Otherwise
+    // FreeInkUI expands the smaller rows to minTouchSize after the bottom band
+    // has been placed, which can draw the Cancel action beyond the screen.
+    const int16_t actionHeight = std::max<int16_t>(theme.rowHeight, 56);
+    const int16_t actionBandHeight = static_cast<int16_t>(actionHeight * 2 + actionGap);
+    const fui::Rect actionBand = screen.takeBottom(actionBandHeight, theme.spaceLg);
+    // Keep these explicit full-width actions aligned with the inset used by
+    // every TouchActionButtons group, rather than drawing against the bezel.
+    const int16_t actionSideInset = static_cast<int16_t>(metrics.contentSidePadding);
+    const fui::Rect actionArea{static_cast<int16_t>(actionBand.x + actionSideInset), actionBand.y,
+                               std::max<int16_t>(1, static_cast<int16_t>(actionBand.width - actionSideInset * 2)),
+                               actionBand.height};
+    fui::ButtonProps action;
+    action.inputMask = fui::InputTouch;
+    action.styles = fui::outlinedButtonStyles();
+    action.text = theme.bodyText;
+    action.text.align = fui::TextAlign::Center;
+    action.minTouchSize = actionHeight;
+    action.label = tr(STR_CONFIRM);
+    action.action = ACTION_CONFIRM;
+    action.text.bold = true;
+    screen.button(action, fui::Rect{actionArea.x, actionArea.y, actionArea.width, actionHeight});
+    action.label = tr(STR_CANCEL);
+    action.action = ACTION_CANCEL;
+    action.text.bold = false;
+    screen.button(action, fui::Rect{actionArea.x, static_cast<int16_t>(actionArea.y + actionHeight + actionGap),
+                                    actionArea.width, actionHeight});
+    return;
+  }
+
+  // Two-line step hint built from separate label + value strings (front buttons = fine step, side
+  // buttons = coarse step), so the layout doesn't depend on a separator hidden in translated text.
+  fui::TextStyle hint = theme.smallText;
+  hint.align = fui::TextAlign::Center;
+  const int16_t hintLh = screen.target().lineHeight(hint.font);
+  snprintf(line, sizeof(line), "%s %d%%", I18N.get(StrId::STR_STEP_HINT_FRONT), kSmallStep);
+  screen.target().text(screen.takeTop(hintLh, theme.spaceSm), line, hint);
+  snprintf(line, sizeof(line), "%s %d%%", I18N.get(StrId::STR_STEP_HINT_SIDE), kLargeStep);
+  screen.target().text(screen.takeTop(hintLh), line, hint);
 }
 
 void EpubReaderPercentSelectionActivity::render(RenderLock&&) {
@@ -190,81 +286,15 @@ void EpubReaderPercentSelectionActivity::render(RenderLock&&) {
     GUI.drawHeader(renderer, header, tr(STR_GO_TO_PERCENT), nullptr, true);
   }
 
-  const int contentTop =
-      screen.y + metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing * 4;
+  // Percent readout, slider, step controls, and actions render through the app.
+  uiReady = false;
+  app.setDevice(uiTarget.deviceContext());
+  app.render();
+  uiReady = true;
 
-  const std::string percentText = std::to_string(percent) + "%";
-  UITheme::drawCenteredText(renderer, screen, UI_12_FONT_ID, contentTop, percentText.c_str(), true,
-                            EpdFontFamily::BOLD);
-
-  // Draw slider track.
-  constexpr int barWidth = 360;
-  constexpr int barHeight = 16;
-  const int barX = screen.x + (screen.width - barWidth) / 2;
-  const int barY = contentTop + metrics.verticalSpacing * 2;
-
-  renderer.drawRect(barX, barY, barWidth, barHeight);
-
-  // Fill slider based on percent.
-  const int fillWidth = (barWidth - 4) * percent / 100;
-  if (fillWidth > 0) {
-    renderer.fillRect(barX + 2, barY + 2, fillWidth, barHeight - 4);
-  }
-
-  // Draw a simple knob centered at the current percent.
-  const int knobX = barX + 2 + fillWidth - 2;
-  renderer.fillRect(knobX, barY - 4, 4, barHeight + 8, true);
-
-  if (mappedInput.hasTouch()) {
-    auto drawButton = [&](const Rect& rect) {
-      renderer.fillRectDither(rect.x, rect.y, rect.width, rect.height, Color::White);
-      renderer.drawRect(rect.x, rect.y, rect.width, rect.height, true);
-    };
-    auto drawChevron = [&](const Rect& rect, const bool pointsRight, const bool doubleChevron) {
-      const int centreY = rect.y + rect.height / 2;
-      const int firstX = rect.x + (doubleChevron ? 13 : 20);
-      const int chevronCount = doubleChevron ? 2 : 1;
-      for (int i = 0; i < chevronCount; ++i) {
-        const int x = firstX + i * 14;
-        if (pointsRight) {
-          renderer.drawLine(x, centreY - 12, x + 12, centreY, 2, true);
-          renderer.drawLine(x + 12, centreY, x, centreY + 12, 2, true);
-        } else {
-          renderer.drawLine(x + 12, centreY - 12, x, centreY, 2, true);
-          renderer.drawLine(x, centreY, x + 12, centreY + 12, 2, true);
-        }
-      }
-    };
-    for (int index = 0; index < 4; ++index) {
-      const Rect rect = touchStepButtonRect(screen, barY + 80, index);
-      drawButton(rect);
-      drawChevron(rect, index >= 2, index == 0 || index == 3);
-    }
-
-    const Rect cancelRect = touchActionButtonRect(screen, false);
-    const Rect confirmRect = touchActionButtonRect(screen, true);
-    drawButton(cancelRect);
-    drawButton(confirmRect);
-    auto drawButtonLabel = [&](const Rect& rect, const char* label) {
-      const int x = rect.x + (rect.width - renderer.getTextWidth(UI_10_FONT_ID, label)) / 2;
-      const int y = rect.y + (rect.height - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
-      renderer.drawText(UI_10_FONT_ID, x, y, label);
-    };
-    drawButtonLabel(cancelRect, tr(STR_CANCEL));
-    drawButtonLabel(confirmRect, tr(STR_CONFIRM));
-  } else {
-    // Two-line step hint built from separate label + value strings (front buttons = fine step, side
-    // buttons = coarse step), so the layout doesn't depend on a separator hidden in translated text.
-    char line[64];
-    snprintf(line, sizeof(line), "%s %d%%", I18N.get(StrId::STR_STEP_HINT_FRONT), kSmallStep);
-    UITheme::drawCenteredText(renderer, screen, SMALL_FONT_ID, barY + 30, line, true);
-    snprintf(line, sizeof(line), "%s %d%%", I18N.get(StrId::STR_STEP_HINT_SIDE), kLargeStep);
-    UITheme::drawCenteredText(renderer, screen, SMALL_FONT_ID, barY + 52, line, true);
-
-    // Button hints follow the current front button layout.
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), "-", "+");
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
-  }
+  // Button hints follow the current front button layout and auto-hide on touch devices.
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), "-", "+");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
 
   renderer.displayBuffer();
 }

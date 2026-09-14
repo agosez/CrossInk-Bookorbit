@@ -10,8 +10,10 @@
 #include <string>
 #include <vector>
 
+#include "CrossPointSettings.h"
 #include "GfxRenderer.h"
 #include "MappedInputManager.h"
+#include "util/QuickLockTrigger.h"
 #include "util/ScreenshotInfo.h"
 
 #ifndef portMUX_INITIALIZER_UNLOCKED
@@ -56,6 +58,14 @@ class ActivityManager {
   std::unique_ptr<Activity> pendingActivity;
   enum class PendingAction { None, Push, Pop, Replace };
   PendingAction pendingAction = PendingAction::None;
+  // Set when an overlay is closed specifically to hand control back to the
+  // reader's menu. It must wait until the reader is current again.
+  int16_t pendingReaderMenuAction = -1;
+
+  // A one-shot Home selection to restore after Settings replaces Home. This
+  // is intentionally not persisted as recent-book order.
+  std::string preferredHomeBookPath;
+  bool returningHomeThroughSettings = false;
 
   // Task to render and display the activity
   TaskHandle_t renderTaskHandle = nullptr;
@@ -74,9 +84,14 @@ class ActivityManager {
   // Whether to trigger a render after the current loop()
   // This variable must only be set by the main loop, to avoid race conditions
   std::atomic<bool> requestedUpdate{false};
+  // A popped full-screen child leaves its pixels in the framebuffer until the
+  // restored activity renders. Partial-screen overlays must not preserve that
+  // stale child as their backdrop.
+  std::atomic<bool> restoredActivityNeedsRender{false};
 
+  Activity* findEpubReader() const;
   bool handleGlobalHomeGesture();
-  bool handleReaderPowerButtonSettingsOverride();
+  bool restoreBackdropBehindCurrentOverlay();
 
  public:
   explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -97,9 +112,10 @@ class ActivityManager {
   void goToCalibreWireless(const std::string& returnBookPath = {});
   void goToJoinNetworkFileTransfer(const std::string& returnBookPath = {});
   void goToHotspotFileTransfer(const std::string& returnBookPath = {});
+  void goToUsbDrive();
   bool resumeFileTransferFromNetworkBoot(uint32_t payload);
   void goToNearbyStatsSync();
-  void goToNearbyBookSend(std::string path, bool returnToReader);
+  bool goToNearbyBookSend(std::string path, bool returnToReader);
   void goToNearbyBookReceive();
   void goToSettings(bool dismissOnUpSwipe = false);
   void goToFileBrowser(std::string path = {});
@@ -110,6 +126,7 @@ class ActivityManager {
   void goToBookOrbitAuth();
   void goToReader(std::string path, bool suppressBackRelease = false, bool allowFastInitialRefresh = false,
                   bool cleanImageBaseOnEntry = false);
+  void goToReaderAndRunMenuAction(std::string path, uint8_t action);
   void goToSleep(bool fromTimeout = false);
   void goToBoot();
   void goToFullScreenMessage(std::string message, EpdFontFamily::Style style = EpdFontFamily::REGULAR);
@@ -124,15 +141,29 @@ class ActivityManager {
   void popActivity();
 
   bool preventAutoSleep() const;
+  bool requiresExclusiveStorageLoop() const;
+  // The active activity has an open modal that owns all global shortcuts and
+  // gestures until it is dismissed.
+  bool blocksGlobalInput() const;
   bool isHomeActivity() const;
   bool isReaderActivity() const;
-  bool readerPowerButtonOpensSettings() const;
+  bool openReaderSettingsForTouchscreenEscapeHatch();
+  bool handleHomeButtonBackOrHome();
+  bool openReaderMenuFromShortcut();
+  bool handleShortcutAction(uint8_t action);
   bool hasActivityNamed(const char* activityName) const;
 #ifdef SIMULATOR
   bool isCurrentActivityNamed(const char* activityName) const;
 #endif
   bool canSnapshotForSleepOverlay() const;
   bool requestManualReaderRefresh();
+  bool handleShortcutAction(CrossPointSettings::SHORT_PWRBTN action);
+  bool handleQuickLockUnlock(QuickLockTrigger trigger);
+  void persistGlobalSettings();
+  bool beginGlobalSettingsEdit();
+  void endGlobalSettingsEdit();
+  void notifyInputLockChanged(bool locked);
+  void notifyUserInput();
   bool skipLoopDelay() const;
   std::string getCurrentBookPath() const;
   ScreenshotInfo getScreenshotInfo() const;

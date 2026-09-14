@@ -20,6 +20,7 @@ class ArenaVector {
     if (newCapacity <= capacity_) {
       return true;
     }
+    if (newCapacity > SIZE_MAX / sizeof(T)) return false;
     auto* next = static_cast<T*>(arena_.alloc(sizeof(T) * newCapacity, alignof(T)));
     if (!next) {
       return false;
@@ -45,6 +46,7 @@ class ArenaVector {
 
   bool push_back(const T& value) {
     if (size_ == capacity_) {
+      if (capacity_ > SIZE_MAX / 2) return false;
       const size_t nextCapacity = capacity_ == 0 ? 8 : capacity_ * 2;
       if (!reserve(nextCapacity)) {
         return false;
@@ -59,6 +61,7 @@ class ArenaVector {
       return false;
     }
     if (size_ == capacity_) {
+      if (capacity_ > SIZE_MAX / 2) return false;
       const size_t nextCapacity = capacity_ == 0 ? 8 : capacity_ * 2;
       if (!reserve(nextCapacity)) {
         return false;

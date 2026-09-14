@@ -79,7 +79,7 @@ void appendJsonEscaped(std::string& out, const std::string& value) {
 
 std::string booksCacheKey(const BookOrbitBookQuery& query, const int page) {
   return std::string("books|") + std::to_string(page) + "|" + query.sort + "|" + query.query + "|" + query.author +
-         "|" + query.seriesId + "|" + query.series;
+         "|" + query.seriesId + "|" + query.series + "|" + query.collectionId + "|" + query.libraryId;
 }
 
 std::string facetCacheKey(const std::string& sectionId, const int page) {
@@ -140,6 +140,33 @@ void saveRootSections(const std::vector<BookOrbitCatalogSection>& sections) {
   }
   json += "]}";
   writeJsonStringFile(cachePathForKey("root"), json);
+}
+
+bool loadCatalogCounts(BookOrbitCatalogCounts& outCounts) {
+  std::string text;
+  if (!readJsonStringFile(cachePathForKey("counts"), text)) return false;
+
+  JsonDocument doc;
+  if (deserializeJson(doc, text) != DeserializationError::Ok || !doc["totalBooks"].is<int>()) return false;
+
+  outCounts = BookOrbitCatalogCounts{};
+  outCounts.totalBooks = doc["totalBooks"] | -1;
+  outCounts.inProgress = doc["inProgress"] | -1;
+  outCounts.libraries = doc["libraries"] | -1;
+  outCounts.authors = doc["authors"] | -1;
+  outCounts.series = doc["series"] | -1;
+  outCounts.collections = doc["collections"] | -1;
+  return true;
+}
+
+void saveCatalogCounts(const BookOrbitCatalogCounts& counts) {
+  std::string json;
+  json.reserve(128);
+  json +=
+      "{\"totalBooks\":" + std::to_string(counts.totalBooks) + ",\"inProgress\":" + std::to_string(counts.inProgress) +
+      ",\"libraries\":" + std::to_string(counts.libraries) + ",\"authors\":" + std::to_string(counts.authors) +
+      ",\"series\":" + std::to_string(counts.series) + ",\"collections\":" + std::to_string(counts.collections) + "}";
+  writeJsonStringFile(cachePathForKey("counts"), json);
 }
 
 bool loadFacetPage(const std::string& sectionId, const int page, BookOrbitFacetPage& outPage) {
@@ -205,8 +232,12 @@ bool loadBooksPage(const BookOrbitBookQuery& query, const int page, BookOrbitBoo
 
 void saveBooksPage(const BookOrbitBookQuery& query, const int page, const BookOrbitBookPage& pageData) {
   std::string json;
-  json.reserve(112 + pageData.books.size() * 80);
-  json += "{\"page\":" + std::to_string(pageData.page) + ",\"total\":" + std::to_string(pageData.total) +
+  json.reserve(160 + pageData.books.size() * 80);
+  // The filename is a hash of the key; embed the key itself so a cache file can be
+  // traced back to the listing that produced it (loaders ignore the field).
+  json += "{\"key\":";
+  appendJsonEscaped(json, booksCacheKey(query, page));
+  json += ",\"page\":" + std::to_string(pageData.page) + ",\"total\":" + std::to_string(pageData.total) +
           ",\"size\":" + std::to_string(pageData.pageSize) + ",\"items\":[";
   for (size_t i = 0; i < pageData.books.size(); i++) {
     if (i > 0) json += ",";

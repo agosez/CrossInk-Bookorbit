@@ -6,6 +6,7 @@
 #include <cmath>
 
 #include "MappedInputManager.h"
+#include "ReaderUtils.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
@@ -13,7 +14,6 @@
 
 namespace fui = freeink::ui;
 namespace {
-constexpr unsigned long BOOKMARK_DELETE_HOLD_MS = 1000;
 constexpr fui::ActionId ACTION_ROW = 1;
 }  // namespace
 
@@ -30,7 +30,7 @@ void EpubReaderBookmarkListActivity::onEnter() {
   topIndex = 0;
   visibleRows = 1;
   uiReady = false;
-  app.setTheme(uiThemeTokens(uiTarget));
+  applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &EpubReaderBookmarkListActivity::onRowEvent, this);
   app.setScreen(&EpubReaderBookmarkListActivity::listScreen, this);
   requestUpdate();
@@ -59,6 +59,7 @@ void EpubReaderBookmarkListActivity::showBookmarkDeletePopup() {
     if (optionIndex == 1) deleteSelectedBookmark();
     requestUpdate();
   });
+  confirmPopup.setPrimaryOptionIndex(1);
   requestUpdate();
 }
 
@@ -73,6 +74,11 @@ void EpubReaderBookmarkListActivity::onRowEvent(const fui::ActionEvent& event, v
   auto* self = static_cast<EpubReaderBookmarkListActivity*>(user);
   if (event.value < 0 || event.value >= static_cast<int16_t>(self->bookmarks.size())) return;
   self->selectedIndex = event.value;
+  if (event.longPress) {
+    self->app.clearTapFlash();
+    self->showBookmarkDeletePopup();
+    return;
+  }
   self->app.clearTapFlash();
   self->selectBookmark();
 }
@@ -97,22 +103,8 @@ void EpubReaderBookmarkListActivity::loop() {
     return;
   }
   if (!bookmarks.empty() && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
-      mappedInput.getHeldTime() >= BOOKMARK_DELETE_HOLD_MS) {
+      mappedInput.getHeldTime() >= ReaderUtils::DELETE_HOLD_MS) {
     showBookmarkDeletePopup();
-    return;
-  }
-  int tx = 0;
-  int ty = 0;
-  if (mappedInput.isScreenTouchLongPress(tx, ty, BOOKMARK_DELETE_HOLD_MS) && listRowStep > 0 && ty >= listTop &&
-      ty < listBottom) {
-    const int offset = ty - listTop;
-    const int row = offset / listRowStep;
-    const int touched = topIndex + row;
-    if (row < visibleRows && offset % listRowStep < listRowHeight && touched < static_cast<int>(bookmarks.size())) {
-      selectedIndex = touched;
-      mappedInput.suppressNextTouchTap();
-      showBookmarkDeletePopup();
-    }
     return;
   }
   if (uiReady) {
@@ -190,14 +182,10 @@ void EpubReaderBookmarkListActivity::buildListScreen(UiApp::ScreenType& screen) 
   props.count = static_cast<uint16_t>(items.size());
   props.selectedIndex = static_cast<int16_t>(selectedIndex);
   props.action = ACTION_ROW;
-  props.inputMask = fui::InputTouch;
+  props.inputMask = static_cast<uint16_t>(fui::InputTouch | fui::InputLongPress);
   props.valueInset = 8;
   const fui::Rect bounds = screen.body();
-  listTop = bounds.y;
-  listBottom = bounds.bottom();
   const auto rows = configureUiList(props, screen.theme(), bounds, UiListRowType::WithSubtitle);
-  listRowHeight = props.rowHeight;
-  listRowStep = props.rowHeight + props.rowGap;
   visibleRows = rows > 0 ? rows : 1;
   topIndex = scrollListBy(topIndex, 0, visibleRows, static_cast<int>(bookmarks.size()));
   props.topIndex = static_cast<uint16_t>(topIndex);
@@ -219,8 +207,8 @@ void EpubReaderBookmarkListActivity::render(RenderLock&&) {
   app.render();
   uiReady = true;
   if (confirmPopup.processRender(renderer, mappedInput)) return;
-  const auto labels =
-      mappedInput.mapLabels(tr(STR_BACK), bookmarks.empty() ? "" : tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)),
+                                            bookmarks.empty() ? "" : tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   renderer.displayBuffer();
 }

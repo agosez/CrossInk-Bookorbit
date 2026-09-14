@@ -1,6 +1,8 @@
 #include "InflateStream.h"
 
 #include <BuildScratch.h>
+#include <Logging.h>
+#include <PoolBudget.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +23,15 @@ size_t InflateStream::requiredStorageSize(const bool streaming) {
   return STATE_ALIGNED + (streaming ? WINDOW_SIZE : 0);
 }
 
+size_t InflateStream::requiredInternalStorageSize(const bool streaming) {
+  if (buildscratch::available(requiredStorageSize(streaming))) return 0;
+  if (streaming && psramHeapAvailable() && MemoryBudget::canAllocatePsram(WINDOW_SIZE) &&
+      MemoryBudget::canAllocateInternal(STATE_ALIGNED, MemoryBudget::EPUB_INFLATE_INTERNAL_RESERVE)) {
+    return STATE_ALIGNED;
+  }
+  return requiredStorageSize(streaming);
+}
+
 bool InflateStream::init(const bool streaming) {
   // Every consumer constructs a fresh stream per operation, so acquire storage
   // from scratch each init (releasing any prior backing first).
@@ -35,14 +46,33 @@ bool InflateStream::init(const bool streaming) {
     state = reinterpret_cast<tinfl_decompressor*>(arenaBase);
     window = streaming ? arenaBase + STATE_ALIGNED : nullptr;
   } else {
-    // Raw malloc (not makeUniqueNoThrow): the header keeps tinfl_decompressor
-    // an incomplete type so consumers never include miniz; both blocks are
-    // freed in deinit()/the destructor.
-    state = static_cast<tinfl_decompressor*>(malloc(sizeof(tinfl_decompressor)));
-    if (!state) return false;
+    // Runtime-sized transient byte storage; tinfl's POD state remains on the
+    // default heap. Owned separately so partial initialization frees it now.
+    stateOwner = makeDefaultByteBufferNoThrow(sizeof(tinfl_decompressor));
+    state = reinterpret_cast<tinfl_decompressor*>(stateOwner.get());
+    if (!state) {
+      LOG_ERR("INF", "OOM allocating inflate state (%u bytes)", unsigned(sizeof(tinfl_decompressor)));
+      return false;
+    }
     if (streaming) {
-      window = static_cast<uint8_t*>(malloc(WINDOW_SIZE));
-      if (!window) return false;  // state kept; deinit()/next init reclaims it
+      if (psramHeapAvailable()) {
+        if (MemoryBudget::canAllocatePsram(WINDOW_SIZE)) windowOwner = makePsramByteBufferNoThrow(WINDOW_SIZE);
+        if (!windowOwner &&
+            MemoryBudget::canAllocateInternal(WINDOW_SIZE, MemoryBudget::EPUB_INFLATE_INTERNAL_RESERVE)) {
+          windowOwner = makeInternalByteBufferNoThrow(WINDOW_SIZE);
+        }
+      } else {
+        // Preserve C3 allocation order and default-heap behavior.
+        windowOwner = makeDefaultByteBufferNoThrow(WINDOW_SIZE);
+      }
+      window = windowOwner.get();
+      if (!window) {
+        LOG_ERR("INF", "No admitted storage for inflate window (%u bytes)", unsigned(WINDOW_SIZE));
+        deinit();
+        return false;
+      }
+      LOG_DBG("INF", "Window: bytes=%u pool=%s psramReserve=%u", unsigned(WINDOW_SIZE), memoryPoolName(windowPool()),
+              unsigned(MemoryBudget::EPUB_PSRAM_RESERVE));
     }
   }
 
@@ -65,10 +95,9 @@ void InflateStream::deinit() {
   if (arenaBase) {
     buildscratch::release(arenaBase);
     arenaBase = nullptr;
-  } else {
-    free(state);
-    free(window);
   }
+  windowOwner.reset();
+  stateOwner.reset();
   state = nullptr;
   window = nullptr;
 }

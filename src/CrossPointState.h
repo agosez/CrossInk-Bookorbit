@@ -7,6 +7,8 @@
 #include <mutex>
 #include <string>
 
+#include "PendingOverlayResume.h"
+
 class CrossPointState : public PersistableStore<CrossPointState> {
   mutable std::mutex _mutex;
   CrossPointState() = default;
@@ -17,6 +19,7 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   std::mutex& getMutex() const { return _mutex; }
 
   static constexpr uint8_t SLEEP_RECENT_COUNT = 16;
+  static constexpr uint8_t BOOT_RECENT_COUNT = 16;
 
   std::string openEpubPath;
   std::string favoriteSleepImagePath;
@@ -24,9 +27,24 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   uint16_t recentSleepImages[SLEEP_RECENT_COUNT] = {};  // circular buffer of recent wallpaper indices
   uint8_t recentSleepPos = 0;                           // next write slot
   uint8_t recentSleepFill = 0;                          // valid entries (0..SLEEP_RECENT_COUNT)
+  std::string favoriteBootImagePath;
+  uint16_t recentBootImages[BOOT_RECENT_COUNT] = {};  // circular buffer of recent boot-screen indices
+  uint8_t recentBootPos = 0;                          // next write slot
+  uint8_t recentBootFill = 0;                         // valid entries (0..BOOT_RECENT_COUNT)
   uint8_t readerActivityLoadCount = 0;
   bool lastSleepFromReader = false;
   bool showBootScreen = true;
+  // One-shot marker set only when Quick Lock puts the device to sleep.
+  bool quickLockResumePending = false;
+  // Serialized raw QuickLockTrigger value for the one permitted post-wake unlock.
+  uint8_t quickLockResumeTrigger = 0;
+  // True only when Quick Lock turned an active frontlight off. It survives a
+  // Quick Lock timeout so the permitted unlock can restore the user's light.
+  bool quickLockRestoreFrontlight = false;
+  PendingOverlayResume pendingOverlayResume{};
+
+  void setPendingOverlayResume(PendingOverlayResume value);
+  bool consumePendingOverlayResume(PendingOverlayResume& value);
 
   // Returns true if idx was shown within the last checkCount picks.
   // Walks backwards from the most recently written slot.
@@ -34,6 +52,8 @@ class CrossPointState : public PersistableStore<CrossPointState> {
 
   void pushRecentSleep(uint16_t idx);
   void clearRecentSleepHistory();
+
+  void pushRecentBoot(uint16_t idx);
   ~CrossPointState() = default;
 
   bool saveToFile() const;

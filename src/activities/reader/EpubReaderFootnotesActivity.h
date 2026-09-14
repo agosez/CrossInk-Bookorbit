@@ -34,6 +34,9 @@ class EpubReaderFootnotesActivity final : public Activity {
   std::atomic<bool> uiReady{false};
   int visibleRows = 1;
   int topIndex = 0;
+  bool ignoreInitialBackRelease = false;
+  bool ignoreInitialConfirmRelease = false;
+  bool ignoreInitialPowerRelease = false;
 
   static void listScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);

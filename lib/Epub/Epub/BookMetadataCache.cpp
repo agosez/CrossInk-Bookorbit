@@ -2,6 +2,7 @@
 
 #include <BufferedFile.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <Serialization.h>
 #include <Utf8.h>
 #include <ZipFile.h>
@@ -20,6 +21,9 @@ constexpr size_t METADATA_ARENA_SLAB_BYTES = 4096;
 // Buffer size for the buildBookBin streams. 3 buffers x 4KB, transient (freed on
 // return); 4KB = 8 SD sectors per transfer, enough to stop the sector-cache thrash.
 constexpr size_t BUILD_IO_BUFFER_SIZE = 4096;
+// Cap the reader-session speedup at 4KB on constrained C3 devices. EPUBs with
+// larger spines keep using the existing on-disk lookup path.
+constexpr uint16_t MAX_CACHED_CUMULATIVE_SIZES = 1024;
 
 // Entry (de)serializers, templated so they run over HalFile and the Buffered*
 // wrappers alike (two instantiations each -- a few hundred bytes of flash, in
@@ -538,8 +542,43 @@ bool BookMetadataCache::load() {
     return false;
   }
 
+  cacheSpineCumulativeSizes();
   loaded = true;
   return true;
+}
+
+void BookMetadataCache::cacheSpineCumulativeSizes() {
+  cumulativeSizes.reset();
+  cumulativeSizeCount = 0;
+  if (!cacheCumulativeSizes || spineCount == 0 || spineCount > MAX_CACHED_CUMULATIVE_SIZES) {
+    return;
+  }
+
+  auto sizes = makeUniqueNoThrow<uint32_t[]>(spineCount);
+  if (!sizes) {
+    LOG_DBG("BMC", "Could not allocate %u-byte cumulative size cache; using SD lookups",
+            static_cast<unsigned>(spineCount * sizeof(uint32_t)));
+    return;
+  }
+
+  const uint32_t lutSize = (static_cast<uint32_t>(spineCount) + tocCount) * sizeof(uint32_t);
+  if (!bookFile.seek(lutOffset + lutSize)) {
+    LOG_DBG("BMC", "Could not seek to spine data for cumulative size cache; using SD lookups");
+    return;
+  }
+
+  for (uint16_t i = 0; i < spineCount; ++i) {
+    uint32_t hrefLen = 0;
+    int16_t tocIndex = -1;
+    if (!serialization::tryReadPod(bookFile, hrefLen) || !bookFile.seekCur(hrefLen) ||
+        !serialization::tryReadPod(bookFile, sizes[i]) || !serialization::tryReadPod(bookFile, tocIndex)) {
+      LOG_DBG("BMC", "Could not populate cumulative size cache; using SD lookups");
+      return;
+    }
+  }
+
+  cumulativeSizes = std::move(sizes);
+  cumulativeSizeCount = spineCount;
 }
 
 BookMetadataCache::SpineEntry BookMetadataCache::getSpineEntry(const int index) {
@@ -570,6 +609,10 @@ size_t BookMetadataCache::getSpineCumulativeSize(const int index) {
   if (index < 0 || index >= static_cast<int>(spineCount)) {
     LOG_ERR("BMC", "getSpineCumulativeSize index %d out of range", index);
     return 0;
+  }
+
+  if (index < static_cast<int>(cumulativeSizeCount)) {
+    return cumulativeSizes[index];
   }
 
   // Seek to spine LUT item, then read only the cumulative size field from the entry.

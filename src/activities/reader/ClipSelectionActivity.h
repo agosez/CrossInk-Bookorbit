@@ -5,6 +5,7 @@
 #include <Memory.h>
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,7 +27,9 @@ struct ClipWordStyle {
 class ClipSelectionActivity final : public Activity {
  public:
   ClipSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, ClipWordStore wordStore, int fontId,
-                        Section& section, int startPageInSection, int marginTop, int marginLeft);
+                        Section& section, int startPageInSection, int marginTop, int marginLeft,
+                        const DictionaryClippingRequest* dictionaryRequest = nullptr,
+                        bool ignoreInitialBackRelease = false);
 
   void onEnter() override;
   void onExit() override;
@@ -34,6 +37,7 @@ class ClipSelectionActivity final : public Activity {
   void render(RenderLock&&) override;
   bool isReaderActivity() const override { return true; }
   bool allowPowerAsConfirmInReaderMode() const override { return true; }
+  bool handleHomeGesture() override;
 
  private:
   static constexpr size_t BUFFER_CHUNK_SIZE = 4096;
@@ -59,12 +63,23 @@ class ClipSelectionActivity final : public Activity {
   bool hasSavedBuffer = false;
   bool usingFallbackFont = false;
   bool touchDragSelecting = false;
+  bool touchDragHasMoved = false;
+  int touchDragStartX = 0;
+  int touchDragStartY = 0;
+  int touchDragPageEndIdx = -1;
+  uint32_t touchDragPageEndHeldSince = 0;
+  bool hasDictionaryRequest = false;
+  bool ignoreInitialConfirmRelease = false;
+  bool ignoreInitialPowerRelease = false;
+  bool ignoreInitialBackRelease = false;
+  DictionaryClippingRequest dictionaryRequest{};
   std::array<uint16_t, MAX_READING_ORDER_WORDS> readingOrder{};
   size_t readingOrderSize = 0;
 
   ButtonNavigator buttonNavigator;
 
   void buildReadingOrder();
+  void positionCursorAtInitialPageCenter();
   void resetSavedBufferChunks();
   void allocateSavedBuffer();
   void storeCurrentBuffer();
@@ -74,7 +89,10 @@ class ClipSelectionActivity final : public Activity {
   void applyWordStyle(const WordRef& word, const ClipWordStyle& style) const;
   void useFallbackFont(const char* reason);
   bool selectWordAtPoint(int x, int y);
+  bool isWithinCurrentPageEndDwellSlop(int x, int y) const;
+  uint16_t tableSelectionForRange(int from, int to) const;
   void confirmSelection();
+  bool finishDictionarySelection();
   int lineEndForward(int orderIdx) const;
   int lineEndBackward(int orderIdx) const;
 };

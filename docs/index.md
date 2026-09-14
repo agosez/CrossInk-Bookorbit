@@ -11,6 +11,7 @@ Welcome to CrossInk, a personal fork of CrossPoint Reader.
 
 ## User Docs
 
+- [Touch Navigation](./touch-navigation.md)
 - [User Guide](./user-guide.md)
 - [Installation](./installation.md)
 - [SD Card Fonts](./sd-card-fonts.md)

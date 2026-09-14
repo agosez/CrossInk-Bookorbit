@@ -3,6 +3,8 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
+#include <algorithm>
+
 #include "MappedInputManager.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
@@ -32,15 +34,16 @@ int EpubReaderChapterSelectionActivity::getTotalItems() const { return epub->get
 void EpubReaderChapterSelectionActivity::onEnter() {
   Activity::onEnter();
   mappedInput.setReaderTouchscreenOverride(true);
-  if (!epub) return;
 
+  // epub is a required collaborator: the caller dereferences it before constructing
+  // this activity, and loop()/render() use it unguarded on every frame.
   selectorIndex = epub->getTocIndexForSpineIndex(currentSpineIndex);
   if (selectorIndex < 0) selectorIndex = 0;
   topIndex = 0;
   visibleRows = 1;
   initialViewportPending = true;
   uiReady = false;
-  app.setTheme(uiThemeTokens(uiTarget));
+  applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &EpubReaderChapterSelectionActivity::onRowEvent, this);
   app.setScreen(&EpubReaderChapterSelectionActivity::chapterScreen, this);
   requestUpdate();
@@ -139,32 +142,36 @@ void EpubReaderChapterSelectionActivity::buildChapterScreen(UiApp::ScreenType& s
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   const int totalItems = getTotalItems();
-  std::vector<std::string> labels(totalItems);
-  std::vector<fui::ListItem> items;
-  items.reserve(totalItems);
-  for (int i = 0; i < totalItems; ++i) {
-    const auto item = epub->getTocItem(i);
-    labels[i] = std::string((item.level - 1) * 2, ' ') + item.title;
-    fui::ListItem row;
-    row.label = labels[i].c_str();
-    row.actionValue = static_cast<int16_t>(i);
-    items.push_back(row);
-  }
-
   fui::ListProps props;
-  props.items = items.data();
-  props.count = static_cast<uint16_t>(items.size());
-  props.selectedIndex = static_cast<int16_t>(selectorIndex);
-  props.action = ACTION_ROW;
-  props.inputMask = fui::InputTouch;
   props.labelText = screen.theme().bodyText;
   const auto rows = configureUiList(props, screen.theme(), screen.body());
   visibleRows = rows > 0 ? rows : 1;
   topIndex = initialViewportPending ? followListSelection(selectorIndex, 0, visibleRows, totalItems)
                                     : scrollListBy(topIndex, 0, visibleRows, totalItems);
   initialViewportPending = false;
-  props.topIndex = static_cast<uint16_t>(topIndex);
+
+  const size_t drawCount =
+      std::min({static_cast<size_t>(visibleRows), CHAPTER_WINDOW_SIZE, static_cast<size_t>(totalItems - topIndex)});
+  for (size_t i = 0; i < drawCount; ++i) {
+    const auto item = epub->getTocItem(topIndex + static_cast<int>(i));
+    const size_t indent = item.level > 0 ? static_cast<size_t>(item.level - 1) * 2 : 0;
+    labelWindow[i].assign(indent, ' ');
+    labelWindow[i] += item.title;
+    itemWindow[i] = fui::ListItem{};
+    itemWindow[i].label = labelWindow[i].c_str();
+    itemWindow[i].actionValue = static_cast<int16_t>(topIndex + static_cast<int>(i));
+  }
+
+  props.items = itemWindow.data();
+  props.count = static_cast<uint16_t>(drawCount);
+  props.selectedIndex = static_cast<int16_t>(selectorIndex - topIndex);
+  props.action = ACTION_ROW;
+  props.inputMask = fui::InputTouch;
+  props.topIndex = 0;
   screen.list(props);
+  fui::drawListScrollIndicator(screen.target(), screen.body(), static_cast<size_t>(totalItems), visibleRows, topIndex,
+                               screen.theme().listScrollWidth, screen.theme().listScrollSide,
+                               screen.theme().listScrollInset);
 }
 
 void EpubReaderChapterSelectionActivity::render(RenderLock&&) {
@@ -181,7 +188,8 @@ void EpubReaderChapterSelectionActivity::render(RenderLock&&) {
   uiReady = false;
   app.render();
   uiReady = true;
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels =
+      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   renderer.displayBuffer();
 }

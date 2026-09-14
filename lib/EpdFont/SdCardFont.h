@@ -1,5 +1,7 @@
 #pragma once
 
+#include <Memory.h>
+
 #include <cstdint>
 #include <deque>
 #include <string>
@@ -84,9 +86,6 @@ class SdCardFont {
   // Returns pointer to the managed EpdFont for a given style.
   // Returns nullptr if the style is not present.
   EpdFont* getEpdFont(uint8_t style = 0);
-
-  // Returns true if the given style is present in this font file.
-  bool hasStyle(uint8_t style) const;
 
   // Resolve requested style bits to the closest present style.
   uint8_t resolveStyle(uint8_t style) const;
@@ -200,7 +199,8 @@ class SdCardFont {
     EpdFontData miniData{};
     EpdUnicodeInterval* miniIntervals = nullptr;
     EpdGlyph* miniGlyphs = nullptr;
-    uint8_t* miniBitmap = nullptr;
+    HeapByteBuffer miniBitmap;
+    MemoryPool miniBitmapPool = MemoryPool::None;
     uint32_t miniIntervalCount = 0;
     uint32_t miniGlyphCount = 0;
     uint32_t miniIntervalCapacity = 0;
@@ -295,6 +295,7 @@ class SdCardFont {
 
   // Per-style helpers
   void freeStyleMiniData(PerStyle& s);
+  bool ensureBitmapCapacity(PerStyle& s, uint32_t needed);
   void resetStyleMiniData(PerStyle& s);
   void freeStyleAll(PerStyle& s);
   void freeStyleKernLigatureData(PerStyle& s);

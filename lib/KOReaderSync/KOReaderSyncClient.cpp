@@ -37,6 +37,8 @@ int KOReaderSyncClient::lastTransportError = 0;
 namespace {
 constexpr char DEVICE_ID[] = "crossink-device";
 
+constexpr bool isSuccessfulHttpCode(int httpCode) { return httpCode >= 200 && httpCode < 300; }
+
 std::string formatHttpStatusMessage(int httpCode) {
   char buffer[96];
   snprintf(buffer, sizeof(buffer), tr(STR_KOREADER_SYNC_HTTP_STATUS_FORMAT), httpCode);
@@ -197,6 +199,8 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
 
   http.end();
 
+  // KOSync-compatible implementations can use other successful 2xx codes.
+  if (isSuccessfulHttpCode(httpCode)) return OK;
   if (httpCode == 401) return AUTH_FAILED;
   if (httpCode < 0) return NETWORK_ERROR;
   return SERVER_ERROR;
@@ -224,6 +228,9 @@ KOReaderSyncClient::Error KOReaderSyncClient::authenticate() {
     return result;
   }
   http.end();
+  // KOSync-compatible implementations use different successful 2xx codes.
+  // Keep CrossInk's validation of the reference server's 200 JSON response.
+  if (isSuccessfulHttpCode(httpCode)) return OK;
   if (httpCode == 401) return AUTH_FAILED;
   return SERVER_ERROR;
 #endif
@@ -261,7 +268,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::createUser() {
   LOG_DBG("KOSync", "Create user response: %d", httpCode);
 
   if (httpCode <= 0) return NETWORK_ERROR;
-  if (httpCode == 200 || httpCode == 201) return OK;
+  if (isSuccessfulHttpCode(httpCode)) return OK;  // 2xx: created (see #2876)
   if (httpCode == 402) return USER_EXISTS;
   return SERVER_ERROR;
 }
@@ -297,7 +304,14 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
   lastHttpCode = httpCode;
   lastTransportError = (httpCode < 0) ? httpCode : 0;
 
-  if (httpCode == 200) {
+  // 204 means this document has no stored progress. Some KOSync-compatible
+  // servers use it where the reference server returns 200 with an empty body.
+  if (httpCode == 204) {
+    http.end();
+    return NOT_FOUND;
+  }
+
+  if (isSuccessfulHttpCode(httpCode)) {
     String responseBody = http.getString();
     http.end();
 
@@ -307,6 +321,11 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
     if (error) {
       logJsonParseFailure("Get progress", error, responseBody.c_str());
       return JSON_ERROR;
+    }
+
+    if (doc["progress"].isNull()) {
+      LOG_DBG("KOSync", "No stored progress in successful response");
+      return NOT_FOUND;
     }
 
     outProgress.document = documentHash;
@@ -346,7 +365,16 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
     return NETWORK_ERROR;
   }
 
-  if (httpCode == 200) {
+  // 204 = success with no stored progress for this document (Spring-style
+  // KOSync implementations; the reference server answers 200 with an empty
+  // object instead). Map it to the same graceful no-remote-progress path as
+  // 404 rather than falling through to SERVER_ERROR — see issue #2876.
+  if (httpCode == 204) {
+    http.end();
+    return NOT_FOUND;
+  }
+
+  if (isSuccessfulHttpCode(httpCode)) {
     const std::string& body = http.getString();
     JsonDocument doc;
     const DeserializationError error = deserializeJson(doc, body);
@@ -355,6 +383,12 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
       logJsonParseFailure("Get progress", error, body.c_str());
       http.end();
       return JSON_ERROR;
+    }
+
+    if (doc["progress"].isNull()) {
+      http.end();
+      LOG_DBG("KOSync", "No stored progress in successful response");
+      return NOT_FOUND;
     }
 
     outProgress.document = documentHash;
@@ -383,6 +417,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::getProgress(const std::string& doc
       }
     }
 
+    http.end();
     LOG_DBG("KOSync", "Got progress: %.2f%% at %s", outProgress.percentage * 100, outProgress.progress.c_str());
     return OK;
   }
@@ -457,7 +492,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
 
   LOG_DBG("KOSync", "Update progress response: %d", httpCode);
 
-  if (httpCode == 200 || httpCode == 202) return OK;
+  if (isSuccessfulHttpCode(httpCode)) return OK;
   if (httpCode == 401) return AUTH_FAILED;
   if (httpCode < 0) return NETWORK_ERROR;
   return SERVER_ERROR;
@@ -478,7 +513,11 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   LOG_DBG("KOSync", "Update progress response: %d", httpCode);
 
   if (httpCode <= 0) return NETWORK_ERROR;
-  if (httpCode == 200 || httpCode == 202) return OK;
+  // Any 2xx accepts the progress. The reference kosync server answers 200,
+  // but Spring-based KOSync implementations (BookLore/grimmory) answer a PUT
+  // with the idiomatic 201/204, which used to land in SERVER_ERROR and made
+  // every sync against them fail after a successful pull — issue #2876.
+  if (isSuccessfulHttpCode(httpCode)) return OK;
   if (httpCode == 401) return AUTH_FAILED;
   return SERVER_ERROR;
 #endif

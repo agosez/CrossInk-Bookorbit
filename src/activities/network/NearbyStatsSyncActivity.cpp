@@ -43,7 +43,7 @@ void NearbyStatsSyncActivity::render(RenderLock&&) {
   }
   renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_NEARBY_STATS_SIMULATOR_UNAVAILABLE), true,
                             EpdFontFamily::BOLD);
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer(screenTransitionRefresh_.modeFor(static_cast<uint8_t>(state_)));
 }
@@ -81,6 +81,7 @@ void NearbyStatsSyncActivity::setState(const State state) {
 #include "MappedInputManager.h"
 #include "SdCardFontSystem.h"
 #include "activities/reader/GlobalReadingStats.h"
+#include "components/TouchActionButtons.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -102,6 +103,18 @@ constexpr uint32_t SYNC_TIMEOUT_MS = 12000;
 constexpr uint8_t BROADCAST_MAC[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
 NearbyStatsSyncActivity* activeActivity = nullptr;
+
+TouchActionButtons::Layout touchActionLayout(const GfxRenderer& renderer) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  constexpr uint8_t buttonCount = 2;
+  constexpr int totalHeight =
+      TouchActionButtons::kDefaultHeight * buttonCount + TouchActionButtons::kDefaultGap * (buttonCount - 1);
+  const Rect container{screen.x + metrics.contentSidePadding,
+                       screen.y + screen.height - metrics.verticalSpacing - totalHeight,
+                       std::max(1, screen.width - metrics.contentSidePadding * 2), totalHeight};
+  return TouchActionButtons::vertical(container, buttonCount);
+}
 
 std::string bytesToHex(const uint8_t* data, const size_t length) {
   static constexpr char hex[] = "0123456789abcdef";
@@ -238,8 +251,26 @@ void NearbyStatsSyncActivity::loop() {
     return;
   }
 
-  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm) &&
-      (state_ == State::READY || state_ == State::SYNCED || state_ == State::ERROR)) {
+  const bool canStartSync = state_ == State::READY || state_ == State::SYNCED || state_ == State::ERROR;
+  if (mappedInput.hasTouch() && canStartSync) {
+    const auto actions = touchActionLayout(renderer);
+    int touchedAction = -1;
+    const auto touch = mappedInput.rowTouch(touchedAction, actions.buttons[0].y,
+                                            TouchActionButtons::kDefaultHeight + TouchActionButtons::kDefaultGap,
+                                            actions.count, actions.buttons[0].x,
+                                            actions.buttons[0].x + actions.buttons[0].width, actions.buttons[0].height);
+    if (touch == MappedInputManager::RowTouch::Down) return;
+    if (touch == MappedInputManager::RowTouch::Tap) {
+      if (touchedAction == 0) {
+        startSync();
+      } else if (touchedAction == 1) {
+        exitViaBack();
+      }
+      return;
+    }
+  }
+
+  if (mappedInput.wasPressed(MappedInputManager::Button::Confirm) && canStartSync) {
     startSync();
     return;
   }
@@ -249,9 +280,19 @@ void NearbyStatsSyncActivity::loop() {
 
 bool NearbyStatsSyncActivity::beginEspNow() {
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect(false);
+  // A saved station can begin reconnecting as soon as STA mode starts. ESP-IDF
+  // cannot change channels while it is associating, which is especially easy
+  // to hit on the X4 Pro's faster S3 radio.
+  if (!WiFi.disconnect(false, false, 1000)) {
+    LOG_DBG(LOG_TAG, "Disconnect before ESP-NOW setup timed out");
+  }
+  delay(100);
   WiFi.setSleep(false);
-  if (esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE) != ESP_OK) return false;
+  const esp_err_t channelResult = esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  if (channelResult != ESP_OK) {
+    LOG_ERR(LOG_TAG, "Could not select ESP-NOW channel: %d", static_cast<int>(channelResult));
+    return false;
+  }
   esp_wifi_set_ps(WIFI_PS_NONE);
 
   if (esp_now_init() != ESP_OK) return false;
@@ -353,6 +394,17 @@ void NearbyStatsSyncActivity::enqueueEspNowPacket(const uint8_t* sourceMac, cons
   }
 
   if (xSemaphoreTake(eventMutex_, 0) != pdTRUE) return;
+  for (uint8_t offset = 0; offset < eventCount_; ++offset) {
+    const uint8_t eventIndex = static_cast<uint8_t>((eventHead_ + offset) % MAX_SYNC_EVENTS);
+    SyncEvent& queuedEvent = events_[eventIndex];
+    if (queuedEvent.type == event.type && queuedEvent.sourceMac == event.sourceMac &&
+        queuedEvent.deviceMac == event.deviceMac) {
+      queuedEvent = event;
+      xSemaphoreGive(eventMutex_);
+      return;
+    }
+  }
+
   if (eventOverflow_ || eventCount_ >= MAX_SYNC_EVENTS) {
     eventOverflow_ = true;
     eventHead_ = 0;
@@ -398,6 +450,12 @@ void NearbyStatsSyncActivity::processEvents() {
 
 void NearbyStatsSyncActivity::handleEvent(const SyncEvent& event) {
   if (state_ == State::ERROR) return;
+
+  if (event.type == PacketType::ACK) {
+    if (state_ != State::SYNCING || !localStatsSent_ || event.deviceMac != peerDeviceMac_) return;
+    localStatsAcked_ = true;
+    return;
+  }
 
   if (event.type == PacketType::NAME) {
     if (event.deviceMac == peerDeviceMac_ || isZeroMac(peerDeviceMac_)) {
@@ -452,12 +510,8 @@ void NearbyStatsSyncActivity::handleEvent(const SyncEvent& event) {
     }
     peerStatsSaved_ = true;
     sendAck(peerSourceMac_.data());
-    if (!localStatsSent_ || !localStatsAcked_) sendLocalStats();
+    if (!localStatsSent_) sendLocalStats();
     return;
-  }
-
-  if (event.type == PacketType::ACK) {
-    localStatsAcked_ = true;
   }
 }
 
@@ -624,8 +678,15 @@ void NearbyStatsSyncActivity::render(RenderLock&&) {
 
   if (state_ == State::READY || state_ == State::SYNCED || state_ == State::ERROR) {
     renderReady(primary, detailPrimary, detailSecondary);
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_NEARBY_STATS_SYNC_BUTTON), "", "");
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    if (mappedInput.hasTouch()) {
+      const auto actions = touchActionLayout(renderer);
+      const char* actionLabels[] = {tr(STR_NEARBY_STATS_SYNC_BUTTON), tr(STR_CANCEL)};
+      TouchActionButtons::draw(renderer, actions, actionLabels, 0, -1, UI_10_FONT_ID);
+    } else {
+      const auto labels =
+          mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_NEARBY_STATS_SYNC_BUTTON), "", "");
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    }
     renderer.displayBuffer(screenTransitionRefresh_.modeFor(static_cast<uint8_t>(state_)));
     return;
   }
@@ -640,7 +701,7 @@ void NearbyStatsSyncActivity::render(RenderLock&&) {
         SMALL_FONT_ID, centerY + renderer.getLineHeight(UI_10_FONT_ID) + renderer.getLineHeight(SMALL_FONT_ID) + 14,
         detailSecondary.c_str());
   }
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer(screenTransitionRefresh_.modeFor(static_cast<uint8_t>(state_)));
 }
@@ -650,26 +711,23 @@ void NearbyStatsSyncActivity::renderReady(const std::string& primary, const std:
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int contentTop =
       metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing;
-  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const Rect textArea{metrics.contentSidePadding, 0, renderer.getScreenWidth() - metrics.contentSidePadding * 2,
+                      renderer.getScreenHeight()};
   int y = contentTop + 70;
 
-  renderer.drawCenteredText(UI_10_FONT_ID, y, primary.c_str(), true, EpdFontFamily::BOLD);
-  y += lineHeight + metrics.verticalSpacing;
+  y += UITheme::drawCenteredWrappedText(renderer, textArea, UI_10_FONT_ID, y, primary.c_str(), 2, true,
+                                        EpdFontFamily::BOLD) +
+       metrics.verticalSpacing;
   if (!detailPrimary.empty()) {
-    const auto detailLines = renderer.wrappedText(SMALL_FONT_ID, detailPrimary.c_str(),
-                                                  renderer.getScreenWidth() - metrics.contentSidePadding * 2, 3);
-    for (const auto& line : detailLines) {
-      renderer.drawCenteredText(SMALL_FONT_ID, y, line.c_str(), true);
-      y += renderer.getLineHeight(SMALL_FONT_ID);
-    }
-    y += metrics.verticalSpacing;
+    y += UITheme::drawCenteredWrappedText(renderer, textArea, SMALL_FONT_ID, y, detailPrimary.c_str(), 3) +
+         metrics.verticalSpacing;
   }
   if (!detailSecondary.empty()) {
-    renderer.drawCenteredText(SMALL_FONT_ID, y, detailSecondary.c_str(), true);
-    y += renderer.getLineHeight(SMALL_FONT_ID) + metrics.verticalSpacing;
+    y += UITheme::drawCenteredWrappedText(renderer, textArea, SMALL_FONT_ID, y, detailSecondary.c_str(), 2) +
+         metrics.verticalSpacing;
   }
   if (state_ == State::READY) {
-    renderer.drawCenteredText(SMALL_FONT_ID, y, tr(STR_NEARBY_STATS_READY_HINT), true);
+    UITheme::drawCenteredWrappedText(renderer, textArea, SMALL_FONT_ID, y, tr(STR_NEARBY_STATS_READY_HINT), 2);
   }
 }
 

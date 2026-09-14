@@ -114,13 +114,17 @@ def parse_yaml_file(filepath: str) -> Dict[str, str]:
 def load_translations(
     translations_dir: str,
     verbose: bool = False,
-) -> Tuple[List[str], List[str], List[str], Dict[str, List[str]], List[Set[str]]]:
+) -> Tuple[
+    List[str], List[str], List[str], Dict[str, List[str]], List[Set[str]], List[int]
+]:
     """
     Read every YAML file in *translations_dir* and return:
         language_codes   e.g. ["EN", "ES", ...]
         language_names   e.g. ["English", "Español", ...]
         string_keys      ordered list of STR_* keys (from English)
         translations     {key: [translation_per_language]}
+        base_indices     per language, the index of the language it borrows
+                         identical strings from (0 = English)
 
     English is always first;
     """
@@ -198,6 +202,35 @@ def load_translations(
         language_codes.append(code)
         language_names.append(name)
 
+    # Optional _base_language: the language a file borrows its identical strings
+    # from, instead of English. Close variants (Valencian/Catalan,
+    # pt-PT/pt-BR) share thousands of bytes that English dedup cannot reach.
+    # Every chain must end at English, whose own base is itself.
+    base_indices: List[int] = [0] * len(ordered_files)
+    code_to_index = {code.upper(): i for i, code in enumerate(language_codes)}
+    for lang_idx, fname in enumerate(ordered_files):
+        base_code = parsed[fname].get("_base_language")
+        if not base_code:
+            continue
+        base_idx = code_to_index.get(base_code.upper())
+        if base_idx is None:
+            raise ValueError(f"{fname}: _base_language '{base_code}' is not a known language code")
+        if base_idx == lang_idx:
+            raise ValueError(f"{fname}: _base_language points at itself")
+        base_indices[lang_idx] = base_idx
+
+    for lang_idx in range(len(ordered_files)):
+        seen = {lang_idx}
+        cursor = base_indices[lang_idx]
+        while cursor != 0:
+            if cursor in seen:
+                raise ValueError(
+                    f"_base_language cycle involving {language_codes[lang_idx]}: "
+                    "every chain must end at English"
+                )
+            seen.add(cursor)
+            cursor = base_indices[cursor]
+
     # String keys come from English (order matters)
     english_data = parsed[english_file]
     string_keys = [k for k in english_data if not k.startswith("_")]
@@ -207,23 +240,37 @@ def load_translations(
         if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", key):
             raise ValueError(f"Invalid C++ identifier in English file: '{key}'")
 
-    # Build translations dict, filling missing keys from English
+    # Build translations dict, filling missing keys from the base language --
+    # English unless the file names another. A variant then reads its parent
+    # language where it has no wording of its own, instead of dropping to
+    # English. Languages are filled shallowest chain first, so a base is always
+    # fully resolved before anything that borrows from it.
+    def chain_depth(lang_idx: int) -> int:
+        depth = 0
+        cursor = lang_idx
+        while cursor != 0:
+            cursor = base_indices[cursor]
+            depth += 1
+        return depth
+
     inherited_sets: List[Set[str]] = [set() for _ in ordered_files]
-    translations: Dict[str, List[str]] = {}
-    for key in string_keys:
-        row: List[str] = []
-        for lang_idx, fname in enumerate(ordered_files):
-            data = parsed[fname]
+    translations: Dict[str, List[str]] = {
+        key: [""] * len(ordered_files) for key in string_keys
+    }
+    for lang_idx in sorted(range(len(ordered_files)), key=chain_depth):
+        data = parsed[ordered_files[lang_idx]]
+        base_idx = base_indices[lang_idx]
+        for key in string_keys:
             value = data.get(key, "")
-            if not value.strip() and fname != english_file:
-                value = english_data[key]
+            if not value.strip() and lang_idx != 0:
+                value = translations[key][base_idx]
                 inherited_sets[lang_idx].add(key)
                 if verbose:
                     print(
-                        f"  INFO: '{key}' missing in {language_codes[lang_idx]}, using English fallback"
+                        f"  INFO: '{key}' missing in {language_codes[lang_idx]}, "
+                        f"using {language_codes[base_idx]} fallback"
                     )
-            row.append(value)
-        translations[key] = row
+            translations[key][lang_idx] = value
 
     # Warn about extra keys in non-English files
     for fname in ordered_files:
@@ -240,7 +287,14 @@ def load_translations(
 
     if verbose:
         print(f"Loaded {len(language_codes)} languages, {len(string_keys)} string keys")
-    return language_codes, language_names, string_keys, translations, inherited_sets
+    return (
+        language_codes,
+        language_names,
+        string_keys,
+        translations,
+        inherited_sets,
+        base_indices,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +494,7 @@ def generate_keys_header(
     languages: List[str],
     language_names: List[str],
     string_keys: List[str],
+    base_indices: List[int],
     output_path: str,
     verbose: bool = False,
 ) -> None:
@@ -494,10 +549,13 @@ def generate_keys_header(
     lines.append("")
 
     # LangStrings struct
-    lines.append("// Holds a flat string blob and its offset table for one language")
+    lines.append("// Holds a flat string blob and its offset table for one language.")
+    lines.append("// 'base' is the language an offset with bit 15 set defers to;")
+    lines.append("// English is its own base, and its offsets never set that bit.")
     lines.append("struct LangStrings {")
     lines.append("  const char* data;")
     lines.append("  const uint16_t* offsets;")
+    lines.append("  Language base;")
     lines.append("};")
     lines.append("")
 
@@ -505,15 +563,18 @@ def generate_keys_header(
     lines.append("// Helper function to get string data for a language")
     lines.append("inline LangStrings getLanguageStrings(Language lang) {")
     lines.append("  switch (lang) {")
-    for code in languages:
+    for lang_idx, code in enumerate(languages):
+        base_code = languages[base_indices[lang_idx]]
         lines.append(f"    case Language::{code}:")
         lines.append(
-            f"      return {{i18n_strings::STRINGS_{code}_DATA, i18n_strings::OFFSETS_{code}}};"
+            f"      return {{i18n_strings::STRINGS_{code}_DATA, i18n_strings::OFFSETS_{code}, "
+            f"Language::{base_code}}};"
         )
     first_code = languages[0]
     lines.append("    default:")
     lines.append(
-        f"      return {{i18n_strings::STRINGS_{first_code}_DATA, i18n_strings::OFFSETS_{first_code}}};"
+        f"      return {{i18n_strings::STRINGS_{first_code}_DATA, i18n_strings::OFFSETS_{first_code}, "
+        f"Language::{first_code}}};"
     )
     lines.append("  }")
     lines.append("}")
@@ -601,6 +662,7 @@ def generate_strings_cpp(
     language_names: List[str],
     string_keys: List[str],
     translations: Dict[str, List[str]],
+    base_indices: List[int],
     output_path: str,
     verbose: bool = False,
 ) -> None:
@@ -640,13 +702,12 @@ def generate_strings_cpp(
     lines.append("")
 
     # Per-language flat string blobs and offset tables.
-    # Non-English languages skip strings identical to English; their offset
-    # tables use bit 15 (0x8000) to flag "use English blob at offset & 0x7FFF".
+    # A language stores nothing for a string its base language already spells
+    # the same way; the offset is then bit 15 (0x8000) alone, and the reader
+    # follows the base chain until it reaches a language that holds the bytes.
+    # Chains end at English, so the resolved text is the same either way.
     lines.append("namespace i18n_strings {")
     lines.append("")
-
-    en_strings = [translations[key][0] for key in string_keys]
-    en_offsets: List[int] = []
 
     for lang_idx, code in enumerate(languages):
         lang_strings = [translations[key][lang_idx] for key in string_keys]
@@ -664,15 +725,17 @@ def generate_strings_cpp(
                     f"Language {code}: blob size ({current_offset} bytes) exceeds "
                     "15-bit offset limit (32767)"
                 )
-            en_offsets = list(offsets)
             blob_strings = lang_strings
         else:
+            base_strings = [
+                translations[key][base_indices[lang_idx]] for key in string_keys
+            ]
             offsets = []
             current_offset = 0
             blob_strings = []
-            for i, (s, en_s) in enumerate(zip(lang_strings, en_strings)):
-                if s == en_s:
-                    offsets.append(en_offsets[i] | 0x8000)
+            for s, base_s in zip(lang_strings, base_strings):
+                if s == base_s:
+                    offsets.append(0x8000)
                 else:
                     offsets.append(current_offset)
                     current_offset += len(s.encode("utf-8")) + 1
@@ -857,9 +920,14 @@ def main(
         print()
 
     try:
-        languages, language_names, string_keys, translations, inherited_sets = (
-            load_translations(translations_dir, verbose)
-        )
+        (
+            languages,
+            language_names,
+            string_keys,
+            translations,
+            inherited_sets,
+            base_indices,
+        ) = load_translations(translations_dir, verbose)
 
         # --- Unused-string detection ---
         scan_dirs = [d for d in src_dirs if os.path.isdir(d)]
@@ -882,7 +950,7 @@ def main(
             sys.exit(1)
 
         # Compute per-language data blob sizes (after dedup).
-        # Non-English languages omit strings identical to English.
+        # A language omits every string its base language already spells the same.
         data_sizes = []
         for i in range(len(languages)):
             if i == 0:
@@ -890,11 +958,12 @@ def main(
                     sum(len(translations[k][0].encode("utf-8")) + 1 for k in string_keys)
                 )
             else:
+                base = base_indices[i]
                 data_sizes.append(
                     sum(
                         len(translations[k][i].encode("utf-8")) + 1
                         for k in string_keys
-                        if translations[k][i] != translations[k][0]
+                        if translations[k][i] != translations[k][base]
                     )
                 )
 
@@ -924,7 +993,12 @@ def main(
 
         out = Path(output_dir)
         generate_keys_header(
-            languages, language_names, string_keys, str(out / "I18nKeys.h"), verbose
+            languages,
+            language_names,
+            string_keys,
+            base_indices,
+            str(out / "I18nKeys.h"),
+            verbose,
         )
         generate_strings_header(
             languages, language_names, str(out / "I18nStrings.h"), verbose
@@ -934,6 +1008,7 @@ def main(
             language_names,
             string_keys,
             translations,
+            base_indices,
             str(out / "I18nStrings.cpp"),
             verbose,
         )

@@ -40,6 +40,9 @@ class BookOrbitBookmarkStore {
   // and spine, so re-stamping does not accumulate duplicates.
   static bool put(const std::string& bookCachePath, const BookOrbitBookmarkRecord& record);
 
+  // Returns false on a missing or unreadable file, leaving out empty. As with
+  // BookOrbitAnnotationStore::readAll(), that false return means this book has no bookmark
+  // sync history, and a sync must not report an empty-complete key set from it.
   static bool readAll(const std::string& bookCachePath, std::vector<BookOrbitBookmarkRecord>& out);
 
   static uint32_t readWatermark(const std::string& bookCachePath);

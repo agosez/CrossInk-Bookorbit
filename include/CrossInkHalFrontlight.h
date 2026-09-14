@@ -19,14 +19,14 @@ class HalFrontlight {
     lit = on;
   }
   constexpr bool present() const {
-#ifdef SIMULATOR_DEVICE_X4PRO
+#ifdef SIMULATOR_DEVICE_X4_PRO
     return true;
 #else
     return false;
 #endif
   }
   constexpr bool hasColorTemperature() const {
-#ifdef SIMULATOR_DEVICE_X4PRO
+#ifdef SIMULATOR_DEVICE_X4_PRO
     return true;
 #else
     return false;

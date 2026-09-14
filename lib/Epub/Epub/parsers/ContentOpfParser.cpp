@@ -6,6 +6,7 @@
 #include <XmlParserUtils.h>
 
 #include <cctype>
+#include <cstring>
 
 #include "Epub/BookMetadataCache.h"
 
@@ -31,7 +32,110 @@ bool startsWithImageMediaType(const std::string& mediaType) {
 
   return true;
 }
+
+bool readItemIdMatches(HalFile& file, const std::string& targetId, bool& matches) {
+  uint32_t storedLength = 0;
+  if (!serialization::tryReadPod(file, storedLength)) {
+    return false;
+  }
+
+  const uint64_t idEnd = static_cast<uint64_t>(file.position()) + storedLength;
+  if (idEnd > file.size()) {
+    return false;
+  }
+
+  matches = storedLength == targetId.size();
+  if (!matches) {
+    return file.seekCur(static_cast<int64_t>(storedLength));
+  }
+
+  constexpr size_t COMPARE_BUFFER_SIZE = 64;
+  uint8_t compareBuffer[COMPARE_BUFFER_SIZE];
+  size_t compared = 0;
+  while (compared < storedLength) {
+    const size_t chunkSize = std::min(COMPARE_BUFFER_SIZE, static_cast<size_t>(storedLength) - compared);
+    if (file.read(compareBuffer, chunkSize) != chunkSize) {
+      return false;
+    }
+    if (std::memcmp(compareBuffer, targetId.data() + compared, chunkSize) != 0) {
+      matches = false;
+    }
+    compared += chunkSize;
+  }
+  return true;
+}
 }  // namespace
+
+bool ContentOpfParser::appendItemIndexEntry(const ItemIndexEntry& entry) {
+  if (!itemIndexTail || itemIndexTail->count == ITEM_INDEX_CHUNK_CAPACITY) {
+    auto* const chunk = arenaNew<ItemIndexChunk>(itemIndexArena);
+    if (!chunk) {
+      return false;
+    }
+    if (itemIndexTail) {
+      itemIndexTail->next = chunk;
+    } else {
+      itemIndexHead = chunk;
+    }
+    itemIndexTail = chunk;
+    ++itemIndexChunkCount;
+  }
+
+  itemIndexTail->entries[itemIndexTail->count++] = entry;
+  ++itemIndexCount;
+  return true;
+}
+
+void ContentOpfParser::sortItemIndexChunks() {
+  for (auto* chunk = itemIndexHead; chunk; chunk = chunk->next) {
+    std::sort(chunk->entries, chunk->entries + chunk->count, itemIndexEntryLess);
+  }
+}
+
+bool ContentOpfParser::findItemHref(const std::string& idref, std::string& href) {
+  if (!tempItemStore) {
+    return false;
+  }
+
+  const uint64_t targetHash = fnvHash(idref);
+  const uint16_t targetLen = static_cast<uint16_t>(idref.size());
+  const ItemIndexEntry target{targetHash, targetLen, 0};
+  for (auto* chunk = itemIndexHead; chunk; chunk = chunk->next) {
+    auto* const begin = chunk->entries;
+    auto* const end = begin + chunk->count;
+    auto* it = std::lower_bound(begin, end, target, itemIndexEntryLess);
+    while (it != end && it->idHash == targetHash && it->idLen == targetLen) {
+      if (!tempItemStore.seek(it->fileOffset)) {
+        LOG_ERR("COF", "Failed seeking manifest index row at %u", static_cast<unsigned>(it->fileOffset));
+        return false;
+      }
+
+      uint64_t rowHash = 0;
+      uint16_t rowLen = 0;
+      if (!serialization::tryReadPod(tempItemStore, rowHash) || !serialization::tryReadPod(tempItemStore, rowLen)) {
+        LOG_ERR("COF", "Failed reading manifest index row at %u", static_cast<unsigned>(it->fileOffset));
+        return false;
+      }
+
+      if (rowHash == targetHash && rowLen == targetLen) {
+        bool idMatches = false;
+        if (!readItemIdMatches(tempItemStore, idref, idMatches)) {
+          LOG_ERR("COF", "Failed reading manifest item ID at %u", static_cast<unsigned>(it->fileOffset));
+          return false;
+        }
+        if (idMatches && !serialization::tryReadString(tempItemStore, href)) {
+          LOG_ERR("COF", "Failed reading manifest item href at %u", static_cast<unsigned>(it->fileOffset));
+          return false;
+        }
+        if (idMatches) {
+          return true;
+        }
+      }
+      ++it;
+    }
+  }
+  return false;
+}
 
 bool ContentOpfParser::setup() {
   if (!itemIndexArena.init(ITEM_INDEX_ARENA_SLAB_BYTES)) {
@@ -150,14 +254,10 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
       LOG_ERR("COF", "Couldn't open temp items file for reading. This is probably going to be a fatal error.");
     }
 
-    // Sort the compact item index so every idref lookup uses binary search.
-    // The temp file stores hash/length plus href, avoiding a second full copy
-    // of every manifest ID.
-    std::sort(self->itemIndex.begin(), self->itemIndex.end(), [](const ItemIndexEntry& a, const ItemIndexEntry& b) {
-      return a.idHash < b.idHash || (a.idHash == b.idHash && a.idLen < b.idLen);
-    });
-    LOG_DBG("COF", "Using compact manifest index for %zu items (arena=%u bytes)", self->itemIndex.size(),
-            static_cast<unsigned>(self->itemIndexArena.used()));
+    // Sort each fixed-capacity chunk so every idref lookup can use binary search.
+    self->sortItemIndexChunks();
+    LOG_DBG("COF", "Using chunked manifest index for %zu items in %zu chunks (arena high-water=%u bytes)",
+            self->itemIndexCount, self->itemIndexChunkCount, static_cast<unsigned>(self->itemIndexArena.used()));
     return;
   }
 
@@ -212,8 +312,8 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
       entry.idHash = fnvHash(itemId);
       entry.idLen = static_cast<uint16_t>(itemId.size());
       entry.fileOffset = static_cast<uint32_t>(self->tempItemStore.position());
-      if (!self->itemIndex.push_back(entry)) {
-        LOG_ERR("COF", "Manifest index arena OOM at %zu items", self->itemIndex.size());
+      if (!self->appendItemIndexEntry(entry)) {
+        LOG_ERR("COF", "Manifest index arena OOM at %zu items", self->itemIndexCount);
         self->parseFailed = true;
         self->lowMemoryFailure = true;
         if (self->parser) {
@@ -223,10 +323,11 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
       }
     }
 
-    // Write compact manifest rows down to SD card. idref matching uses the
-    // in-memory hash/length index, so the temp file only needs to keep hrefs.
+    // Write manifest rows down to SD card. The full ID makes hash collisions
+    // safe while the in-memory index keeps idref lookup fast.
     serialization::writePod(self->tempItemStore, fnvHash(itemId));
     serialization::writePod(self->tempItemStore, static_cast<uint16_t>(itemId.size()));
+    serialization::writeString(self->tempItemStore, itemId);
     serialization::writeString(self->tempItemStore, href);
 
     if (itemId == self->coverItemId) {
@@ -279,32 +380,7 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
         if (strcmp(atts[i], "idref") == 0) {
           const std::string idref = atts[i + 1];
           std::string href;
-          bool found = false;
-
-          const uint64_t targetHash = fnvHash(idref);
-          const uint16_t targetLen = static_cast<uint16_t>(idref.size());
-
-          auto it =
-              std::lower_bound(self->itemIndex.begin(), self->itemIndex.end(), ItemIndexEntry{targetHash, targetLen, 0},
-                               [](const ItemIndexEntry& a, const ItemIndexEntry& b) {
-                                 return a.idHash < b.idHash || (a.idHash == b.idHash && a.idLen < b.idLen);
-                               });
-
-          while (it != self->itemIndex.end() && it->idHash == targetHash && it->idLen == targetLen) {
-            self->tempItemStore.seek(it->fileOffset);
-            uint64_t rowHash = 0;
-            uint16_t rowLen = 0;
-            serialization::readPod(self->tempItemStore, rowHash);
-            serialization::readPod(self->tempItemStore, rowLen);
-            if (rowHash == targetHash && rowLen == targetLen) {
-              serialization::readString(self->tempItemStore, href);
-              found = true;
-              break;
-            }
-            ++it;
-          }
-
-          if (found && self->cache) {
+          if (self->findItemHref(idref, href)) {
             self->cache->createSpineEntry(href);
           }
         }
@@ -331,6 +407,9 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
         LOG_DBG("COF", "Found %s reference in guide: %s", type.c_str(), guideHref.c_str());
         self->textReferenceHref = guideHref;
         self->hasExplicitStartReference = true;
+      } else if (type == "toc" && self->guideTocPageHref.empty()) {
+        const auto fragmentPos = guideHref.find('#');
+        self->guideTocPageHref = guideHref.substr(0, fragmentPos);
       } else if ((type == "cover" || type == "cover-page") && self->guideCoverPageHref.empty()) {
         self->guideCoverPageHref = guideHref;
       }

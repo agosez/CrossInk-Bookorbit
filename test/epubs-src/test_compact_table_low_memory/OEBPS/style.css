@@ -1,0 +1,3 @@
+table.compact-grid { width: 100%; border-collapse: collapse; }
+th.center { text-align: center; }
+td.rtl { direction: rtl; text-align: right; }

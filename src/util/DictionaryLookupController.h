@@ -30,6 +30,7 @@ class DictionaryLookupController {
   enum class LookupEvent {
     None,
     FoundDefinition,
+    CreateClipping,
     NotFoundDismissedBack,
     NotFoundDismissedDone,
     SwitchDictionary,
@@ -59,7 +60,7 @@ class DictionaryLookupController {
   // Borrow it here so constructing a low-memory dictionary activity does not
   // duplicate the path through a throwing std::string allocation.
   DictionaryLookupController(GfxRenderer& renderer, MappedInputManager& mappedInput, Activity& owner,
-                             const std::string& cachePath);
+                             const std::string& cachePath, bool allowCreateClipping = false);
   ~DictionaryLookupController();
 
   // Start a lookup. Transitions Idle → LookingUp and notifies the shared
@@ -112,7 +113,7 @@ class DictionaryLookupController {
   void showNoWordPopup();
 
   // Clean the word and start lookup; shows no-word popup if cleaning yields empty.
-  void lookupOrPopup(const std::string& rawWord);
+  void lookupOrPopup(const std::string& rawWord, size_t highlightedWordCount = 1);
 
   // Handle multi-select input from the navigator. Returns true if input was consumed
   // (caller should return from loop). Cleans the phrase and starts lookup or shows popup.
@@ -127,12 +128,15 @@ class DictionaryLookupController {
   const DictLocation& getFoundLocation() const { return foundLocation; }
   FoundStatus getFoundStatus() const { return foundStatus; }
   bool getRecordHistory() const { return recordHistory_; }
+  bool canCreateClipping() const { return allowCreateClipping_; }
 
  private:
 #if CROSSINK_APP_CAP_TOUCH
-  using AltFormUiApp = freeink::ui::FreeInkApp<2, 1>;
+  using AltFormUiApp = freeink::ui::FreeInkApp<3, 1>;
   static constexpr freeink::ui::ActionId ACTION_ALT_FORM_NO = 1;
   static constexpr freeink::ui::ActionId ACTION_ALT_FORM_YES = 2;
+  static constexpr freeink::ui::ActionId ACTION_CREATE_CLIPPING = 3;
+  static constexpr freeink::ui::ActionId ACTION_SWITCH_DICTIONARY = 4;
 
   static void altFormPromptScreen(AltFormUiApp::ScreenType& screen, void* user);
   void buildAltFormPromptScreen(AltFormUiApp::ScreenType& screen);
@@ -156,6 +160,8 @@ class DictionaryLookupController {
   bool recordHistory_ = true;
   bool lookupToastEnabled_ = true;
   bool fullScreenChildWasShown_ = false;
+  bool allowCreateClipping_ = false;
+  bool shouldOfferAltForms_ = true;
   std::string preparedQuickIndexPath;
 
   std::string lookupWord;

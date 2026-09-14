@@ -34,7 +34,7 @@ class DictionaryDefinitionActivity final : public Activity {
       std::string historyWord = "", LookupHistory::Status historyStatus = LookupHistory::Status::NotFound,
       void* backgroundContext = nullptr, BackgroundRenderFn backgroundRender = nullptr,
       const char* dictionaryFontFamilyName = nullptr, uint8_t dictionaryFontPointSize = 0,
-      bool modalBackgroundAlreadyPrepared = false,
+      bool modalBackgroundAlreadyPrepared = false, const DictionaryClippingRequest* clippingRequest = nullptr,
       WordSelectNavigator::HighlightSnapshotStorage* sharedHighlightSnapshotStorage = nullptr)
       : Activity("DictionaryDefinition", renderer, mappedInput),
         headword(headword),
@@ -49,6 +49,8 @@ class DictionaryDefinitionActivity final : public Activity {
         dictionaryFontFamilyName_(dictionaryFontFamilyName),
         dictionaryFontPointSize_(dictionaryFontPointSize),
         skipInitialModalBackgroundRedraw_(modalBackgroundAlreadyPrepared),
+        hasClippingRequest_(clippingRequest != nullptr),
+        clippingRequest_(clippingRequest ? *clippingRequest : DictionaryClippingRequest{}),
         hasSharedHighlightSnapshotStorage_(sharedHighlightSnapshotStorage != nullptr),
         controller(renderer, mappedInput, *this, cachePath) {
     navigator.setHighlightSnapshotStorage(sharedHighlightSnapshotStorage);
@@ -86,6 +88,8 @@ class DictionaryDefinitionActivity final : public Activity {
   // Zero keeps the dictionary at the reader's active physical point size.
   uint8_t dictionaryFontPointSize_ = 0;
   bool skipInitialModalBackgroundRedraw_ = false;
+  bool hasClippingRequest_ = false;
+  DictionaryClippingRequest clippingRequest_{};
   bool hasSharedHighlightSnapshotStorage_ = false;
   // The framebuffer retains the book pixels outside the opaque modal. Normal
   // page turns keep this false and redraw only the modal; screens and overlays
@@ -175,6 +179,7 @@ class DictionaryDefinitionActivity final : public Activity {
 
   // Word-select mode (activated by pressing Look Up Word in view mode)
   bool isWordSelectMode = false;
+  bool wordSelectHintsVisible_ = false;
   WordSelectNavigator navigator;
   // History-launched definitions have no parent snapshot to borrow. Allocate
   // the same bounded storage only if the user enters definition word-select.
@@ -182,6 +187,7 @@ class DictionaryDefinitionActivity final : public Activity {
   DictionaryLookupController controller;
 #if CROSSINK_APP_CAP_TOUCH
   bool touchDragLookup_ = false;
+  bool touchDictionaryLookupHandled_ = false;
 #endif
 
   // Differential repaint state for in-definition word-select mode. Only consulted
@@ -192,6 +198,7 @@ class DictionaryDefinitionActivity final : public Activity {
 
   bool skipLoopDelay() override { return controller.skipLoopDelay(); }
 
+  bool enterWordSelectMode();
   void wrapText();
   // Re-parse the definition and lay out ONLY page `page` into layoutLines,
   // discarding other pages as they are produced; also recomputes totalPages.
@@ -206,6 +213,8 @@ class DictionaryDefinitionActivity final : public Activity {
 #if CROSSINK_APP_CAP_TOUCH
   bool showTouchDictionarySwitch() const;
   bool dictionarySwitchButtonContains(int x, int y) const;
+  bool dictionaryCreateClippingButtonContains(int x, int y) const;
+  bool modalContains(int x, int y) const;
 #endif
   int dictionaryFooterHeight() const;
   bool hasModalBackground() const { return backgroundContext_ && backgroundRender_; }
@@ -223,6 +232,9 @@ class DictionaryDefinitionActivity final : public Activity {
   // Span sink bridge: sanitizes and forwards each streamed span into the DictLayout::Wrapper.
   static void feedSpanToWrapper(void* ctx, const StyledSpan& span);
   bool handleLongPressExitAll(bool enabled);
+#if CROSSINK_APP_CAP_TOUCH
+  bool handleTouchDictionaryLookup();
+#endif
   int getDefinitionFontId(bool isIpa = false) const;
   void useBuiltInDefinitionFontFallback();
   void reflowForDefinitionFontChange();

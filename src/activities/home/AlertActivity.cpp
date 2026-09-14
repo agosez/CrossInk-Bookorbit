@@ -47,7 +47,8 @@ void AlertActivity::render(RenderLock&&) {
     y += lineHeight;
   }
 
-  const auto labels = mappedInput.mapLabels(goHomeOnBack ? tr(STR_HOME) : tr(STR_BACK), "", "", "");
+  const auto labels = mappedInput.mapLabels(
+      goHomeOnBack ? mappedInput.withBackArrow(tr(STR_HOME)) : mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer();

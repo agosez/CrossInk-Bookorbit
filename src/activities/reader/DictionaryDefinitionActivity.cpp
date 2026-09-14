@@ -33,6 +33,9 @@
 static constexpr char kBullet[] = "- ";
 static constexpr const char kEtymologyTreeMarker[] = "Etymology tree";
 static constexpr int kDictionarySwitchTouchHeight = 56;
+#if CROSSINK_APP_CAP_TOUCH
+static constexpr unsigned long kTouchDefinitionLookupHoldMs = 1000;
+#endif
 
 class DictionaryDefinitionActivity;
 
@@ -355,6 +358,12 @@ void DictionaryDefinitionActivity::onEnter() {
 void DictionaryDefinitionActivity::onExit() {
   controller.onExit();
   Dictionary::clearLookupDictPathOverride();
+  if (renderer.isSdCardFont(definitionFontId_)) {
+    // The dictionary can reuse the reader's family and size, in which case
+    // restoreReaderFont() does not switch IDs. Release the definition caches
+    // explicitly so that path does not retain dictionary-only glyph data.
+    renderer.releaseSdCardFontForLowMemory(definitionFontId_);
+  }
   sdFontSystem.restoreReaderFont(renderer);
   Activity::onExit();
 }
@@ -485,7 +494,8 @@ int DictionaryDefinitionActivity::dictionaryFooterHeight() const {
   const auto metrics = UITheme::getInstance().getMetrics();
   const int dictionaryNameHeight = renderer.getLineHeight(UI_10_FONT_ID) + metrics.optionPopupTitleGap;
 #if CROSSINK_APP_CAP_TOUCH
-  return dictionaryNameHeight + (showTouchDictionarySwitch() ? kDictionarySwitchTouchHeight : 0);
+  return dictionaryNameHeight +
+         (showTouchDictionarySwitch() ? kDictionarySwitchTouchHeight * (hasClippingRequest_ ? 2 : 1) : 0);
 #else
   return dictionaryNameHeight;
 #endif
@@ -493,8 +503,20 @@ int DictionaryDefinitionActivity::dictionaryFooterHeight() const {
 
 #if CROSSINK_APP_CAP_TOUCH
 bool DictionaryDefinitionActivity::dictionarySwitchButtonContains(const int x, const int y) const {
-  const int buttonY = modalY_ + modalHeight_ - kDictionarySwitchTouchHeight;
+  const int buttonY = modalY_ + modalHeight_ - kDictionarySwitchTouchHeight * (hasClippingRequest_ ? 2 : 1);
   return x >= modalX_ && x < modalX_ + modalWidth_ && y >= buttonY && y < buttonY + kDictionarySwitchTouchHeight;
+}
+
+bool DictionaryDefinitionActivity::dictionaryCreateClippingButtonContains(const int x, const int y) const {
+  const int buttonY = modalY_ + modalHeight_ - kDictionarySwitchTouchHeight;
+  return hasClippingRequest_ && x >= modalX_ && x < modalX_ + modalWidth_ && y >= buttonY &&
+         y < buttonY + kDictionarySwitchTouchHeight;
+}
+
+bool DictionaryDefinitionActivity::modalContains(const int x, const int y) const {
+  const int frameThickness = UITheme::getInstance().getMetrics().popupFrameThickness;
+  return x >= modalX_ - frameThickness && x < modalX_ + modalWidth_ + frameThickness && y >= modalY_ - frameThickness &&
+         y < modalY_ + modalHeight_ + frameThickness;
 }
 #endif
 
@@ -543,7 +565,7 @@ void DictionaryDefinitionActivity::wrapText() {
     rightPadding = renderer.getScreenWidth() - (modalX_ + modalWidth_ - innerPadding);
     bodyStartY = modalY_ + innerPadding + renderer.getLineHeight(getDefinitionFontId()) + metrics.optionPopupTitleGap;
   } else {
-    const int sidePadding = metrics.contentSidePadding + SETTINGS.screenMargin;
+    const int sidePadding = metrics.contentSidePadding + SETTINGS.screenMarginHorizontal;
     leftPadding = contentX + sidePadding;
     rightPadding = (isLandscapeCcw ? hintGutterWidth : 0) + sidePadding;
     bodyStartY = hintGutterHeight + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
@@ -1092,10 +1114,75 @@ bool DictionaryDefinitionActivity::handleLongPressExitAll(bool enabled) {
   return false;
 }
 
+bool DictionaryDefinitionActivity::enterWordSelectMode() {
+  if (!hasSharedHighlightSnapshotStorage_ && !ownedHighlightSnapshotStorage_) {
+    // Fixed 4 KB activity-lifetime buffer: too large for the task stack and
+    // only needed when history-launched definitions enter word selection.
+    ownedHighlightSnapshotStorage_ = makeUniqueNoThrow<WordSelectNavigator::HighlightSnapshotStorage>();
+    if (!ownedHighlightSnapshotStorage_) {
+      LOG_ERR("DICT", "OOM allocating definition highlight snapshot (%u bytes)",
+              static_cast<unsigned>(sizeof(WordSelectNavigator::HighlightSnapshotStorage)));
+    } else {
+      navigator.setHighlightSnapshotStorage(ownedHighlightSnapshotStorage_.get());
+    }
+  }
+  extractWordsFromLayout();
+  if (navigator.isEmpty()) return false;
+
+#if CROSSINK_APP_CAP_TOUCH
+  navigator.setTouchDragCursorVisible(mappedInput.hasTouch());
+#endif
+  isWordSelectMode = true;
+  return true;
+}
+
+#if CROSSINK_APP_CAP_TOUCH
+bool DictionaryDefinitionActivity::handleTouchDictionaryLookup() {
+  if (!showLookupButton || !mappedInput.hasTouch() || RenderLock::peek()) return false;
+
+  int touchX = 0;
+  int touchY = 0;
+  unsigned long heldMs = 0;
+  if (!mappedInput.isScreenTouchTapCandidate(touchX, touchY, heldMs)) {
+    touchDictionaryLookupHandled_ = false;
+    return false;
+  }
+  if (touchDictionaryLookupHandled_ || heldMs < kTouchDefinitionLookupHoldMs) {
+    return false;
+  }
+  touchDictionaryLookupHandled_ = true;
+
+  if (!enterWordSelectMode()) return false;
+
+  bool touchedWord = false;
+  navigator.selectWordAtPoint(touchX, touchY, getLineHeight(), &touchedWord);
+  if (!touchedWord || !navigator.beginTouchMultiSelect()) {
+    isWordSelectMode = false;
+    return false;
+  }
+
+  touchDragLookup_ = true;
+  // Keep the word visibly selected before a release starts the background
+  // lookup, matching the reader-page touch-and-hold flow.
+  requestUpdateAndWait();
+  return true;
+}
+#endif
+
 void DictionaryDefinitionActivity::loop() {
   // Own the complete long-press gesture. Returning to the reader while Back is
   // still held would let the reader fire its configured long-press shortcut.
   if (handleLongPressExitAll(showLookupButton)) return;
+
+#if CROSSINK_APP_CAP_TOUCH
+  int modalTouchX = 0;
+  int modalTouchY = 0;
+  if (hasModalBackground() && mappedInput.hasTouch() && !controller.requiresBackgroundRedrawAfterOverlay() &&
+      mappedInput.wasScreenTapped(modalTouchX, modalTouchY) && !modalContains(modalTouchX, modalTouchY)) {
+    DictUtils::cancelAndFinish(*this);
+    return;
+  }
+#endif
 
   // --- Controller active (LookingUp / AltFormPrompt / NotFound) ---
   if (controller.isActive()) {
@@ -1188,7 +1275,7 @@ void DictionaryDefinitionActivity::loop() {
       }
 
       touchDragLookup_ = false;
-      controller.lookupOrPopup(navigator.finishTouchMultiSelect());
+      controller.lookupOrPopup(navigator.finishTouchMultiSelect(), navigator.getLookupSelectionWordCount());
       return;
     }
 
@@ -1227,6 +1314,12 @@ void DictionaryDefinitionActivity::loop() {
 #if CROSSINK_APP_CAP_TOUCH
   int touchX = 0;
   int touchY = 0;
+  if (showTouchDictionarySwitch() && hasClippingRequest_ && mappedInput.wasScreenTapped(touchX, touchY) &&
+      dictionaryCreateClippingButtonContains(touchX, touchY)) {
+    setResult(ActivityResult{clippingRequest_});
+    finish();
+    return;
+  }
   if (showTouchDictionarySwitch() && mappedInput.wasScreenTapped(touchX, touchY) &&
       dictionarySwitchButtonContains(touchX, touchY)) {
     openDictionarySwitch();
@@ -1245,6 +1338,10 @@ void DictionaryDefinitionActivity::loop() {
     finish();
     return;
   }
+#endif
+
+#if CROSSINK_APP_CAP_TOUCH
+  if (handleTouchDictionaryLookup()) return;
 #endif
 
   const auto swipe = mappedInput.wasSwipe();
@@ -1267,22 +1364,7 @@ void DictionaryDefinitionActivity::loop() {
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (showLookupButton) {
-      if (!hasSharedHighlightSnapshotStorage_ && !ownedHighlightSnapshotStorage_) {
-        // Fixed 4 KB activity-lifetime buffer: too large for the task stack and
-        // only needed when history-launched definitions enter word selection.
-        ownedHighlightSnapshotStorage_ = makeUniqueNoThrow<WordSelectNavigator::HighlightSnapshotStorage>();
-        if (!ownedHighlightSnapshotStorage_) {
-          LOG_ERR("DICT", "OOM allocating definition highlight snapshot (%u bytes)",
-                  static_cast<unsigned>(sizeof(WordSelectNavigator::HighlightSnapshotStorage)));
-        } else {
-          navigator.setHighlightSnapshotStorage(ownedHighlightSnapshotStorage_.get());
-        }
-      }
-      extractWordsFromLayout();
-      if (!navigator.isEmpty()) {
-        isWordSelectMode = true;
-        requestUpdate();
-      }
+      if (enterWordSelectMode()) requestUpdate();
     } else {
       DictUtils::cancelAndFinish(*this);
     }
@@ -1329,7 +1411,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
         }
       }
       const int lineHeight = getLineHeight();
-      auto dirty = navigator.renderHighlightDifferential(renderer, lineHeight, prevHighlightIdx_, currIdx);
+      auto dirty = navigator.renderHighlightDifferential(renderer, lineHeight, prevHighlightIdx_, currIdx, true);
       if (dirty.has_value()) {
         // Full panel push — matches DictionaryWordSelectActivity. Windowed refresh is not
         // wired up because the SDK's experimental path produces alternating black→white
@@ -1357,6 +1439,9 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // Full repaint path. The framebuffer retains the book pixels outside the
   // opaque, stable modal, so ordinary definition page turns only repaint the
   // modal. Rebuild the book after another screen or overlay disturbed it.
+  if (hasModalBackground() && !isWordSelectMode && wordSelectHintsVisible_) {
+    modalBackgroundNeedsRedraw_ = true;
+  }
   if (hasModalBackground()) {
     redrawModalBackground();
   } else {
@@ -1531,7 +1616,8 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
     const int innerPadding = metrics.optionPopupInnerPadding;
     const int footerLineHeight = renderer.getLineHeight(UI_10_FONT_ID);
 #if CROSSINK_APP_CAP_TOUCH
-    const int switchButtonHeight = showTouchDictionarySwitch() ? kDictionarySwitchTouchHeight : 0;
+    const int switchButtonHeight =
+        showTouchDictionarySwitch() ? kDictionarySwitchTouchHeight * (hasClippingRequest_ ? 2 : 1) : 0;
 #else
     constexpr int switchButtonHeight = 0;
 #endif
@@ -1547,14 +1633,26 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
 
 #if CROSSINK_APP_CAP_TOUCH
   if (!isWordSelectMode && showTouchDictionarySwitch()) {
-    const Rect buttonRect{modalX_, modalY_ + modalHeight_ - kDictionarySwitchTouchHeight, modalWidth_,
-                          kDictionarySwitchTouchHeight};
+    const Rect buttonRect{modalX_,
+                          modalY_ + modalHeight_ - kDictionarySwitchTouchHeight * (hasClippingRequest_ ? 2 : 1),
+                          modalWidth_, kDictionarySwitchTouchHeight};
     renderer.drawLine(buttonRect.x, buttonRect.y, buttonRect.x + buttonRect.width, buttonRect.y, true);
     const char* label = tr(STR_SWITCH_DICTIONARY);
     const int labelX =
         buttonRect.x + (buttonRect.width - renderer.getTextWidth(UI_10_FONT_ID, label, EpdFontFamily::BOLD)) / 2;
     const int labelY = buttonRect.y + (buttonRect.height - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
     renderer.drawText(UI_10_FONT_ID, labelX, labelY, label, true, EpdFontFamily::BOLD);
+    if (hasClippingRequest_) {
+      const Rect clippingRect{modalX_, modalY_ + modalHeight_ - kDictionarySwitchTouchHeight, modalWidth_,
+                              kDictionarySwitchTouchHeight};
+      renderer.drawLine(clippingRect.x, clippingRect.y, clippingRect.x + clippingRect.width, clippingRect.y, true);
+      const char* clippingLabel = tr(STR_SAVE_CLIPPING);
+      const int clippingLabelX =
+          clippingRect.x +
+          (clippingRect.width - renderer.getTextWidth(UI_10_FONT_ID, clippingLabel, EpdFontFamily::BOLD)) / 2;
+      const int clippingLabelY = clippingRect.y + (clippingRect.height - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
+      renderer.drawText(UI_10_FONT_ID, clippingLabelX, clippingLabelY, clippingLabel, true, EpdFontFamily::BOLD);
+    }
   }
 #endif
 
@@ -1568,14 +1666,15 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
     const int currIdx = navigator.getCurrentFlatIndex();
     bool snapshotPrimed = false;
     if (currIdx >= 0) {
-      auto setup = navigator.renderHighlightDifferential(renderer, lineHeight, /*prevWordIdx=*/-1, currIdx);
+      auto setup = navigator.renderHighlightDifferential(renderer, lineHeight, /*prevWordIdx=*/-1, currIdx, true);
       snapshotPrimed = setup.has_value();
     }
     if (!snapshotPrimed) {
-      navigator.renderHighlight(renderer, lineHeight);
+      navigator.renderHighlight(renderer, lineHeight, true);
     }
 
     DictUtils::drawWordSelectButtonHints(renderer, mappedInput, navigator);
+    wordSelectHintsVisible_ = true;
     displayModalBuffer();
 
     prevHighlightIdx_ = currIdx;
@@ -1591,9 +1690,10 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   // Button hints
   const char* btn2 = inlineFailureFeedback ? tr(STR_DONE) : (showLookupButton ? tr(STR_LOOKUP_SHORT) : "");
   const char* btn3 = showLookupButton ? tr(STR_DICT_SWITCH) : "";
-  const char* btn4 = "";
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), btn2, btn3, btn4);
+  const char* btn4 = nullptr;
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), btn2, btn3, btn4);
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  wordSelectHintsVisible_ = false;
 
   if (hasModalBackground()) {
     displayModalBuffer();

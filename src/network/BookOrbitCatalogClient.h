@@ -7,9 +7,9 @@
 
 /**
  * A top-level BookOrbit catalog section (e.g. "Recently added", "Continue reading",
- * "All books"). Only the sections backed directly by a book listing are exposed here;
- * BookOrbit's library/collection/smart-scope/author/series browsing facets are not
- * supported, matching CrossInk's simple, single-level browse experience for OPDS.
+ * "All books", or the authors/series/collections/libraries drill-down facets).
+ * BookOrbit's smart-scope browsing facet is not supported, matching CrossInk's
+ * simple browse experience for OPDS.
  */
 struct BookOrbitCatalogSection {
   std::string id;
@@ -30,7 +30,7 @@ struct BookOrbitCatalogBook {
   std::string author;  // first author only, for compact list display
 };
 
-/** One entry in a drill-down facet listing (an author or a series). */
+/** One entry in a drill-down facet listing (an author, a series or a collection). */
 struct BookOrbitFacetEntry {
   std::string id;        // filter value for the books listing
   std::string title;     // display name
@@ -47,11 +47,13 @@ struct BookOrbitFacetPage {
 
 /** Filters for a book listing request; empty fields are omitted from the query. */
 struct BookOrbitBookQuery {
-  std::string sort;      // BookOrbit sort id (e.g. "recently_added", "title", "series")
-  std::string query;     // free-text search
-  std::string author;    // author filter (facet entry id)
-  std::string seriesId;  // numeric series filter (preferred when present)
-  std::string series;    // series-name filter (fallback when no seriesId)
+  std::string sort;          // BookOrbit sort id (e.g. "recently_added", "title", "series")
+  std::string query;         // free-text search
+  std::string author;        // author filter (facet entry id)
+  std::string seriesId;      // numeric series filter (preferred when present)
+  std::string series;        // series-name filter (fallback when no seriesId)
+  std::string collectionId;  // numeric collection filter (facet entry id)
+  std::string libraryId;     // numeric library filter; combinable with every field above
 };
 
 /** Full detail for a single BookOrbit book, including its downloadable files. */
@@ -71,6 +73,20 @@ struct BookOrbitBookPage {
 };
 
 /**
+ * Per-section entry counts for the catalog root, from the server's dashboard —
+ * the numbers BookOrbit's own KOReader plugin shows on its Browse tiles.
+ * -1 = unknown (older server without the dashboard, or field absent).
+ */
+struct BookOrbitCatalogCounts {
+  int totalBooks = -1;  // "All Books" and "Recently added" list every book
+  int inProgress = -1;
+  int libraries = -1;
+  int authors = -1;
+  int series = -1;
+  int collections = -1;
+};
+
+/**
  * HTTP client for BookOrbit's KOReader-authenticated JSON catalog endpoints
  * (browsing and downloading books). Uses the same x-auth-user/x-auth-key headers
  * as BookOrbitSyncClient; unlike the sync client, catalog requests go through
@@ -80,8 +96,9 @@ struct BookOrbitBookPage {
  * (src/) utility.
  *
  * Only a simplified subset of BookOrbit's catalog is supported: the direct book
- * listings (recently added, continue reading, all books, search) and downloading
- * an EPUB file from a book's detail. Library/collection/smart-scope/author/series
+ * listings (recently added, continue reading, all books, search), the
+ * authors/series/collections/libraries drill-down facets, the root's per-section
+ * counts, and downloading an EPUB file from a book's detail. Smart-scope
  * drill-down, covers, ratings and read-status editing are out of scope.
  */
 class BookOrbitCatalogClient {
@@ -96,6 +113,14 @@ class BookOrbitCatalogClient {
 
   /** Fetch the catalog root sections list. Returns false on any failure. */
   static bool fetchRootSections(std::vector<BookOrbitCatalogSection>& outSections);
+
+  /**
+   * Fetch the root sections' entry counts from the server dashboard. The response
+   * also carries book lists the caller never reads; the streaming filter drops
+   * them, so only the counts ever reach memory. Returns false on any failure —
+   * counts are decorative, so callers treat that as "show no counts".
+   */
+  static bool fetchCatalogCounts(BookOrbitCatalogCounts& outCounts);
 
   /**
    * Fetch a page of books matching the given filters.

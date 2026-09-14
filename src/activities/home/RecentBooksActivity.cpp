@@ -57,6 +57,11 @@ void RecentBooksActivity::onRowEvent(const fui::ActionEvent& event, void* user) 
   auto* self = static_cast<RecentBooksActivity*>(user);
   if (event.value < 0 || event.value >= static_cast<int16_t>(self->recentBooks.size())) return;
   self->selectorIndex = static_cast<size_t>(event.value);
+  if (event.longPress) {
+    self->app.clearTapFlash();
+    self->showBookActionMenu(self->selectorIndex);
+    return;
+  }
   // Opening the book leaves this screen; a lingering flash would gray an
   // unrelated row when the list next appears.
   self->app.clearTapFlash();
@@ -67,7 +72,7 @@ void RecentBooksActivity::onEnter() {
   Activity::onEnter();
 
   // Prune entries whose backing files are gone; this is one of two interaction
-  // points where the persistent store gets cleaned (the other is addBook).
+  // points where the persistent store gets cleaned.
   if (RECENT_BOOKS.pruneMissing()) {
     RECENT_BOOKS.saveToFile();
   }
@@ -79,7 +84,7 @@ void RecentBooksActivity::onEnter() {
   uiReady = false;
   visibleRows = 1;
   topIndex = 0;
-  app.setTheme(uiThemeTokens(uiTarget));
+  applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &RecentBooksActivity::onRowEvent, this);
   app.setScreen(&RecentBooksActivity::listScreen, this);
   requestUpdate();
@@ -116,23 +121,6 @@ void RecentBooksActivity::loop() {
   // cf. FileBrowserActivity BACK long-press).
   if (!recentBooks.empty() && selectorIndex < recentBooks.size() &&
       mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= LONG_PRESS_MS) {
-    longPressFired = true;
-    showBookActionMenu(selectorIndex, true);
-    return;
-  }
-
-  int touchX = 0;
-  int touchY = 0;
-  if (mappedInput.isScreenTouchLongPress(touchX, touchY, LONG_PRESS_MS) && listRowStep > 0 && touchY >= listTop &&
-      touchY < listBottom) {
-    const int rowOffset = touchY - listTop;
-    const int row = rowOffset / listRowStep;
-    const int heldIndex = topIndex + row;
-    if (rowOffset % listRowStep >= listRowHeight || row >= visibleRows || heldIndex < 0 || heldIndex >= listSize) {
-      return;
-    }
-    selectorIndex = static_cast<size_t>(heldIndex);
-    mappedInput.suppressNextTouchTap();
     longPressFired = true;
     showBookActionMenu(selectorIndex, true);
     return;
@@ -361,6 +349,8 @@ void RecentBooksActivity::showBookActionMenu(const size_t bookIndex, const bool 
             return;
           case FileBrowserAction::PinFavorite:
           case FileBrowserAction::UnpinFavorite:
+          case FileBrowserAction::PinBootFavorite:
+          case FileBrowserAction::UnpinBootFavorite:
           case FileBrowserAction::SetSleepFolder:
           case FileBrowserAction::ClearSleepFolder:
           case FileBrowserAction::ViewBookmarks:
@@ -406,16 +396,12 @@ void RecentBooksActivity::buildListScreen(UiApp::ScreenType& screen) {
   props.count = static_cast<uint16_t>(items.size());
   props.selectedIndex = static_cast<int16_t>(selectorIndex);
   props.action = ACTION_ROW;
-  props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
+  props.inputMask = static_cast<uint16_t>(fui::InputTouch | fui::InputLongPress);  // physical buttons stay in loop()
   props.iconSize = 28;
   props.labelText = screen.theme().bodyText;
   props.labelText.bold = true;
   const fui::Rect listBounds = screen.body();
-  listTop = listBounds.y;
-  listBottom = listBounds.bottom();
   const auto rows = configureUiList(props, screen.theme(), listBounds, UiListRowType::WithSubtitle);
-  listRowHeight = props.rowHeight;
-  listRowStep = listRowHeight + props.rowGap;
   visibleRows = rows > 0 ? rows : 1;
   topIndex = scrollListBy(topIndex, 0, visibleRows, static_cast<int>(recentBooks.size()));  // clamp to range
   props.topIndex = static_cast<uint16_t>(topIndex);
@@ -441,7 +427,8 @@ void RecentBooksActivity::render(RenderLock&&) {
   app.render();
   uiReady = true;
 
-  const auto labels = mappedInput.mapLabels(tr(STR_HOME), tr(STR_OPEN), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels =
+      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_HOME)), tr(STR_OPEN), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   if (pendingCacheDeletedFeedback) {

@@ -52,14 +52,17 @@ bool tabSlotIndexFromPoint(const Rect rect, const int tabCount, const int x, con
 }
 
 constexpr MinimalQuote kQuotes[] = {
-    {"\"A book is a dream you hold in your hands.\"", "Neil Gaiman"},
+    {"\"Nobody can guess how a person’s life or a people’s fate may be changed by one book, or one poem, or even a "
+     "single sentence.\"",
+     "Ursula K. Le Guin"},
     {"\"I have always imagined that Paradise will be a kind of library.\"", "Jorge Luis Borges"},
     {"\"A reader lives a thousand lives before he dies. The man who never reads lives only one.\"",
      "George R.R. Martin"},
     {"\"So many books, so little time.\"", "Frank Zappa"},
     {"\"If you only read the books that everyone else is reading, you can only think what everyone else is thinking.\"",
      "Haruki Murakami"},
-};
+    {"\"Books are mirrors: you only see in them what you already have inside you.\"", "Carlos Ruiz Zafón"},
+    {"\"Books are a uniquely portable magic.\"", "Stephen King"}};
 
 constexpr int kCoverCornerRadius = 8;
 constexpr int kProgressBarHeight = 6;
@@ -414,7 +417,7 @@ void MinimalTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char
   const bool showBatteryPercentage =
       SETTINGS.hideBatteryPercentage != CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS;
   const int batteryX = rect.x + rect.width - 12 - MinimalMetrics::values.batteryWidth;
-  const int batteryY = rect.y + homeHeaderTopInset;
+  const int batteryY = rect.y + homeHeaderTopInset + UITheme::getTopStatusBarInset(renderer);
   drawBatteryRight(renderer,
                    Rect{batteryX, batteryY, MinimalMetrics::values.batteryWidth, MinimalMetrics::values.batteryHeight},
                    showBatteryPercentage);
@@ -663,7 +666,7 @@ void MinimalTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, cons
       renderer.fillRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, kButtonCornerRadius, background);
       renderer.drawRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, 1, kButtonCornerRadius, true, true,
                                false, false, true);
-    } else {
+    } else if (labels[i] != nullptr) {
       // Clear the previous full-sized hint before drawing the inactive marker.
       renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, false);
       const int smallButtonY = pageHeight - smallButtonHeight;

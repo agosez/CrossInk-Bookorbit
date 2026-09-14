@@ -36,6 +36,8 @@ void reclaim() {
   claimed.store(false);
 }
 
+bool available(const size_t minLen) { return block && blockLen >= minLen && !claimed.load(); }
+
 uint8_t* claim(const size_t minLen, size_t* lenOut) {
   if (!block || blockLen < minLen) return nullptr;
   bool expected = false;

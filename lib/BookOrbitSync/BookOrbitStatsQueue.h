@@ -44,8 +44,8 @@ class BookOrbitStatsQueue {
   static constexpr uint16_t PROGRESS_SCALE = 10000;
 
   // Bounds the queue file so a never-synced device cannot grow it unbounded
-  // (2000 events = 32KB on SD and ~32KB heap when drained for upload). On overflow
-  // the OLDEST events are dropped: recent reading is worth more than old backlog.
+  // (2000 events = 32KB on SD). On overflow the OLDEST events are dropped: recent
+  // reading is worth more than old backlog.
   static constexpr size_t MAX_QUEUED_EVENTS = 2000;
 
   // Appends a batch of events to <bookCachePath>/bookorbit_stats.bin, dropping the
@@ -55,7 +55,16 @@ class BookOrbitStatsQueue {
 
   // Reads every queued event. Returns false on storage failure or a bad header;
   // an absent file (or a discarded pre-v2 queue) yields true with an empty vector.
+  // Costs 16 bytes of heap per queued event, so a full queue is 32KB: prefer
+  // readRange() for anything that runs beside a TLS session.
   static bool readAll(const std::string& bookCachePath, std::vector<BookOrbitStatEvent>& outEvents);
+
+  // Reads at most maxEvents events starting at firstIndex, in queue order, so a long
+  // backlog can be drained a batch at a time instead of held whole (see
+  // BookOrbitSyncActivity::uploadQueuedStats). Returns false on storage failure or a
+  // bad header; running past the end of the queue yields true with fewer events.
+  static bool readRange(const std::string& bookCachePath, size_t firstIndex, size_t maxEvents,
+                        std::vector<BookOrbitStatEvent>& outEvents);
 
   // Removes the queue file (call after a fully successful upload).
   static void clear(const std::string& bookCachePath);

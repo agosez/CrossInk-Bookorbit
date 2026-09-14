@@ -11,10 +11,14 @@
 #include <cstring>
 #include <functional>
 
+#include "clippings/ClippingPreview.h"
+#include "util/BookContentId.h"
+
 namespace {
 constexpr uint8_t LEGACY_VERSION = 1;
 constexpr uint8_t TEXT_OFFSET_VERSION = 2;
-constexpr uint8_t VERSION = 3;
+constexpr uint8_t LAYOUT_SIGNATURE_VERSION = 3;
+constexpr uint8_t VERSION = 4;
 constexpr size_t INITIAL_CLIPPING_RESERVE = 4;
 constexpr char CLIPPINGS_DIR[] = "/.crosspoint/clippings";
 constexpr size_t TEXT_COPY_BUFFER_SIZE = 128;
@@ -27,9 +31,21 @@ struct ClippingFileHeader {
   uint16_t count = 0;
 };
 
-std::string storeFilePathForBook(const std::string& filePath, const std::string& bookType) {
+// Path-keyed name from before content keying; loadForBook folds it into the content-keyed
+// store, and it stays the fallback when the book file itself cannot be read.
+std::string legacyStoreFilePathForBook(const std::string& filePath, const std::string& bookType) {
   const uint32_t crc = uzlib_crc32(filePath.data(), static_cast<unsigned int>(filePath.size()), 0);
   return std::string(CLIPPINGS_DIR) + "/" + bookType + "_" + std::to_string(crc) + ".bin";
+}
+
+// Content-keyed name: survives the book being moved or renamed, and matches the identity
+// BookOrbit sync reports to the server. Empty when the book file cannot be read.
+std::string storeFilePathForBook(const std::string& filePath, const std::string& bookType) {
+  const std::string hash = BookContentId::contentHash(filePath);
+  if (hash.empty()) {
+    return "";
+  }
+  return std::string(CLIPPINGS_DIR) + "/" + bookType + "_" + hash + ".bin";
 }
 
 void copyBounded(char* dst, const size_t dstSize, const char* src) {
@@ -47,7 +63,8 @@ bool readClippingFileHeader(const std::string& fullPath, const char* name, Clipp
   uint8_t version = 0;
   uint16_t count = 0;
   if (!serialization::tryReadPod(f, version) ||
-      (version != LEGACY_VERSION && version != TEXT_OFFSET_VERSION && version != VERSION) ||
+      (version != LEGACY_VERSION && version != TEXT_OFFSET_VERSION && version != LAYOUT_SIGNATURE_VERSION &&
+       version != VERSION) ||
       !serialization::tryReadPod(f, count) || !serialization::tryReadString(f, header.title) ||
       !serialization::tryReadString(f, header.author) || !serialization::tryReadString(f, header.path)) {
     f.close();
@@ -103,11 +120,35 @@ bool ClippingStore::loadForBook(const std::string& filePath, const std::string& 
   }
 
   storeFilePath = storeFilePathForBook(filePath, bookType);
+  const std::string legacyStoreFilePath = legacyStoreFilePathForBook(filePath, bookType);
+  if (storeFilePath.empty()) {
+    // Book file unreadable (deleted, or a failing card): stay on the path-keyed name so
+    // its highlights remain viewable; a later load with the book readable migrates them.
+    LOG_ERR("CLIP", "Book not hashable, using path-keyed clippings: %s", filePath.c_str());
+    storeFilePath = legacyStoreFilePath;
+  } else if (!Storage.exists(storeFilePath.c_str()) && Storage.exists(legacyStoreFilePath.c_str())) {
+    if (Storage.rename(legacyStoreFilePath.c_str(), storeFilePath.c_str())) {
+      LOG_INF("CLIP", "Migrated clippings to content-keyed store: %s", storeFilePath.c_str());
+    } else {
+      LOG_ERR("CLIP", "Clipping migration failed, using path-keyed store: %s", legacyStoreFilePath.c_str());
+      storeFilePath = legacyStoreFilePath;
+    }
+  }
   if (!Storage.exists(storeFilePath.c_str())) {
     return true;
   }
 
-  return readFromFile();
+  if (!readFromFile()) {
+    return false;
+  }
+  // A content-keyed store follows its book through a move, but its header still names the
+  // old path; mark it dirty so the next unload rewrites it and the saved-items lists can
+  // reopen the book from its new location.
+  ClippingFileHeader header;
+  if (readClippingFileHeader(storeFilePath, "", header) && header.path != filePath) {
+    dirty = true;
+  }
+  return true;
 }
 
 void ClippingStore::unload() {
@@ -125,7 +166,7 @@ ClippingStore::AddResult ClippingStore::addClipping(const uint16_t spineIndex, c
                                                     const uint16_t startWordIndex, const uint16_t endWordIndex,
                                                     const uint16_t wordCount, const char* chapterTitle,
                                                     const uint16_t paragraphIndex, const std::string& text,
-                                                    const uint32_t layoutSignature) {
+                                                    const uint16_t tableSelection, const uint32_t layoutSignature) {
   if (clippings.size() >= CLIPPING_MAX_PER_BOOK) {
     LOG_ERR("CLIP", "Clipping limit (%u) reached", CLIPPING_MAX_PER_BOOK);
     return AddResult::LimitReached;
@@ -142,6 +183,7 @@ ClippingStore::AddResult ClippingStore::addClipping(const uint16_t spineIndex, c
   clipping.paragraphIndex = paragraphIndex;
   clipping.timestamp = static_cast<uint32_t>(millis() / 1000UL);
   clipping.layoutSignature = layoutSignature;
+  clipping.tableSelection = tableSelection;
   copyBounded(clipping.chapterTitle, sizeof(clipping.chapterTitle), chapterTitle);
   clipping.textLength = static_cast<uint16_t>(std::min(text.size(), CLIPPING_TEXT_MAX));
 
@@ -154,26 +196,6 @@ ClippingStore::AddResult ClippingStore::addClipping(const uint16_t spineIndex, c
   }
   dirty = false;
   return AddResult::Added;
-}
-
-bool ClippingStore::stampMissingLayoutSignature(const uint32_t layoutSignature) {
-  if (layoutSignature == 0) return true;
-
-  bool changed = false;
-  for (Clipping& clipping : clippings) {
-    if (clipping.layoutSignature == 0) {
-      clipping.layoutSignature = layoutSignature;
-      changed = true;
-    }
-  }
-  if (!changed) return true;
-
-  dirty = true;
-  if (writeToFile()) {
-    dirty = false;
-    return true;
-  }
-  return false;
 }
 
 bool ClippingStore::replaceClippingText(const size_t index, const std::string& text) {
@@ -198,15 +220,41 @@ bool ClippingStore::removeClippingAt(const size_t index) {
   return true;
 }
 
-bool ClippingStore::hasClippingForPage(const uint16_t spineIndex, const uint16_t page) const {
-  return std::any_of(clippings.begin(), clippings.end(), [&](const Clipping& clipping) {
-    return clipping.spineIndex == spineIndex && page >= clipping.startPage && page <= clipping.endPage;
-  });
-}
-
 const Clipping* ClippingStore::clippingAt(const size_t index) const {
   if (index >= clippings.size()) return nullptr;
   return &clippings[index];
+}
+
+bool ClippingStore::cacheResolvedLayoutRange(const size_t index, const uint16_t page, const uint16_t startWord,
+                                             const uint16_t endWord, const uint32_t layoutSignature) {
+  if (index >= clippings.size()) return false;
+  if (!cacheClippingResolvedLayoutRange(clippings[index], page, startWord, endWord, layoutSignature)) {
+    return false;
+  }
+  dirty = true;
+  return true;
+}
+
+bool ClippingStore::readClippingPreview(const size_t index, std::string& out) const {
+  out.clear();
+  const Clipping* clipping = clippingAt(index);
+  if (!clipping || storeFilePath.empty()) {
+    LOG_ERR("CLIP", "Invalid clipping preview index: %u", static_cast<unsigned>(index));
+    return false;
+  }
+  if (clipping->textLength == 0) return true;
+
+  FsFile f;
+  if (!Storage.openFileForRead("CLIP", storeFilePath, f)) return false;
+  if (!f.seek(clipping->textOffset)) {
+    f.close();
+    LOG_ERR("CLIP", "Failed to seek clipping preview at %u", clipping->textOffset);
+    return false;
+  }
+  const bool ok = clippingPreview::read(f, clipping->textLength, out);
+  f.close();
+  if (!ok) LOG_ERR("CLIP", "Failed to read clipping preview at %u", clipping->textOffset);
+  return ok;
 }
 
 bool ClippingStore::readClippingText(const size_t index, std::string& out) const {
@@ -217,21 +265,6 @@ bool ClippingStore::readClippingText(const size_t index, std::string& out) const
 
 bool ClippingStore::readClippingText(const Clipping& clipping, std::string& out) const {
   return readTextSpan(clipping, clipping.textLength, out);
-}
-
-bool ClippingStore::readClippingTextPrefix(const size_t index, const size_t maxBytes, std::string& out) const {
-  const Clipping* clipping = clippingAt(index);
-  if (!clipping) {
-    out.clear();
-    return false;
-  }
-  if (!readTextSpan(*clipping, static_cast<uint16_t>(std::min<size_t>(clipping->textLength, maxBytes)), out)) {
-    return false;
-  }
-  // A byte cut can land inside a UTF-8 sequence; drop the partial tail rather than render it.
-  while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xC0) == 0x80) out.pop_back();
-  if (!out.empty() && static_cast<unsigned char>(out.back()) >= 0xC0) out.pop_back();
-  return true;
 }
 
 bool ClippingStore::readTextSpan(const Clipping& clipping, const uint16_t length, std::string& out) const {
@@ -290,7 +323,8 @@ bool ClippingStore::readFromFile(const std::string& path, std::vector<Clipping>&
   std::string author;
   std::string storedPath;
   if (!serialization::tryReadPod(f, version) ||
-      (version != LEGACY_VERSION && version != TEXT_OFFSET_VERSION && version != VERSION) ||
+      (version != LEGACY_VERSION && version != TEXT_OFFSET_VERSION && version != LAYOUT_SIGNATURE_VERSION &&
+       version != VERSION) ||
       !serialization::tryReadPod(f, count) || !serialization::tryReadString(f, title) ||
       !serialization::tryReadString(f, author) || !serialization::tryReadString(f, storedPath)) {
     f.close();
@@ -316,9 +350,14 @@ bool ClippingStore::readFromFile(const std::string& path, std::vector<Clipping>&
       LOG_ERR("CLIP", "Clipping file truncated at record %u: %s", i, path.c_str());
       return false;
     }
-    if (version >= VERSION && !serialization::tryReadPod(f, clipping.layoutSignature)) {
+    if (version >= LAYOUT_SIGNATURE_VERSION && !serialization::tryReadPod(f, clipping.layoutSignature)) {
       f.close();
       LOG_ERR("CLIP", "Clipping file truncated at layout signature, record %u: %s", i, path.c_str());
+      return false;
+    }
+    if (version >= VERSION && !serialization::tryReadPod(f, clipping.tableSelection)) {
+      f.close();
+      LOG_ERR("CLIP", "Clipping file truncated at table selection, record %u: %s", i, path.c_str());
       return false;
     }
     if (f.read(reinterpret_cast<uint8_t*>(clipping.chapterTitle), sizeof(clipping.chapterTitle)) !=
@@ -420,6 +459,7 @@ bool ClippingStore::writeToFile(const std::string* replacementText, const size_t
         !serialization::tryWritePod(f, clipping.endWordIndex) || !serialization::tryWritePod(f, clipping.wordCount) ||
         !serialization::tryWritePod(f, clipping.paragraphIndex) || !serialization::tryWritePod(f, clipping.timestamp) ||
         !serialization::tryWritePod(f, clipping.layoutSignature) ||
+        !serialization::tryWritePod(f, clipping.tableSelection) ||
         f.write(reinterpret_cast<const uint8_t*>(clipping.chapterTitle), sizeof(clipping.chapterTitle)) !=
             sizeof(clipping.chapterTitle)) {
       LOG_ERR("CLIP", "Failed to write clipping record %u: %s", i, storeFilePath.c_str());
@@ -519,16 +559,25 @@ bool ClippingStore::getAllClippedBooks(std::vector<ClippedBookEntry>& out) {
 }
 
 void ClippingStore::deleteForFilePath(const std::string& filePath, const std::string& bookType) {
+  // The content-keyed name needs the book file to still be readable; deleting a whole
+  // directory removes the files before this runs, so that store can be left behind as an
+  // orphan there. The path-keyed name is always computable and removed either way.
   const std::string path = storeFilePathForBook(filePath, bookType);
-  if (Storage.exists(path.c_str())) {
+  if (!path.empty() && Storage.exists(path.c_str())) {
     Storage.remove(path.c_str());
+  }
+  const std::string legacyPath = legacyStoreFilePathForBook(filePath, bookType);
+  if (Storage.exists(legacyPath.c_str())) {
+    Storage.remove(legacyPath.c_str());
   }
 }
 
 bool ClippingStore::migrateForFilePath(const std::string& oldFilePath, const std::string& newFilePath,
                                        const std::string& title, const std::string& author,
                                        const std::string& bookType) {
-  const std::string oldStorePath = storeFilePathForBook(oldFilePath, bookType);
+  // A content-keyed store needs no move: same content, same name. This call now only folds
+  // a legacy path-keyed store into the new book location's store, refreshing its header.
+  const std::string oldStorePath = legacyStoreFilePathForBook(oldFilePath, bookType);
   if (!Storage.exists(oldStorePath.c_str())) {
     return true;
   }
@@ -549,7 +598,10 @@ bool ClippingStore::migrateForFilePath(const std::string& oldFilePath, const std
     return false;
   }
 
-  const std::string newStorePath = storeFilePathForBook(newFilePath, bookType);
+  std::string newStorePath = storeFilePathForBook(newFilePath, bookType);
+  if (newStorePath.empty()) {
+    newStorePath = legacyStoreFilePathForBook(newFilePath, bookType);
+  }
   if (oldStorePath == newStorePath) {
     return true;
   }

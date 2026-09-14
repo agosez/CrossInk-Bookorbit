@@ -69,7 +69,16 @@ class BookOrbitAnnotationStore {
   // highlight (see BookOrbitClippingRef) so re-stamping one does not accumulate duplicates.
   static bool put(const std::string& bookCachePath, const BookOrbitAnnotationRecord& record);
 
-  // Reads every record. Returns false on a missing or unreadable file, leaving out empty.
+  /**
+   * Reads every record. Returns false on a missing or unreadable file, leaving out empty.
+   *
+   * That false return doubles as a data-safety signal: put() is the sole creator of the
+   * file, and it runs when a highlight position is minted, local or applied from the
+   * server. A store that cannot be read therefore means "this book never synced
+   * highlights" or "history lost", never "the user deleted everything" -- and a sync must
+   * not report an empty-complete key set in that state, or the server reads the gap as
+   * deletions and erases every highlight this device ever acked.
+   */
   static bool readAll(const std::string& bookCachePath, std::vector<BookOrbitAnnotationRecord>& out);
 
   // The newest identityEpoch the server has accepted, 0 when nothing has been sent.

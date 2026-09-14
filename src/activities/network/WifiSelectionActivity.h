@@ -61,6 +61,13 @@ class WifiSelectionActivity final : public Activity {
   // Number of real (scanned) networks, excluding the synthetic hidden-network entry
   size_t realNetworkCount = 0;
 
+  // Row buffers derived from `networks`, rebuilt after scan data changes and
+  // WiFi teardown instead of on every repaint. ListItem labels and values
+  // borrow from these activity-owned strings.
+  std::vector<std::string> networkStatuses;
+  std::vector<freeink::ui::ListItem> networkRowItems;
+  void rebuildNetworkRowItems();
+
   // Selected network for connection
   std::string selectedSSID;
   bool selectedRequiresPassword = false;
@@ -137,6 +144,8 @@ class WifiSelectionActivity final : public Activity {
   void renderForgetPrompt(const Rect* screen, const ThemeMetrics* metrics) const;
 
   void startWifiScan(bool autoScan = false);
+  void releaseWifiForNetworkList();
+  void showWifiScanFailure();
   void processWifiScanResults();
   void appendHiddenNetworkEntry();
   void selectNetwork(int index);

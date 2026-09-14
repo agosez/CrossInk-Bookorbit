@@ -11,6 +11,7 @@
 
 #include "MappedInputManager.h"
 #include "components/CompactHeader.h"
+#include "components/TouchActionButtons.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/TouchRegistry.h"
 #include "components/UITheme.h"
@@ -98,19 +99,27 @@ bool shouldShowRtcBasedStats() { return halClock.isAvailable(); }
 
 int noRtcCardBaseHeight(const StatsLayout& layout) { return layout.globalCardH; }
 
-int statsContentHeight(const StatsLayout& layout, const bool globalPage, const bool showRtcStats) {
+int statsHeaderHeight(const ThemeMetrics& metrics, const StatsLayout& layout, const MappedInputManager* mappedInput) {
+  if (mappedInput && mappedInput->hasTouchHardware()) {
+    return CompactHeader::height(metrics);
+  }
+  return std::min(metrics.headerHeight, layout.headerHeight);
+}
+
+int statsContentHeight(const StatsLayout& layout, const int headerHeight, const bool globalPage,
+                       const bool showRtcStats) {
   const int topCardH = globalPage ? layout.globalCardH : layout.topCardH;
   if (!showRtcStats) {
-    return layout.headerHeight + layout.topGap + topCardH;
+    return headerHeight + layout.topGap + topCardH;
   }
   const int timeOfDayH = sectionCardHeight(layout, static_cast<int>(TIME_BUCKET_LABELS.size()));
   const int dayOfWeekH = sectionCardHeight(layout, static_cast<int>(DAY_LABELS.size()));
-  return layout.headerHeight + layout.topGap + topCardH + layout.cardGap + timeOfDayH + layout.cardGap + dayOfWeekH;
+  return headerHeight + layout.topGap + topCardH + layout.cardGap + timeOfDayH + layout.cardGap + dayOfWeekH;
 }
 
-int noRtcCombinedContentHeight(const StatsLayout& layout, const bool showAllDevicesStats) {
+int noRtcCombinedContentHeight(const StatsLayout& layout, const int headerHeight, const bool showAllDevicesStats) {
   const int cardBaseH = noRtcCardBaseHeight(layout);
-  return layout.headerHeight + layout.topGap + cardBaseH + layout.cardGap + layout.globalCardH +
+  return headerHeight + layout.topGap + cardBaseH + layout.cardGap + layout.globalCardH +
          (showAllDevicesStats ? layout.cardGap + layout.globalCardH : 0);
 }
 
@@ -130,26 +139,30 @@ int globalRtcCardHeightForPerBookRowSpacing(const StatsLayout& layout, const int
   return std::max(layout.globalCardH, layout.topCardTitleH + perBookDataRowH * globalDataRowCount);
 }
 
-const StatsLayout& getStatsLayout(const GfxRenderer& renderer, const bool globalPage, const bool showButtonHints,
-                                  const bool showRtcStats) {
+const StatsLayout& getStatsLayout(const GfxRenderer& renderer, const MappedInputManager* mappedInput,
+                                  const bool globalPage, const bool showButtonHints, const bool showRtcStats) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int availableHeight =
       renderer.getScreenHeight() - metrics.topPadding - statsBottomInset(metrics, showButtonHints);
-  const bool defaultFitsCurrentPage = statsContentHeight(kDefaultLayout, globalPage, showRtcStats) <= availableHeight;
+  const int defaultHeaderHeight = statsHeaderHeight(metrics, kDefaultLayout, mappedInput);
+  const bool defaultFitsCurrentPage =
+      statsContentHeight(kDefaultLayout, defaultHeaderHeight, globalPage, showRtcStats) <= availableHeight;
   const bool defaultMatchesPerBookCharts =
-      !globalPage || !showRtcStats || statsContentHeight(kDefaultLayout, false, showRtcStats) <= availableHeight;
+      !globalPage || !showRtcStats ||
+      statsContentHeight(kDefaultLayout, defaultHeaderHeight, false, showRtcStats) <= availableHeight;
   if (defaultFitsCurrentPage && defaultMatchesPerBookCharts) {
     return kDefaultLayout;
   }
   return kCompactLayout;
 }
 
-const StatsLayout& getNoRtcCombinedLayout(const GfxRenderer& renderer, const bool showButtonHints,
-                                          const bool showAllDevicesStats) {
+const StatsLayout& getNoRtcCombinedLayout(const GfxRenderer& renderer, const MappedInputManager* mappedInput,
+                                          const bool showButtonHints, const bool showAllDevicesStats) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int availableHeight =
       renderer.getScreenHeight() - metrics.topPadding - statsBottomInset(metrics, showButtonHints);
-  if (noRtcCombinedContentHeight(kDefaultLayout, showAllDevicesStats) <= availableHeight) {
+  if (noRtcCombinedContentHeight(kDefaultLayout, statsHeaderHeight(metrics, kDefaultLayout, mappedInput),
+                                 showAllDevicesStats) <= availableHeight) {
     return kDefaultLayout;
   }
   return kCompactLayout;
@@ -457,9 +470,9 @@ void renderPerBookStatsPage(GfxRenderer& renderer, const MappedInputManager* map
   renderer.clearScreen();
   const bool showRtcStats = shouldShowRtcBasedStats();
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto& layout = getStatsLayout(renderer, false, showButtonHints, showRtcStats);
+  const auto& layout = getStatsLayout(renderer, mappedInput, false, showButtonHints, showRtcStats);
   if (mappedInput && mappedInput->hasTouchHardware()) {
-    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), true, true);
+    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), false, true);
   } else {
     CompactHeader::drawTitle(renderer, tr(STR_READING_STATS), true);
   }
@@ -469,13 +482,14 @@ void renderPerBookStatsPage(GfxRenderer& renderer, const MappedInputManager* map
   const int availableHeight =
       renderer.getScreenHeight() - metrics.topPadding - statsBottomInset(metrics, showButtonHints);
   int topCardH = layout.topCardH;
-  int y = metrics.topPadding + std::min(metrics.headerHeight, layout.headerHeight) + layout.topGap;
+  const int headerHeight = statsHeaderHeight(metrics, layout, mappedInput);
+  int y = metrics.topPadding + headerHeight + layout.topGap;
 
   if (showRtcStats) {
     const int timeOfDayH = sectionCardHeight(layout, static_cast<int>(TIME_BUCKET_LABELS.size()));
     const int dayOfWeekH = sectionCardHeight(layout, static_cast<int>(DAY_LABELS.size()));
-    const int compactContentHeight = std::min(metrics.headerHeight, layout.headerHeight) + layout.topGap +
-                                     layout.topCardH + layout.cardGap + timeOfDayH + layout.cardGap + dayOfWeekH;
+    const int compactContentHeight =
+        headerHeight + layout.topGap + layout.topCardH + layout.cardGap + timeOfDayH + layout.cardGap + dayOfWeekH;
     const int extraHeight = std::max(0, availableHeight - compactContentHeight);
     const int extraTopCardHeight = std::min(extraHeight, kPerBookRtcTopCardMaxExtra);
     const int remainingExtraHeight = extraHeight - extraTopCardHeight;
@@ -496,8 +510,7 @@ void renderPerBookStatsPage(GfxRenderer& renderer, const MappedInputManager* map
     drawSectionCard(renderer, cardX, y, cardW, dayOfWeekCardH, tr(STR_STATS_DAY_OF_WEEK), layout);
     drawHorizontalBars(renderer, cardX, y, cardW, dayOfWeekCardH, stats.dayOfWeekSeconds, DAY_LABELS, layout);
   } else {
-    const int compactContentHeight =
-        std::min(metrics.headerHeight, layout.headerHeight) + layout.topGap + layout.topCardH;
+    const int compactContentHeight = headerHeight + layout.topGap + layout.topCardH;
     const int extraHeight = std::max(0, availableHeight - compactContentHeight);
     if (showButtonHints) {
       topCardH += extraHeight;
@@ -516,8 +529,9 @@ void renderPerBookStatsPage(GfxRenderer& renderer, const MappedInputManager* map
   }
 
   if (showButtonHints && mappedInput) {
-    const auto labels = mappedInput->mapLabels(tr(STR_BACK), showEditButton ? tr(STR_EDIT) : "", "",
-                                               showMoreButton ? tr(STR_MORE) : "");
+    const auto labels =
+        mappedInput->mapLabels(mappedInput->withBackArrow(tr(STR_BACK)), showEditButton ? tr(STR_EDIT) : "", "",
+                               showMoreButton ? tr(STR_MORE) : "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   }
 }
@@ -527,9 +541,9 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
   renderer.clearScreen();
   const bool showRtcStats = shouldShowRtcBasedStats();
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto& layout = getStatsLayout(renderer, true, showButtonHints, showRtcStats);
+  const auto& layout = getStatsLayout(renderer, mappedInput, true, showButtonHints, showRtcStats);
   if (mappedInput && mappedInput->hasTouchHardware()) {
-    TouchHeaderBackButton::drawCompact(renderer, screenTitle, true);
+    TouchHeaderBackButton::drawCompact(renderer, screenTitle, false);
   } else {
     CompactHeader::drawTitle(renderer, screenTitle);
   }
@@ -539,16 +553,17 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
   const int availableHeight =
       renderer.getScreenHeight() - metrics.topPadding - statsBottomInset(metrics, showButtonHints);
   int globalCardH = layout.globalCardH;
-  int y = metrics.topPadding + std::min(metrics.headerHeight, layout.headerHeight) + layout.topGap;
+  const int headerHeight = statsHeaderHeight(metrics, layout, mappedInput);
+  int y = metrics.topPadding + headerHeight + layout.topGap;
 
   if (showRtcStats) {
     const int timeOfDayH = sectionCardHeight(layout, static_cast<int>(TIME_BUCKET_LABELS.size()));
     const int dayOfWeekH = sectionCardHeight(layout, static_cast<int>(DAY_LABELS.size()));
-    const int compactContentHeight = std::min(metrics.headerHeight, layout.headerHeight) + layout.topGap +
-                                     layout.globalCardH + layout.cardGap + timeOfDayH + layout.cardGap + dayOfWeekH;
+    const int compactContentHeight =
+        headerHeight + layout.topGap + layout.globalCardH + layout.cardGap + timeOfDayH + layout.cardGap + dayOfWeekH;
     const int extraHeight = std::max(0, availableHeight - compactContentHeight);
-    const int perBookCompactContentHeight = std::min(metrics.headerHeight, layout.headerHeight) + layout.topGap +
-                                            layout.topCardH + layout.cardGap + timeOfDayH + layout.cardGap + dayOfWeekH;
+    const int perBookCompactContentHeight =
+        headerHeight + layout.topGap + layout.topCardH + layout.cardGap + timeOfDayH + layout.cardGap + dayOfWeekH;
     const int perBookExtraHeight = std::max(0, availableHeight - perBookCompactContentHeight);
     const int targetGlobalCardH = globalRtcCardHeightForPerBookRowSpacing(layout, perBookExtraHeight);
     const int extraTopCardHeight = std::min(extraHeight, std::max(0, targetGlobalCardH - layout.globalCardH));
@@ -569,14 +584,15 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
     drawSectionCard(renderer, cardX, y, cardW, dayOfWeekCardH, tr(STR_STATS_DAY_OF_WEEK), layout);
     drawHorizontalBars(renderer, cardX, y, cardW, dayOfWeekCardH, stats.dayOfWeekSeconds, DAY_LABELS, layout);
   } else {
-    const int compactContentHeight =
-        std::min(metrics.headerHeight, layout.headerHeight) + layout.topGap + layout.globalCardH;
+    const int compactContentHeight = headerHeight + layout.topGap + layout.globalCardH;
     globalCardH += std::max(0, availableHeight - compactContentHeight);
     drawGlobalStatsCard(renderer, cardX, y, cardW, globalCardH, tr(STR_STATS_ALL_TIME), stats, layout);
   }
 
   if (showButtonHints && mappedInput) {
-    const auto labels = mappedInput->mapLabels(tr(STR_EXIT), "", tr(STR_BACK), showMoreButton ? tr(STR_MORE) : "");
+    const auto labels =
+        mappedInput->mapLabels(mappedInput->withBackArrow(tr(STR_EXIT)), "", mappedInput->withBackArrow(tr(STR_BACK)),
+                               showMoreButton ? tr(STR_MORE) : "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   }
 }
@@ -588,9 +604,9 @@ void renderNoRtcCombinedStatsPage(GfxRenderer& renderer, const MappedInputManage
                                   const GlobalReadingStats* allDevicesStats, const bool showButtonHints) {
   renderer.clearScreen();
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto& layout = getNoRtcCombinedLayout(renderer, showButtonHints, allDevicesStats != nullptr);
+  const auto& layout = getNoRtcCombinedLayout(renderer, mappedInput, showButtonHints, allDevicesStats != nullptr);
   if (mappedInput && mappedInput->hasTouchHardware()) {
-    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), true);
+    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), false);
   } else {
     CompactHeader::drawTitle(renderer, tr(STR_READING_STATS));
   }
@@ -599,7 +615,8 @@ void renderNoRtcCombinedStatsPage(GfxRenderer& renderer, const MappedInputManage
   const int cardW = screenW - metrics.contentSidePadding * 2;
   const int availableHeight =
       renderer.getScreenHeight() - metrics.topPadding - statsBottomInset(metrics, showButtonHints);
-  const int compactContentHeight = noRtcCombinedContentHeight(layout, allDevicesStats != nullptr);
+  const int headerHeight = statsHeaderHeight(metrics, layout, mappedInput);
+  const int compactContentHeight = noRtcCombinedContentHeight(layout, headerHeight, allDevicesStats != nullptr);
   const int extraHeight = std::max(0, availableHeight - compactContentHeight);
   const int visibleCardCount = allDevicesStats ? 3 : 2;
   const int extraPerCard = visibleCardCount > 0 ? extraHeight / visibleCardCount : 0;
@@ -611,7 +628,7 @@ void renderNoRtcCombinedStatsPage(GfxRenderer& renderer, const MappedInputManage
   const int deviceCardH = layout.globalCardH + deviceExtraHeight;
   const int allDevicesCardH = layout.globalCardH + allDevicesExtraHeight;
 
-  int y = metrics.topPadding + std::min(metrics.headerHeight, layout.headerHeight) + layout.topGap;
+  int y = metrics.topPadding + headerHeight + layout.topGap;
   drawPerBookStatsCard(renderer, cardX, y, cardW, perBookCardH, bookTitle, bookStats, progressPercent,
                        hasEstimatedTimeLeft, estimatedTimeLeftSeconds, layout);
   y += perBookCardH + layout.cardGap;
@@ -626,7 +643,7 @@ void renderNoRtcCombinedStatsPage(GfxRenderer& renderer, const MappedInputManage
   }
 
   if (showButtonHints && mappedInput) {
-    const auto labels = mappedInput->mapLabels(tr(STR_BACK), "", "", "");
+    const auto labels = mappedInput->mapLabels(mappedInput->withBackArrow(tr(STR_BACK)), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   }
 }
@@ -635,7 +652,7 @@ void renderEditBookDatesPage(GfxRenderer& renderer, const MappedInputManager* ma
                              const BookReadingStats& stats, const int selectedField, const bool showButtonHints) {
   renderer.clearScreen();
   if (mappedInput && mappedInput->hasTouchHardware()) {
-    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), true);
+    TouchHeaderBackButton::drawCompact(renderer, tr(STR_READING_STATS), false);
   } else {
     CompactHeader::drawTitle(renderer, tr(STR_READING_STATS));
   }
@@ -716,11 +733,25 @@ void renderEditBookDatesPage(GfxRenderer& renderer, const MappedInputManager* ma
                          icon_chevron_up_32, BookStatsTouchTarget::DateAdjustUp);
     drawDateAdjustButton(renderer, adjustButtonX, row2Y + (fieldH - adjustButtonSize) / 2, adjustButtonSize,
                          icon_chevron_down_32, BookStatsTouchTarget::DateAdjustDown);
+
+    constexpr int actionHeight = TouchActionButtons::kDefaultHeight;
+    constexpr int actionGap = TouchActionButtons::kDefaultGap;
+    constexpr int actionTotalHeight = actionHeight * 2 + actionGap;
+    const Rect safeArea = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+    const Rect actionArea{safeArea.x + metrics.contentSidePadding,
+                          safeArea.y + safeArea.height - metrics.verticalSpacing - actionTotalHeight,
+                          safeArea.width - metrics.contentSidePadding * 2, actionTotalHeight};
+    const auto actions = TouchActionButtons::vertical(actionArea, 2);
+    const char* labels[] = {tr(STR_SAVE), tr(STR_CANCEL)};
+    TouchActionButtons::draw(renderer, actions, labels, 0, -1, UI_10_FONT_ID);
+    TouchRegistry::getInstance().add(actions.buttons[0], BookStatsTouchTarget::DateSave, TouchRegistry::Item);
+    TouchRegistry::getInstance().add(actions.buttons[1], BookStatsTouchTarget::DateCancel, TouchRegistry::Item);
   }
 #endif
 
   if (showButtonHints && mappedInput) {
-    const auto labels = mappedInput->mapLabels(tr(STR_BACK), tr(STR_NEXT_FIELD), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    const auto labels = mappedInput->mapLabels(mappedInput->withBackArrow(tr(STR_BACK)), tr(STR_NEXT_FIELD),
+                                               tr(STR_DIR_UP), tr(STR_DIR_DOWN));
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   }
 }

@@ -32,6 +32,7 @@ void ConfirmationActivity::onEnter() {
     setResult(std::move(res));
     finish();
   });
+  confirmPopup.setPrimaryOptionIndex(1);
 
   requestUpdate(true);
 }

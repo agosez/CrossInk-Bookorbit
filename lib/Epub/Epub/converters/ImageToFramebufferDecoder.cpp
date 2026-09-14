@@ -1,6 +1,15 @@
 #include "ImageToFramebufferDecoder.h"
 
+#include <Arduino.h>
 #include <Logging.h>
+
+void ImageToFramebufferDecoder::yieldDuringDecode(uint32_t& lastYieldMs) {
+  const uint32_t now = millis();
+  if (now - lastYieldMs >= 250U) {
+    lastYieldMs = now;
+    vTaskDelay(1);
+  }
+}
 
 bool ImageToFramebufferDecoder::validateImageDimensions(int width, int height, const std::string& format,
                                                         int maxSourceWidth) {

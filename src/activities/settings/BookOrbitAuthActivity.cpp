@@ -9,6 +9,7 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -79,11 +80,16 @@ void BookOrbitAuthActivity::onExit() {
 void BookOrbitAuthActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_BOOKORBIT_AUTH));
+  // Nothing on this screen is a list, so the header carries the only way out
+  // for a finger: the same back button the settings screens use.
+  const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+  if (mappedInput.hasTouchHardware()) {
+    TouchHeaderBackButton::draw(renderer, header, tr(STR_BOOKORBIT_AUTH), /*readerContext=*/false);
+  } else {
+    GUI.drawHeader(renderer, header, tr(STR_BOOKORBIT_AUTH));
+  }
   const auto height = renderer.getLineHeight(UI_10_FONT_ID);
   const auto top = (pageHeight - height) / 2;
 
@@ -108,7 +114,8 @@ void BookOrbitAuthActivity::loop() {
     // nothing to return to: both buttons go home. When WiFi came up, onExit() restarts
     // silently to the home screen anyway.
     if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
-        mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+        mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
+        TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
       onGoHome();
     }
   }

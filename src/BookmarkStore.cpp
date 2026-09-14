@@ -10,6 +10,8 @@
 #include <functional>
 #include <limits>
 
+#include "util/BookContentId.h"
+
 namespace {
 constexpr uint8_t LEGACY_VERSION = 2;
 constexpr uint8_t COUNT_U16_VERSION = 3;
@@ -37,6 +39,17 @@ std::string currentStoreFilePathForBook(const std::string& filePath, const std::
 std::string legacyStoreFilePathForBook(const std::string& filePath, const std::string& bookType) {
   return std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + std::to_string(std::hash<std::string>{}(filePath)) +
          ".bin";
+}
+
+// Content-keyed name: survives the book being moved or renamed, and matches the identity
+// BookOrbit sync reports to the server. Empty when the book file cannot be read; callers
+// then fall back to the path-keyed names so existing stores stay reachable.
+std::string contentStoreFilePathForBook(const std::string& filePath, const std::string& bookType) {
+  const std::string hash = BookContentId::contentHash(filePath);
+  if (hash.empty()) {
+    return "";
+  }
+  return std::string(BOOKMARKS_DIR) + "/" + bookType + "_" + hash + ".bin";
 }
 
 bool readBookmarkCount(FsFile& file, const uint8_t version, uint16_t& count) {
@@ -231,12 +244,26 @@ bool BookmarkStore::loadForBook(const std::string& filePath, const std::string& 
     bookmarks.reserve(INITIAL_BOOKMARK_RESERVE);
   }
 
-  storeFilePath = currentStoreFilePathForBook(filePath, bookType);
-  const std::string legacyStoreFilePath = legacyStoreFilePathForBook(filePath, bookType);
-  const bool hasCurrentFile = Storage.exists(storeFilePath.c_str());
-  const bool hasLegacyFile = legacyStoreFilePath != storeFilePath && Storage.exists(legacyStoreFilePath.c_str());
+  storeFilePath = contentStoreFilePathForBook(filePath, bookType);
+  const bool contentKeyed = !storeFilePath.empty();
+  if (!contentKeyed) {
+    // Book file unreadable (deleted, or a failing card): stay on the path-keyed name so
+    // its bookmarks remain viewable; a later load with the book readable migrates them.
+    LOG_ERR("BKS", "Book not hashable, using path-keyed bookmarks: %s", filePath.c_str());
+    storeFilePath = currentStoreFilePathForBook(filePath, bookType);
+  }
 
-  if (!hasCurrentFile && !hasLegacyFile) {
+  // Older stores fold in at load: the path-keyed name used before content keying, then the
+  // std::hash name from before the crc32 one.
+  const std::string legacyStoreFilePaths[] = {currentStoreFilePathForBook(filePath, bookType),
+                                              legacyStoreFilePathForBook(filePath, bookType)};
+  const bool hasCurrentFile = Storage.exists(storeFilePath.c_str());
+  bool hasAnyLegacyFile = false;
+  for (const auto& legacyPath : legacyStoreFilePaths) {
+    hasAnyLegacyFile = hasAnyLegacyFile || (legacyPath != storeFilePath && Storage.exists(legacyPath.c_str()));
+  }
+
+  if (!hasCurrentFile && !hasAnyLegacyFile) {
     if (bookType == "epub" && isInReadFolder(filePath) && Storage.exists(BOOKMARKS_DIR)) {
       for (const auto& name : Storage.listFiles(BOOKMARKS_DIR)) {
         BookmarkFileHeader header;
@@ -267,7 +294,7 @@ bool BookmarkStore::loadForBook(const std::string& filePath, const std::string& 
   bool currentLoaded = false;
   if (hasCurrentFile) {
     bool currentNeedsRewrite = false;
-    if (readFromFile(storeFilePath, bookmarks, currentNeedsRewrite)) {
+    if (readFromFile(storeFilePath, bookmarks, currentNeedsRewrite, /*enforceStoredPath=*/!contentKeyed)) {
       loadedAny = true;
       currentLoaded = true;
       needsRewrite = currentNeedsRewrite;
@@ -276,7 +303,10 @@ bool BookmarkStore::loadForBook(const std::string& filePath, const std::string& 
     }
   }
 
-  if (hasLegacyFile) {
+  for (const auto& legacyStoreFilePath : legacyStoreFilePaths) {
+    if (legacyStoreFilePath == storeFilePath || !Storage.exists(legacyStoreFilePath.c_str())) {
+      continue;
+    }
     bool legacyNeedsRewrite = false;
     std::vector<Bookmark> legacyBookmarks;
     if (readFromFile(legacyStoreFilePath, legacyBookmarks, legacyNeedsRewrite)) {
@@ -305,7 +335,17 @@ bool BookmarkStore::loadForBook(const std::string& filePath, const std::string& 
     return false;
   }
 
-  if (needsRewrite && !hasLegacyFile) {
+  // A content-keyed store follows its book through a move, but its header still names the
+  // old path; mark it dirty so the next unload rewrites it and the saved-items lists can
+  // reopen the book from its new location.
+  if (!dirty && hasCurrentFile) {
+    BookmarkFileHeader header;
+    if (readBookmarkFileHeader(storeFilePath, "", header) && header.path != filePath) {
+      dirty = true;
+    }
+  }
+
+  if (needsRewrite && !hasAnyLegacyFile) {
     dirty = true;
     saveToFile();
   }
@@ -438,7 +478,8 @@ bool BookmarkStore::readFromFile() {
   return true;
 }
 
-bool BookmarkStore::readFromFile(const std::string& path, std::vector<Bookmark>& out, bool& needsRewrite) const {
+bool BookmarkStore::readFromFile(const std::string& path, std::vector<Bookmark>& out, bool& needsRewrite,
+                                 const bool enforceStoredPath) const {
   needsRewrite = false;
   FsFile f;
   if (!Storage.openFileForRead("BKS", path, f)) {
@@ -472,7 +513,11 @@ bool BookmarkStore::readFromFile(const std::string& path, std::vector<Bookmark>&
   serialization::readString(f, tmp);  // author — not validated
   std::string storedPath;
   serialization::readString(f, storedPath);
-  if (storedPath != bookFilePath) {
+  // The stored path guards path-keyed stores, where a filename collision could hand us
+  // another book's bookmarks. A content-keyed store carries the book's identity in its
+  // filename instead, and its header path legitimately goes stale when the book is moved
+  // or copied -- the caller refreshes it, so a mismatch must not reject the store there.
+  if (enforceStoredPath && storedPath != bookFilePath) {
     LOG_ERR("BKS", "Bookmark file path mismatch, file may belong to a different book: %s", path.c_str());
     f.close();
     return false;
@@ -571,6 +616,13 @@ void BookmarkStore::deleteForFilePath(const std::string& filePath, const std::st
   const std::string legacyPath = legacyStoreFilePathForBook(filePath, bookType);
   bool deletedAny = false;
 
+  // The content-keyed name needs the book file to still be readable; deleting a whole
+  // directory removes the files before this runs, so that store can be left behind as an
+  // orphan there. The path-keyed names are always computable and removed either way.
+  const std::string contentPath = contentStoreFilePathForBook(filePath, bookType);
+  if (!contentPath.empty() && Storage.exists(contentPath.c_str())) {
+    deletedAny = deleteBookmarkStorePath(contentPath, "content") || deletedAny;
+  }
   if (Storage.exists(currentPath.c_str())) {
     deletedAny = deleteBookmarkStorePath(currentPath, "canonical") || deletedAny;
   }
@@ -597,6 +649,14 @@ bool BookmarkStore::migrateForFilePath(const std::string& oldFilePath, const std
   const std::string srcLegacyPath = legacyStoreFilePathForBook(oldFilePath, bookType);
   const std::string dstCurrentPath = currentStoreFilePathForBook(newFilePath, bookType);
   const std::string dstLegacyPath = legacyStoreFilePathForBook(newFilePath, bookType);
+
+  // The merged set lands in the content-keyed store when the moved file is readable (its
+  // name is the same as the source's content name: same bytes, same identity), falling
+  // back to the destination's path-keyed name otherwise.
+  std::string dstStorePath = contentStoreFilePathForBook(newFilePath, bookType);
+  if (dstStorePath.empty()) {
+    dstStorePath = dstCurrentPath;
+  }
 
   const bool hasSrcCurrent = Storage.exists(srcCurrentPath.c_str());
   const bool hasSrcLegacy = srcLegacyPath != srcCurrentPath && Storage.exists(srcLegacyPath.c_str());
@@ -640,6 +700,18 @@ bool BookmarkStore::migrateForFilePath(const std::string& oldFilePath, const std
   destReader.bookFilePath = newFilePath;
   bool hasDestBookmarks = false;
 
+  if (dstStorePath != dstCurrentPath && Storage.exists(dstStorePath.c_str())) {
+    bool dstNeedsRewrite = false;
+    std::vector<Bookmark> existingBookmarks;
+    if (!destReader.readFromFile(dstStorePath, existingBookmarks, dstNeedsRewrite, /*enforceStoredPath=*/false)) {
+      LOG_ERR("BKS", "Failed to load destination bookmark file during path migration: %s", dstStorePath.c_str());
+      return false;
+    }
+    mergeBookmarks(existingBookmarks, migratedBookmarks);
+    migratedBookmarks = std::move(existingBookmarks);
+    hasDestBookmarks = true;
+  }
+
   if (Storage.exists(dstCurrentPath.c_str())) {
     bool dstNeedsRewrite = false;
     std::vector<Bookmark> existingBookmarks;
@@ -669,15 +741,15 @@ bool BookmarkStore::migrateForFilePath(const std::string& oldFilePath, const std
   writer.bookFilePath = newFilePath;
   writer.bookTitle = title;
   writer.bookAuthor = author;
-  writer.storeFilePath = dstCurrentPath;
+  writer.storeFilePath = dstStorePath;
   writer.bookmarks = std::move(migratedBookmarks);
 
   if (!writer.bookmarks.empty()) {
     if (!writer.writeToFile()) {
-      LOG_ERR("BKS", "Failed to write migrated bookmark file: %s", dstCurrentPath.c_str());
+      LOG_ERR("BKS", "Failed to write migrated bookmark file: %s", dstStorePath.c_str());
       return false;
     }
-  } else if (Storage.exists(dstCurrentPath.c_str()) && !deleteBookmarkStorePath(dstCurrentPath, "empty migrated")) {
+  } else if (Storage.exists(dstStorePath.c_str()) && !deleteBookmarkStorePath(dstStorePath, "empty migrated")) {
     return false;
   }
 
@@ -687,7 +759,11 @@ bool BookmarkStore::migrateForFilePath(const std::string& oldFilePath, const std
   if (srcLegacyPath != srcCurrentPath && !deleteBookmarkStorePath(srcLegacyPath, "source legacy")) {
     return false;
   }
-  if (dstLegacyPath != dstCurrentPath && !deleteBookmarkStorePath(dstLegacyPath, "destination legacy")) {
+  if (dstCurrentPath != dstStorePath && !deleteBookmarkStorePath(dstCurrentPath, "destination path-keyed")) {
+    return false;
+  }
+  if (dstLegacyPath != dstCurrentPath && dstLegacyPath != dstStorePath &&
+      !deleteBookmarkStorePath(dstLegacyPath, "destination legacy")) {
     return false;
   }
 

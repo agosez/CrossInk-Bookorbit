@@ -18,6 +18,12 @@ class BmpViewerActivity final : public Activity {
   void loadSiblingImages();
   bool renderPngImage();
   void doSetSleepCover();
+  void showContextMenu();
+  void promptDeleteImage();
+  void pinSleepFavorite();
+  void unpinSleepFavorite();
+  void pinBootFavorite();
+  void unpinBootFavorite();
 
   std::string filePath;
   std::vector<std::string> siblingImages;

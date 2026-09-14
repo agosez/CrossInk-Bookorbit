@@ -82,6 +82,10 @@ bool BookOrbitBookmarkStore::put(const std::string& bookCachePath, const BookOrb
     LOG_ERR("BOB", "Refusing to store a bookmark record with no timestamp or position");
     return false;
   }
+  if (bookCachePath.empty()) {
+    LOG_ERR("BOB", "No state directory for this book; the record is not stored");
+    return false;
+  }
 
   const std::string path = storePath(bookCachePath);
   uint32_t watermark = 0;

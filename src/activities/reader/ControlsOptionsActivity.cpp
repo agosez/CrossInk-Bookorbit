@@ -9,8 +9,10 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "QuickActions.h"
 #include "SettingsList.h"
 #include "activities/settings/ButtonRemapActivity.h"
+#include "activities/settings/QuickActionsActivity.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 
@@ -38,17 +40,38 @@ uint8_t enumRawValueForDisplayIndex(const SettingInfo& setting, uint8_t displayI
   }
   return setting.enumRawValues[displayIndex];
 }
+
+fui::BitmapRef twoFingerSwipeIcon(const StrId nameId) {
+  switch (nameId) {
+    case StrId::STR_TWO_FINGER_SWIPE_UP:
+      return fui::bitmapFromIcon(icon_arrows_up_24);
+    case StrId::STR_TWO_FINGER_SWIPE_DOWN:
+      return fui::bitmapFromIcon(icon_arrows_down_24);
+    case StrId::STR_TWO_FINGER_SWIPE_LEFT:
+      return fui::bitmapFromIcon(icon_arrows_left_24);
+    case StrId::STR_TWO_FINGER_SWIPE_RIGHT:
+      return fui::bitmapFromIcon(icon_arrows_right_24);
+    default:
+      return {};
+  }
+}
+
+bool isTwoFingerSwipeSetting(const uint8_t CrossPointSettings::* const valuePtr) {
+  return valuePtr == &CrossPointSettings::twoFingerSwipeUp || valuePtr == &CrossPointSettings::twoFingerSwipeDown ||
+         valuePtr == &CrossPointSettings::twoFingerSwipeLeft || valuePtr == &CrossPointSettings::twoFingerSwipeRight;
+}
 }  // namespace
 
 void ControlsOptionsActivity::onEnter() {
   Activity::onEnter();
 
   activeSubmenu = SettingAction::None;
+  parentSubmenu = SettingAction::None;
   rebuildSettingsList();
   uiReady = false;
   visibleRows = 1;
   topIndex = 0;
-  app.setTheme(uiThemeTokens(uiTarget));
+  applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &ControlsOptionsActivity::onRowEvent, this);
   app.setScreen(&ControlsOptionsActivity::optionsScreen, this);
   requestUpdate();
@@ -59,12 +82,18 @@ void ControlsOptionsActivity::onExit() { Activity::onExit(); }
 void ControlsOptionsActivity::rebuildSettingsList() {
   settings.clear();
   powerSettings.clear();
+  homeButtonSettings.clear();
   frontButtonSettings.clear();
   sideButtonSettings.clear();
+  tapsGesturesSettings.clear();
+  twoFingerSwipeSettings.clear();
 
   const auto allSettings = getSettingsList();
   settings = buildControlsSettingsParentList(allSettings);
   powerSettings = buildControlsPowerSettingsList(allSettings);
+  homeButtonSettings = buildControlsHomeButtonSettingsList(allSettings);
+  tapsGesturesSettings = buildControlsTapsGesturesSettingsList(allSettings);
+  twoFingerSwipeSettings = buildControlsTwoFingerSwipeSettingsList(allSettings);
 #if CROSSINK_APP_CAP_TOUCH
   if (!gpio.hasTouch()) {
     frontButtonSettings = buildControlsFrontButtonSettingsList(allSettings);
@@ -83,11 +112,20 @@ void ControlsOptionsActivity::setCurrentSettings() {
     case SettingAction::ControlsPowerButton:
       currentSettings = &powerSettings;
       break;
+    case SettingAction::ControlsHomeButton:
+      currentSettings = &homeButtonSettings;
+      break;
     case SettingAction::ControlsFrontButtons:
       currentSettings = &frontButtonSettings;
       break;
     case SettingAction::ControlsSideButtons:
       currentSettings = &sideButtonSettings;
+      break;
+    case SettingAction::ControlsTapsGestures:
+      currentSettings = &tapsGesturesSettings;
+      break;
+    case SettingAction::ControlsTwoFingerSwipe:
+      currentSettings = &twoFingerSwipeSettings;
       break;
     default:
       currentSettings = &settings;
@@ -100,16 +138,23 @@ StrId ControlsOptionsActivity::activeSubmenuTitleId() const {
   switch (activeSubmenu) {
     case SettingAction::ControlsPowerButton:
       return StrId::STR_POWER_BUTTON;
+    case SettingAction::ControlsHomeButton:
+      return StrId::STR_HOME_BUTTON;
     case SettingAction::ControlsFrontButtons:
       return StrId::STR_FRONT_BUTTONS;
     case SettingAction::ControlsSideButtons:
       return StrId::STR_SIDE_BUTTONS;
+    case SettingAction::ControlsTapsGestures:
+      return StrId::STR_TAPS_AND_GESTURES;
+    case SettingAction::ControlsTwoFingerSwipe:
+      return StrId::STR_TWO_FINGER_SWIPE;
     default:
       return StrId::STR_NONE_OPT;
   }
 }
 
 void ControlsOptionsActivity::openSubmenu(SettingAction action) {
+  parentSubmenu = activeSubmenu;
   activeSubmenu = action;
   setCurrentSettings();
   selectedIndex = 0;
@@ -117,7 +162,8 @@ void ControlsOptionsActivity::openSubmenu(SettingAction action) {
 }
 
 void ControlsOptionsActivity::closeSubmenu() {
-  activeSubmenu = SettingAction::None;
+  activeSubmenu = parentSubmenu;
+  parentSubmenu = SettingAction::None;
   setCurrentSettings();
   selectedIndex = 0;
   topIndex = 0;
@@ -157,13 +203,23 @@ void ControlsOptionsActivity::openEnumOptionPicker(const SettingInfo& setting) {
   if (currentIndex >= optionCount) currentIndex = 0;
 
   const SettingInfo selectedSetting = setting;
-  optionPopup.show(setting.nameId, options, currentIndex, [selectedSetting](int selectedIndex) {
-    if (selectedSetting.valuePtr != nullptr) {
-      SETTINGS.*(selectedSetting.valuePtr) =
-          enumRawValueForDisplayIndex(selectedSetting, static_cast<uint8_t>(selectedIndex));
-      SETTINGS.saveToFile();
-    }
-  });
+  const auto note = setting.valuePtr == &CrossPointSettings::sideButtonChordAction && mappedInput.hasTouchHardware()
+                        ? OptionPopup::Note{tr(STR_NOTE), tr(STR_TOUCHSCREEN_ESCAPE_HATCH_NOTE)}
+                        : OptionPopup::Note{};
+  optionPopup.show(
+      setting.nameId, options, currentIndex,
+      [selectedSetting](int selectedIndex) {
+        if (selectedSetting.valuePtr != nullptr) {
+          SETTINGS.*(selectedSetting.valuePtr) =
+              enumRawValueForDisplayIndex(selectedSetting, static_cast<uint8_t>(selectedIndex));
+          if (isTwoFingerSwipeSetting(selectedSetting.valuePtr)) {
+            CrossPointSettings::normalizeTwoFingerSwipeActions(SETTINGS, selectedSetting.valuePtr);
+          }
+          QuickActions::settingChanged(SETTINGS, selectedSetting.valuePtr);
+          SETTINGS.saveToFile();
+        }
+      },
+      note);
   requestUpdate();
 }
 
@@ -186,6 +242,10 @@ void ControlsOptionsActivity::toggleCurrentSetting() {
     if (optionCount == 0) return;
     const uint8_t nextIndex = (currentIndex + 1) % static_cast<uint8_t>(optionCount);
     SETTINGS.*(setting.valuePtr) = enumRawValueForDisplayIndex(setting, nextIndex);
+    if (isTwoFingerSwipeSetting(setting.valuePtr)) {
+      CrossPointSettings::normalizeTwoFingerSwipeActions(SETTINGS, setting.valuePtr);
+    }
+    QuickActions::settingChanged(SETTINGS, setting.valuePtr);
     SETTINGS.saveToFile();
   } else if (setting.type == SettingType::VALUE && setting.valuePtr != nullptr) {
     const int8_t cur = SETTINGS.*(setting.valuePtr);
@@ -196,6 +256,11 @@ void ControlsOptionsActivity::toggleCurrentSetting() {
     }
     SETTINGS.saveToFile();
   } else if (setting.type == SettingType::ACTION) {
+    if (setting.action == SettingAction::QuickActions) {
+      startActivityForResult(std::make_unique<QuickActionsActivity>(renderer, mappedInput),
+                             [](const ActivityResult&) { SETTINGS.saveToFile(); });
+      return;
+    }
     if (setting.action == SettingAction::RemapFrontButtons) {
       startActivityForResult(std::make_unique<ButtonRemapActivity>(renderer, mappedInput, false, true),
                              [](const ActivityResult&) { SETTINGS.saveToFile(); });
@@ -332,10 +397,17 @@ void ControlsOptionsActivity::buildOptionsScreen(UiApp::ScreenType& screen) {
 
     const bool isSectionHeader = setting.type == SettingType::SECTION_HEADER;
     fui::ListItem item;
-    item.label =
-        isSectionHeader ? uiListSectionHeaderLabel(values[i], I18N.get(setting.nameId)) : I18N.get(setting.nameId);
+    const fui::BitmapRef directionIcon = twoFingerSwipeIcon(setting.nameId);
+    item.label = isSectionHeader ? uiListSectionHeaderLabel(values[i], I18N.get(setting.nameId))
+                                 : (directionIcon ? "" : I18N.get(setting.nameId));
+    item.icon = directionIcon;
     if (!isSectionHeader && !values[i].empty()) item.value = values[i].c_str();
     item.isHeader = isSectionHeader;
+    item.toggle = !isSectionHeader && setting.type == SettingType::TOGGLE;
+    if (item.toggle) {
+      item.toggleChecked = setting.valuePtr != nullptr && SETTINGS.*(setting.valuePtr) != 0;
+      item.value = nullptr;
+    }
     item.actionValue = static_cast<int16_t>(i);
     items.push_back(item);
   }
@@ -381,8 +453,9 @@ void ControlsOptionsActivity::render(RenderLock&&) {
                                ((*currentSettings)[selectedIndex].type == SettingType::ACTION ||
                                 (*currentSettings)[selectedIndex].type == SettingType::SUBMENU ||
                                 currentSettingUsesOptionMenu((*currentSettings)[selectedIndex]));
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), currentIsAction ? tr(STR_SELECT) : tr(STR_TOGGLE),
-                                            tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels =
+      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), currentIsAction ? tr(STR_SELECT) : tr(STR_TOGGLE),
+                            tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
 
   renderer.displayBuffer();

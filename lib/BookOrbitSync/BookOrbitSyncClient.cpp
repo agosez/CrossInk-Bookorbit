@@ -8,6 +8,7 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <esp_mac.h>
 #ifdef SIMULATOR
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -19,6 +20,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -34,9 +36,23 @@
 int BookOrbitSyncClient::lastHttpCode = 0;
 int BookOrbitSyncClient::lastTransportError = 0;
 
-namespace {
-constexpr char DEVICE_ID[] = "crossink-device";
+const char* BookOrbitSyncClient::deviceId() {
+  static const std::array<char, 24> id = [] {
+    std::array<char, 24> value{};
+    uint8_t mac[6] = {};
+    if (esp_efuse_mac_get_default(mac) != 0) {
+      LOG_ERR("BookOrbit", "Could not read factory MAC; falling back to shared device id");
+      snprintf(value.data(), value.size(), "crossink-device");
+      return value;
+    }
+    snprintf(value.data(), value.size(), "crossink-%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4],
+             mac[5]);
+    return value;
+  }();
+  return id.data();
+}
 
+namespace {
 std::string formatHttpStatusMessage(int httpCode) {
   char buffer[96];
   snprintf(buffer, sizeof(buffer), tr(STR_KOREADER_SYNC_HTTP_STATUS_FORMAT), httpCode);
@@ -135,8 +151,12 @@ constexpr uint32_t MIN_HEAP_FOR_TLS = 55000;
 // full floor would double-count the memory that live TLS session already holds -- it
 // refused affordable uploads whenever a request followed another in the same session
 // (stats after the progress fetch, bookmarks after highlights: measured 54804 free
-// against the 55000 floor). Such a request only needs its JSON bodies and framing; the
-// largest, an annotation batch with its key set, stays under half of this.
+// against the 55000 floor). Such a request only needs its JSON body and framing.
+//
+// This floor bounds the connection's cost, NOT the body's: a caller that builds a body
+// too large for what is left still has to fail gracefully, which is why bodies are
+// measured and allocated without throwing (see JsonBody). Callers keep their batches
+// small for the same reason -- 25 stat events, 8 annotations.
 constexpr uint32_t MIN_HEAP_FOR_KEPT_SESSION = 20000;
 
 // True from the first completed request on the shared session until the Session ends.
@@ -147,6 +167,50 @@ constexpr uint32_t MIN_HEAP_FOR_KEPT_SESSION = 20000;
 bool s_sessionHandshakePaid = false;
 
 uint32_t requiredHeapFloor() { return s_sessionHandshakePaid ? MIN_HEAP_FOR_KEPT_SESSION : MIN_HEAP_FOR_TLS; }
+
+/**
+ * One exactly-sized request body, allocated without throwing.
+ *
+ * Serializing into a std::string costs more than the body: its growth doubles, so
+ * the last reallocation holds both halves at once, and with exceptions disabled a
+ * failed allocation inside it calls abort() rather than returning -- the firmware
+ * dies where it could have reported a failure. That is the measured crash on a
+ * 100-event stats batch: ~8KB of body plus the doubling, admitted by the
+ * kept-session floor and then unaffordable.
+ *
+ * Measuring first costs one pass over the document and turns the same situation
+ * into a LOW_MEMORY return. Build inside the JsonDocument's scope so the node pool
+ * is freed before the request runs; only this buffer stays alive through it.
+ */
+class JsonBody {
+ public:
+  bool build(const JsonDocument& doc) {
+    const size_t length = measureJson(doc);
+    data_ = makeUniqueNoThrow<char[]>(length + 1);
+    if (!data_) {
+      LOG_ERR("BookOrbit", "Out of memory for a %u byte request body (heap: %u free, %u max alloc)",
+              (unsigned)(length + 1), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+      return false;
+    }
+    length_ = serializeJson(doc, data_.get(), length + 1);
+    return true;
+  }
+
+  const char* c_str() const { return data_ ? data_.get() : ""; }
+  const uint8_t* bytes() const { return reinterpret_cast<const uint8_t*>(c_str()); }
+  size_t length() const { return length_; }
+
+  // Frees the body once it has been sent: the response still has to be parsed, and
+  // an exchange's request and response should not be held at once on this hardware.
+  void release() {
+    data_.reset();
+    length_ = 0;
+  }
+
+ private:
+  std::unique_ptr<char[]> data_;
+  size_t length_ = 0;
+};
 
 #ifdef SIMULATOR
 void addAuthHeaders(HTTPClient& http) {
@@ -191,7 +255,7 @@ void configureClient(freeink::SecureHttpClient& http, const bool reuse) {
   http.setInsecure();
 }
 
-int sendBookOrbitRequest(const char* method, const std::string& url, const std::string* payload, std::string& outBody) {
+int sendBookOrbitRequest(const char* method, const std::string& url, const JsonBody* payload, std::string& outBody) {
   outBody.clear();
   const bool pooled = s_session != nullptr;
   freeink::SecureHttpClient oneShot;
@@ -212,7 +276,7 @@ int sendBookOrbitRequest(const char* method, const std::string& url, const std::
   if (payload != nullptr) {
     http.addHeader("Content-Type", "application/json");
   }
-  const int code = payload != nullptr ? http.sendRequest(method, *payload) : http.GET();
+  const int code = payload != nullptr ? http.sendRequest(method, payload->bytes(), payload->length()) : http.GET();
   outBody = http.getString();
   // An HTTP status, even an error one, proves the session's handshake is up and paid
   // for; a transport failure may have closed the socket, so the next request assumes
@@ -444,13 +508,13 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::updateProgress(const KOReaderPro
   doc["progress"] = progress.progress;
   doc["percentage"] = progress.percentage;
   doc["device"] = progress.device;
-  doc["device_id"] = DEVICE_ID;
+  doc["device_id"] = deviceId();
   if (progress.timestamp > 0) {
     doc["timestamp"] = progress.timestamp;
   }
 
-  std::string body;
-  serializeJson(doc, body);
+  JsonBody body;
+  if (!body.build(doc)) return LOW_MEMORY;
 
   LOG_DBG("BookOrbit", "Request body: %s", body.c_str());
 
@@ -526,10 +590,10 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::uploadPageStats(const std::strin
   // payload shape changes.
   // The JsonDocument is scoped so its node pool is freed before the TLS session
   // starts: only the serialized body stays alive through the handshake.
-  std::string body;
+  JsonBody body;
   {
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID;
+    doc["deviceId"] = deviceId();
     doc["deviceModel"] = deviceModel;
     doc["pluginVersion"] = "crossink-bo-1";
     char deviceTime[20] = {};
@@ -547,7 +611,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::uploadPageStats(const std::strin
       event["durationSeconds"] = events[i].durationSeconds;
       event["totalPages"] = events[i].totalPages;
     }
-    serializeJson(doc, body);
+    if (!body.build(doc)) return LOW_MEMORY;
   }
 
 #ifdef SIMULATOR
@@ -591,6 +655,86 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::uploadPageStats(const std::strin
 #endif
 }
 
+BookOrbitSyncClient::Error BookOrbitSyncClient::completeSweep(const std::string& deviceModel,
+                                                              const uint32_t booksMatched,
+                                                              const uint32_t pageStatsUploaded,
+                                                              const uint32_t annotationsUpserted) {
+  lastHttpCode = 0;
+  lastTransportError = 0;
+  if (!BOOKORBIT_STORE.hasCredentials()) {
+    LOG_DBG("BookOrbit", "No credentials configured");
+    return NO_CREDENTIALS;
+  }
+
+  std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/sweeps";
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  LOG_DBG("BookOrbit", "Recording sweep: %s (heap: %u)", url.c_str(), (unsigned)freeHeap);
+  const uint32_t heapFloor = requiredHeapFloor();
+  if (freeHeap < heapFloor) {
+    LOG_ERR("BookOrbit", "Insufficient heap for sync request: %u bytes free (need %u)", freeHeap, heapFloor);
+    return LOW_MEMORY;
+  }
+
+  // See uploadPageStats for why pluginVersion is a literal and the JsonDocument is scoped.
+  JsonBody body;
+  {
+    JsonDocument doc;
+    doc["deviceId"] = deviceId();
+    doc["deviceModel"] = deviceModel;
+    doc["pluginVersion"] = "crossink-bo-1";
+    char deviceTime[20] = {};
+    if (bookOrbitFormatDatetime(static_cast<uint32_t>(time(nullptr)), deviceTime)) {
+      // Optional server-side, but an empty string fails its format validation with HTTP 400
+      // and takes the whole sweep down with it: better omitted when the clock is implausible.
+      doc["deviceTime"] = deviceTime;
+    }
+    doc["booksMatched"] = booksMatched;
+    doc["pageStatsUploaded"] = pageStatsUploaded;
+    doc["annotationsUpserted"] = annotationsUpserted;
+    if (!body.build(doc)) return LOW_MEMORY;
+  }
+
+#ifdef SIMULATOR
+  HTTPClient http;
+  std::unique_ptr<WiFiClientSecure> secureClient;
+  WiFiClient plainClient;
+
+  if (isHttpsUrl(url)) {
+    secureClient.reset(new WiFiClientSecure);
+    secureClient->setInsecure();
+    http.begin(*secureClient, url.c_str());
+  } else {
+    http.begin(plainClient, url.c_str());
+  }
+  addAuthHeaders(http);
+  http.addHeader("Content-Type", "application/json");
+
+  const int httpCode = http.POST(body.c_str());
+  lastHttpCode = httpCode;
+  lastTransportError = (httpCode < 0) ? httpCode : 0;
+  http.end();
+
+  LOG_DBG("BookOrbit", "Sweep response: %d", httpCode);
+
+  if (httpCode >= 200 && httpCode < 300) return OK;
+  if (httpCode == 401) return AUTH_FAILED;
+  if (httpCode < 0) return NETWORK_ERROR;
+  return SERVER_ERROR;
+#else
+  LOG_DBG("BookOrbit", "POST body bytes=%u", static_cast<unsigned>(body.length()));
+  std::string response;
+  const int httpCode = sendBookOrbitRequest("POST", url, &body, response);
+  lastHttpCode = httpCode > 0 ? httpCode : 0;
+  lastTransportError = httpCode < 0 ? httpCode : 0;
+  LOG_DBG("BookOrbit", "Sweep response: %d", httpCode);
+
+  if (httpCode < 0) return NETWORK_ERROR;
+  if (httpCode >= 200 && httpCode < 300) return OK;
+  if (httpCode == 401) return AUTH_FAILED;
+  return SERVER_ERROR;
+#endif
+}
+
 BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
     const std::string& documentHash, const std::string& deviceModel, const BookOrbitAnnotationKeys& keys,
     const BookOrbitAnnotation* changes, const size_t changeCount, bool& outUnmatched,
@@ -619,10 +763,10 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
   // Scoped so the node pool is freed before the TLS session opens: the key list alone can
   // reach a few hundred entries, and only the serialized body has to survive the handshake.
   // See uploadPageStats for why pluginVersion is a literal.
-  std::string body;
+  JsonBody body;
   {
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID;
+    doc["deviceId"] = deviceId();
     doc["deviceModel"] = deviceModel;
     doc["pluginVersion"] = "crossink-bo-1";
 
@@ -655,7 +799,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
       if (!annotation.chapter.empty()) entry["chapter"] = annotation.chapter;
       if (annotation.pageno > 0) entry["pageno"] = annotation.pageno;
     }
-    serializeJson(doc, body);
+    if (!body.build(doc)) return LOW_MEMORY;
   }
 
 #ifdef SIMULATOR
@@ -683,8 +827,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
 #endif
   lastHttpCode = httpCode > 0 ? httpCode : 0;
   lastTransportError = httpCode < 0 ? httpCode : 0;
-  body.clear();
-  body.shrink_to_fit();
+  body.release();
   LOG_DBG("BookOrbit", "Annotation exchange response: %d", httpCode);
 
   if (httpCode < 0) return NETWORK_ERROR;
@@ -792,10 +935,10 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::ackAnnotations(const std::string
     return LOW_MEMORY;
   }
 
-  std::string body;
+  JsonBody body;
   {
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID;
+    doc["deviceId"] = deviceId();
     doc["deviceModel"] = deviceModel;
     doc["pluginVersion"] = "crossink-bo-1";
     JsonArray books = doc["books"].to<JsonArray>();
@@ -815,7 +958,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::ackAnnotations(const std::string
       // No version here: the deletion ack schema does not define the field.
       entry["status"] = "applied";
     }
-    serializeJson(doc, body);
+    if (!body.build(doc)) return LOW_MEMORY;
   }
 
 #ifdef SIMULATOR
@@ -871,10 +1014,10 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeBookmarks(
     return LOW_MEMORY;
   }
 
-  std::string body;
+  JsonBody body;
   {
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID;
+    doc["deviceId"] = deviceId();
     doc["deviceModel"] = deviceModel;
     doc["pluginVersion"] = "crossink-bo-1";
 
@@ -898,7 +1041,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeBookmarks(
       if (!bookmark.chapter.empty()) entry["chapter"] = bookmark.chapter;
       if (bookmark.pageno > 0) entry["pageno"] = bookmark.pageno;
     }
-    serializeJson(doc, body);
+    if (!body.build(doc)) return LOW_MEMORY;
   }
 
 #ifdef SIMULATOR
@@ -926,8 +1069,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeBookmarks(
 #endif
   lastHttpCode = httpCode > 0 ? httpCode : 0;
   lastTransportError = httpCode < 0 ? httpCode : 0;
-  body.clear();
-  body.shrink_to_fit();
+  body.release();
   LOG_DBG("BookOrbit", "Bookmark exchange response: %d", httpCode);
 
   if (httpCode < 0) return NETWORK_ERROR;
@@ -1016,10 +1158,10 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::ackBookmarks(const std::string& 
     return LOW_MEMORY;
   }
 
-  std::string body;
+  JsonBody body;
   {
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID;
+    doc["deviceId"] = deviceId();
     doc["deviceModel"] = deviceModel;
     doc["pluginVersion"] = "crossink-bo-1";
     JsonArray books = doc["books"].to<JsonArray>();
@@ -1043,7 +1185,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::ackBookmarks(const std::string& 
       entry["serverId"] = serverId;
       entry["status"] = "applied";
     }
-    serializeJson(doc, body);
+    if (!body.build(doc)) return LOW_MEMORY;
   }
 
 #ifdef SIMULATOR

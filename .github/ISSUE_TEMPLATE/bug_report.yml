@@ -17,7 +17,9 @@ body:
         - "--- Select ---"
         - X4
         - X3
+        - X4 Pro
         - Seeed Sticky
+        - X4 Pro
     validations:
       required: true
 
@@ -91,7 +93,7 @@ body:
     id: epub-attachment
     attributes:
       label: File Provided
-      description: If your issue is related to a specific file (EPUB, XTC, etc.), please make sure to attach the exact file in this ticket or email it to julia@uxj.io and reference your issue number. **_EPUBs and XTC files need to be zipped to be attached._**
+      description: If your issue is related to a specific file (EPUB, XTC, etc.), please make sure to attach the exact file in this ticket.
       options:
         - "--- Select ---"
         - Not Applicable

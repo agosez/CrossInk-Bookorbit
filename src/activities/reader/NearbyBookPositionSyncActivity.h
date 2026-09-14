@@ -86,6 +86,9 @@ class NearbyBookPositionSyncActivity final : public Activity {
   bool sourceMode_ = false;
   bool localPositionSent_ = false;
   bool localPositionAcked_ = false;
+  bool ignoreInitialBackRelease_ = false;
+  bool ignoreInitialConfirmRelease_ = false;
+  bool ignoreInitialPowerRelease_ = false;
 
   std::shared_ptr<Epub> epub_;
   std::string epubPath_;
@@ -128,6 +131,8 @@ class NearbyBookPositionSyncActivity final : public Activity {
   bool applyPeerPosition();
   bool mapPeerPosition();
   void updateSyncProgress();
+  void captureInitialInput();
+  bool consumeInitialInputRelease();
   void returnToReader(bool suppressBackRelease = false);
   void setState(State state);
   void setError(const std::string& error);

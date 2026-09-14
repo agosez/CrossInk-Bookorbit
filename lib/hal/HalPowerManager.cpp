@@ -109,13 +109,31 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio, const bool keepPowerLatched)
   // while awake (nothing else drives them), so the rail stays up, the ESP32 enters a real
   // deep sleep and the RTC timer keeps counting — wall-clock time survives. The cost is
   // standby current, hence the opt-in setting.
-  for (const int8_t pin : keepPowerLatched ? std::initializer_list<int8_t>{}
-                                           : std::initializer_list<int8_t>{BoardConfig::ACTIVE.power.latch0,
-                                                                           BoardConfig::ACTIVE.power.latch1}) {
+  //
+  // The gate is a plain `if` on purpose. Selecting between two std::initializer_list
+  // temporaries with `?:` is undefined behaviour: the list's backing array does not
+  // outlive the conditional, GCC drops the stores into it as dead, and the loop then
+  // reads uninitialized stack — the latch was never released, for either setting value.
+  if (!keepPowerLatched) {
+    for (const int8_t pin : {BoardConfig::ACTIVE.power.latch0, BoardConfig::ACTIVE.power.latch1}) {
+      if (pin < 0 || BoardConfig::latchConflictsWithBus(pin)) continue;
+      const auto latch = static_cast<gpio_num_t>(pin);
+      gpio_set_direction(latch, GPIO_MODE_OUTPUT);
+      gpio_set_level(latch, 0);
+      gpio_hold_en(latch);
+    }
+  }
+#else
+  // Keep configured power latches asserted through deep sleep. The SDK isolates
+  // GPIO pads before sleeping, so an unheld latch can float LOW once external
+  // power is removed and turn a fast wake into a cold boot. This is deliberately
+  // complementary to the C3 path above, where the battery latch must go LOW.
+  for (const int8_t pin : {BoardConfig::ACTIVE.power.latch0, BoardConfig::ACTIVE.power.latch1}) {
     if (pin < 0 || BoardConfig::latchConflictsWithBus(pin)) continue;
     const auto latch = static_cast<gpio_num_t>(pin);
+    gpio_hold_dis(latch);
     gpio_set_direction(latch, GPIO_MODE_OUTPUT);
-    gpio_set_level(latch, 0);
+    gpio_set_level(latch, 1);
     gpio_hold_en(latch);
   }
 #endif
@@ -165,6 +183,27 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
   }
   return _batteryCachedPercent / 10;
 }
+
+#if CROSSINK_BATTERY_DIAG_LOG
+bool HalPowerManager::getBatteryDiagnostics(BatteryDiagnostics& out) const {
+  // Function-local like getBatteryPercentage()'s: BoardConfig::ACTIVE is only
+  // resolved once HalGPIO::begin() has run the X3/X4 probe, so a file-scope
+  // instance could be constructed against an unresolved profile.
+  static const BatteryMonitor battery;
+  const BatteryMonitor::Status status = battery.readStatus();
+  if (!status.supported) {
+    LOG_ERR("PWR", "Battery diagnostics unsupported on this board");
+    return false;
+  }
+  out.soc = status.percentage;
+  out.millivolts = status.millivolts;
+  out.charging = status.charging;
+  out.socKnown = status.percentageKnown;
+  out.millivoltsKnown = status.millivoltsKnown;
+  out.chargingKnown = status.chargingKnown;
+  return true;
+}
+#endif
 
 HalPowerManager::Lock::Lock() {
   xSemaphoreTake(powerManager.modeMutex, portMAX_DELAY);

@@ -8,6 +8,8 @@ nav_order: 2
 ## Supported Devices
 
 - Xteink X3, X4
+- Xteink X4 Pro
+- Xteink X4 Classic
 - Seeed Studio Sticky
 
 ## Firmware Files
@@ -29,6 +31,13 @@ arrive over the air.
 3. Give it the downloaded `firmware-*.bin` and start the flash, keeping the reader
    connected through the download-mode and flashing steps.
 
+## USB Drive
+
+On X4 Pro, choose `Home > File Transfer > USB Drive` to expose the SD card to
+your computer. Eject the drive from the computer before disconnecting it; the
+reader restarts to Home when the drive is safely ejected or the cable is
+removed.
+
 ## SD Card Firmware Update
 
 #### For a device that already runs CrossInk (upstream or this fork). Works on USB-locked devices.
@@ -43,8 +52,10 @@ arrive over the air.
 Flash an upstream build with CrossInk's own
 [web installer](https://inky.crossink.dev/#flash-tools), or place an upstream
 `firmware-*.bin` on the SD card and use the SD Card Firmware Update above. Settings,
-books, reading progress, highlights and bookmarks live on the SD card and survive the
-swap in both directions.
+books and reading progress live on the SD card and survive the swap in both directions.
+Highlights and bookmarks stay stored too, but upstream does not read the content-keyed
+files this fork keeps them in, so they are invisible there — everything returns when the
+fork is flashed back.
 
 ## Command Line
 

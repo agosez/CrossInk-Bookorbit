@@ -7,7 +7,26 @@
 
 #include "NaturalSort.h"
 
+class HalFile;
+
 namespace FsHelpers {
+
+// True when the last openNextFile() returned no entry because the wrapper
+// allocation or underlying directory read failed, rather than normal EOF.
+bool directoryIterationFailed(const HalFile& directory);
+
+// Validates that a directory can be walked to normal EOF.
+bool directoryCanBeEnumerated(const char* path);
+
+enum class DirectoryEntryVisibility { Visible, Missing, IterationFailed };
+
+// Checks whether a direct child is reachable through normal directory
+// enumeration, using its stored name in case FAT normalized the requested path.
+DirectoryEntryVisibility directoryEntryVisibility(const char* directoryPath, const char* entryPath);
+
+// Resolves a direct child of the SD-card root regardless of ASCII case and
+// writes its on-disk path to resolvedPath.
+bool resolveRootDirectoryIgnoreCase(const char* expectedPath, char* resolvedPath, size_t resolvedPathSize);
 
 std::string decodeUriEscapes(const std::string& path);
 

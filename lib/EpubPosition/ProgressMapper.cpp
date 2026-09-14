@@ -315,12 +315,27 @@ class ParagraphStreamer final : public Print {
   int stepEnteredAtDepth[MAX_XPATH_DEPTH] = {};
 
   // Tag name accumulation
-  enum TagParseState { TAG_IDLE, TAG_IN_NAME, TAG_ATTRS } tagState = TAG_IDLE;
+  enum TagParseState { TAG_IDLE, TAG_IN_NAME, TAG_ATTRS, TAG_DECL } tagState = TAG_IDLE;
   bool tagIsClose = false;
   char tagName[12] = {};
   int tagNameLen = 0;
 
+  // <!...>, <?...?> and <!-- ... --> are not elements: Expat-based counters skip them
+  // wholesale, so treating them as open tags here would desync htmlDepth (they never
+  // close) and a '/' inside a comment would pop it. A comment only ends at '-->'.
+  bool declIsComment = false;
+  uint8_t declSeen = 0;     // declaration bytes seen so far (saturates at 2)
+  uint8_t declDashRun = 0;  // consecutive '-' immediately before the current byte
+
   int matchedDepth = 0;
+
+  // Second reading of the char offset, kept alongside the strict text()[N]+char one:
+  // KOReader's crengine counts its offset across the target element's flattened text
+  // (inline markup transparent), so when the strict reading runs out of text node N
+  // before the element closes, this one still identifies the sender's position.
+  size_t elementEntryVisChars = 0;  // totalVisChars when the target element was entered
+  size_t flatVisChars = 0;          // visible chars seen inside it, across all text nodes
+  size_t flatTargetVisChars = 0;    // totalVisChars where the flattened reading hit revChar
 
   // Anchor ID capture
   static constexpr int MAX_ANCHOR_ID = 64;
@@ -474,6 +489,14 @@ class ParagraphStreamer final : public Print {
   void onVisibleCodepoint() {
     totalVisChars++;
     if (revPFound && !revDone) {
+      // Flattened reading: every visible char inside the matched element counts,
+      // whichever text node it is in.
+      if (stepCount > 0 && matchedDepth == stepCount) {
+        flatVisChars++;
+        if (flatTargetVisChars == 0 && revChar > 0 && flatVisChars >= static_cast<size_t>(revChar)) {
+          flatTargetVisChars = totalVisChars;
+        }
+      }
       // Ancestry mode: count only while inside the fully-matched element and in the target text node.
       // Legacy mode: count only while still inside the matched paragraph and in the target text node.
       const bool inTargetNode = (stepCount > 0) ? (matchedDepth == stepCount && currentTextNode == targetTextNode)
@@ -503,11 +526,19 @@ class ParagraphStreamer final : public Print {
 
   void finishEntity() {
     entityBuffer[entityLen] = '\0';
-    const char* resolved = lookupHtmlEntity(entityBuffer, entityLen);
-    if (resolved)
-      onVisibleText(resolved);
-    else
-      flushEntityAsLiteral();
+    // A numeric character reference (&#8217; / &#xE9;) is one codepoint. The lookup table
+    // only knows named entities, and counting the reference's raw characters instead would
+    // inflate every offset this streamer reports relative to the Expat-based counters that
+    // wrote the xpath being resolved — enough to land pages off on entity-heavy books.
+    if (entityLen > 2 && entityBuffer[1] == '#') {
+      onVisibleCodepoint();
+    } else {
+      const char* resolved = lookupHtmlEntity(entityBuffer, entityLen);
+      if (resolved)
+        onVisibleText(resolved);
+      else
+        flushEntityAsLiteral();
+    }
     globalInEntity = false;
     entityLen = 0;
   }
@@ -568,6 +599,9 @@ class ParagraphStreamer final : public Print {
             revPFound = true;
             capturedAnchorIdLen = 0;
             revVisChars = 0;
+            elementEntryVisChars = totalVisChars;
+            flatVisChars = 0;
+            flatTargetVisChars = 0;
             currentTextNode = 1;  // Reset text node counter for this element
             if (revChar <= 0 && targetTextNode <= 1) {
               targetVisChars = totalVisChars;
@@ -617,9 +651,13 @@ class ParagraphStreamer final : public Print {
       if (insideStep[step] && htmlDepth == stepEnteredAtDepth[step]) {
         insideStep[step] = false;
         matchedDepth--;
-        // If the fully-matched element just closed without finding the target, abort.
         if (matchedDepth < stepCount && revPFound && !revDone) {
-          revPFound = false;
+          // The element closed before text()[N]+char matched. A crengine sender (KOReader)
+          // counts its char offset across the element's flattened text, so fall back to
+          // that reading; failing that, the element's start still beats giving up, which
+          // would silently degrade the whole position to the byte-estimate fallback.
+          targetVisChars = flatTargetVisChars ? flatTargetVisChars : elementEntryVisChars + 1;
+          revDone = true;
         }
         for (int i = matchedDepth + 1; i < stepCount; i++) {
           siblingCounters[i] = 0;
@@ -637,12 +675,20 @@ class ParagraphStreamer final : public Print {
         if (c == '/') {
           tagIsClose = true;
           tagState = TAG_IN_NAME;
-        } else if (c != '!' && c != '?') {
+        } else if (c == '!' || c == '?') {
+          tagState = TAG_DECL;
+          declIsComment = false;
+          declSeen = 0;
+          declDashRun = 0;
+        } else {
           tagIsClose = false;
           tagName[0] = static_cast<char>(c);
           tagNameLen = 1;
           tagState = TAG_IN_NAME;
         }
+        break;
+      case TAG_DECL:
+        // Handled in write(); nothing to do here.
         break;
       case TAG_IN_NAME:
         if (c == '>' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '/') {
@@ -730,6 +776,26 @@ class ParagraphStreamer final : public Print {
       return 1;
     }
 
+    if (globalInTag && tagState == TAG_DECL) {
+      // Swallow the declaration/comment body: no element events, no visible text,
+      // and '<' or '/' inside it must not restart or pop tag parsing.
+      if (c == '>' && (!declIsComment || declDashRun >= 2)) {
+        globalInTag = false;
+        tagState = TAG_IDLE;
+      } else {
+        if (declSeen < 2) {
+          declSeen++;
+          if (c != '-') {
+            declSeen = 2;  // first two bytes decide; anything else rules a comment out
+          } else if (declSeen == 2) {
+            declIsComment = true;
+          }
+        }
+        declDashRun = (c == '-') ? static_cast<uint8_t>(declDashRun < 255 ? declDashRun + 1 : 255) : 0;
+      }
+      return 1;
+    }
+
     if (c == '<') {
       globalInTag = true;
       tagState = TAG_IDLE;
@@ -792,7 +858,15 @@ class ParagraphStreamer final : public Print {
 
 bool streamSpine(const std::shared_ptr<Epub>& epub, int spineIndex, ParagraphStreamer& s) {
   const auto href = epub->getSpineItem(spineIndex).href;
-  return !href.empty() && epub->readItemContentsToStream(href, s, 1024);
+  if (href.empty()) {
+    LOG_DBG("PM", "streamSpine: no href for spine %d", spineIndex);
+    return false;
+  }
+  const bool ok = epub->readItemContentsToStream(href, s, 1024);
+  if (!ok) {
+    LOG_DBG("PM", "streamSpine: read failed for %s", href.c_str());
+  }
+  return ok;
 }
 }  // namespace
 

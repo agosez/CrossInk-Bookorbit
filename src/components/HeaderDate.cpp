@@ -26,7 +26,7 @@ char dateSeparatorChar() {
   }
 }
 
-bool formatHeaderDate(char* buf, const size_t len) {
+bool formatHeaderDateImpl(char* buf, const size_t len) {
   if (!halClock.isAvailable()) return false;
   if (!SETTINGS.clockDateHasBeenSynced) return false;
 #if defined(SIMULATOR) && !defined(CROSSPOINT_SIMULATOR_HAS_DATE_FORMAT)
@@ -52,9 +52,11 @@ bool formatHeaderDate(char* buf, const size_t len) {
 }
 }  // namespace
 
+bool formatHeaderDateText(char* buffer, const size_t length) { return formatHeaderDateImpl(buffer, length); }
+
 int headerDateReservedWidth(const GfxRenderer& renderer) {
   char dateBuf[13];
-  if (!formatHeaderDate(dateBuf, sizeof(dateBuf))) return 0;
+  if (!formatHeaderDateImpl(dateBuf, sizeof(dateBuf))) return 0;
 
   return renderer.getTextWidth(UI_10_FONT_ID, dateBuf) + kHeaderDateRightInset;
 }
@@ -77,7 +79,7 @@ void drawHeaderDateAtLineBottom(const GfxRenderer& renderer, const int pageWidth
 
 void drawHeaderDateAtBaseline(const GfxRenderer& renderer, const int pageWidth, const int baselineY) {
   char dateBuf[13];
-  if (!formatHeaderDate(dateBuf, sizeof(dateBuf))) return;
+  if (!formatHeaderDateImpl(dateBuf, sizeof(dateBuf))) return;
 
   constexpr int dateFontId = UI_10_FONT_ID;
   const int textWidth = renderer.getTextWidth(dateFontId, dateBuf);

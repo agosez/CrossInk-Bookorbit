@@ -19,7 +19,7 @@
 #include "components/TouchRegistry.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
-#include "components/icons/chart.h"
+#include "components/icons/readingStatsIcons.h"
 #include "fontIds.h"
 
 // Internal constants
@@ -40,7 +40,7 @@ int centeredRowY(const int rowY, const int rowHeight, const int contentHeight) {
 int mainMenuIconYOffset(const UIIcon icon) {
   switch (icon) {
     case UIIcon::Chart:
-      return -7;
+      return -6;
     case UIIcon::Folder:
       return -4;
     case UIIcon::Recent:
@@ -76,6 +76,8 @@ const freeink::Icon* LyraTheme::iconForName(UIIcon icon, uint32_t size) {
     }
   } else if (size == 32) {
     switch (icon) {
+      case UIIcon::Chart:
+        return &icon_reading_stats_32;
       case UIIcon::Folder:
         return &icon_folder_32;
       case UIIcon::Book:
@@ -394,7 +396,7 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
       renderer.fillRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, cornerRadius, Color::White);
       renderer.drawRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, 1, cornerRadius, true, true, false,
                                false, true);
-    } else {
+    } else if (labels[i] != nullptr) {
       // Clear the previous full-sized hint before drawing the inactive marker.
       // Dictionary chaining can otherwise leave its old label visible.
       renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, false);
@@ -624,7 +626,7 @@ void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
                                const std::function<UIIcon(int index)>& rowIcon) const {
   const auto& menuMetrics = UITheme::getInstance().getMetrics();
 
-  constexpr int maxVisibleItems = 7;
+  constexpr int maxVisibleItems = kMenuPageItems;
   const int pageItems = maxVisibleItems;
   const int totalPages = (buttonCount + pageItems - 1) / pageItems;
 
@@ -682,9 +684,6 @@ void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
         const int polyY[5] = {iconY, iconY, iconY + ribbonHeight, iconY + ribbonHeight - notchSize,
                               iconY + ribbonHeight};
         renderer.fillPolygon(polyX, polyY, 5, true);
-        textX += mainMenuIconSize + hPaddingInSelection + 2;
-      } else if (icon == UIIcon::Chart) {
-        renderer.drawIcon(ChartIcon, textX, textY + 3 + mainMenuIconYOffset(icon), mainMenuIconSize, mainMenuIconSize);
         textX += mainMenuIconSize + hPaddingInSelection + 2;
       } else {
         const freeink::Icon* iconBitmap = iconForName(icon, mainMenuIconSize);

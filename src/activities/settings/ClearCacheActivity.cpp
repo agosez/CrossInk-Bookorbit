@@ -5,11 +5,30 @@
 #include <I18n.h>
 #include <Logging.h>
 
+#include <algorithm>
+
 #include "MappedInputManager.h"
+#include "components/TouchActionButtons.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
+
+namespace {
+
+TouchActionButtons::Layout touchActionLayout(const GfxRenderer& renderer) {
+  auto& theme = UITheme::getInstance();
+  const auto& metrics = theme.getMetrics();
+  const Rect screen = theme.getScreenSafeArea(renderer, true, false);
+  constexpr int buttonCount = 2;
+  const int totalHeight = TouchActionButtons::kDefaultHeight * buttonCount + TouchActionButtons::kDefaultGap;
+  const Rect container{screen.x + metrics.contentSidePadding,
+                       screen.y + screen.height - metrics.verticalSpacing - totalHeight,
+                       std::max(1, screen.width - metrics.contentSidePadding * 2), totalHeight};
+  return TouchActionButtons::vertical(container, buttonCount);
+}
+
+}  // namespace
 
 void ClearCacheActivity::onEnter() {
   Activity::onEnter();
@@ -41,8 +60,14 @@ void ClearCacheActivity::render(RenderLock&&) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_CLEAR_CACHE_WARNING_3), true);
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 30, tr(STR_CLEAR_CACHE_WARNING_4), true);
 
-    const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_CLEAR_BUTTON), "", "");
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    if (mappedInput.hasTouch()) {
+      const auto actions = touchActionLayout(renderer);
+      const char* labels[] = {tr(STR_CLEAR_BUTTON), tr(STR_CANCEL)};
+      TouchActionButtons::draw(renderer, actions, labels, 0, -1, UI_10_FONT_ID);
+    } else {
+      const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_CLEAR_BUTTON), "", "");
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    }
     renderer.displayBuffer();
     return;
   }
@@ -61,7 +86,7 @@ void ClearCacheActivity::render(RenderLock&&) {
     }
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, resultText.c_str());
 
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
     return;
@@ -72,7 +97,7 @@ void ClearCacheActivity::render(RenderLock&&) {
                               EpdFontFamily::BOLD);
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 10, tr(STR_CHECK_SERIAL_OUTPUT));
 
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
     return;
@@ -124,28 +149,49 @@ void ClearCacheActivity::clearCache() {
   requestUpdate();
 }
 
+void ClearCacheActivity::startClearing() {
+  {
+    RenderLock lock(*this);
+    state = CLEARING;
+  }
+  if (requestUpdateAndWait() != RequestUpdateResult::Rendered) {
+    LOG_ERR("CLEAR_CACHE", "Clearing cache screen could not be rendered synchronously; aborting cache clear");
+    {
+      RenderLock lock(*this);
+      state = FAILED;
+    }
+    requestUpdate(true);
+    return;
+  }
+
+  clearCache();
+}
+
 void ClearCacheActivity::loop() {
   if (state != CLEARING && TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
     goBack();
     return;
   }
   if (state == WARNING) {
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      {
-        RenderLock lock(*this);
-        state = CLEARING;
-      }
-      if (requestUpdateAndWait() != RequestUpdateResult::Rendered) {
-        LOG_ERR("CLEAR_CACHE", "Clearing cache screen could not be rendered synchronously; aborting cache clear");
-        {
-          RenderLock lock(*this);
-          state = FAILED;
-        }
-        requestUpdate(true);
+    int x = 0;
+    int y = 0;
+    if (mappedInput.hasTouch() && mappedInput.wasScreenTouchDown(x, y)) {
+      const int action = TouchActionButtons::indexAt(touchActionLayout(renderer), x, y);
+      if (action == 0) {
+        mappedInput.suppressNextTouchTap();
+        startClearing();
         return;
       }
+      if (action == 1) {
+        mappedInput.suppressNextTouchTap();
+        goBack();
+        return;
+      }
+    }
 
-      clearCache();
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      startClearing();
+      return;
     }
 
     if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {

@@ -63,6 +63,10 @@ bool BookOrbitStatsQueue::appendBatch(const std::string& bookCachePath, const st
   if (events.empty()) {
     return true;
   }
+  if (bookCachePath.empty()) {
+    LOG_ERR("BOQ", "No state directory for this book; dropping %u event(s)", (unsigned)events.size());
+    return false;
+  }
   const std::string path = queuePath(bookCachePath);
 
   // Never append onto a queue with an old/foreign header: readAll() would discard
@@ -148,6 +152,48 @@ bool BookOrbitStatsQueue::readAll(const std::string& bookCachePath, std::vector<
 
   BookOrbitStatEvent event;
   while (outEvents.size() < MAX_QUEUED_EVENTS && file.read(&event, sizeof(event)) == sizeof(event)) {
+    outEvents.push_back(event);
+  }
+  file.close();
+  return true;
+}
+
+bool BookOrbitStatsQueue::readRange(const std::string& bookCachePath, const size_t firstIndex, const size_t maxEvents,
+                                    std::vector<BookOrbitStatEvent>& outEvents) {
+  outEvents.clear();
+  if (maxEvents == 0 || firstIndex >= MAX_QUEUED_EVENTS) {
+    return true;
+  }
+  const std::string path = queuePath(bookCachePath);
+  if (!Storage.exists(path.c_str())) {
+    return true;
+  }
+
+  FsFile file;
+  if (!Storage.openFileForRead("BOQ", path.c_str(), file)) {
+    return false;
+  }
+
+  char magic[4];
+  if (file.read(magic, sizeof(magic)) != sizeof(magic) || memcmp(magic, QUEUE_MAGIC, sizeof(QUEUE_MAGIC)) != 0) {
+    LOG_ERR("BOQ", "Old or bad stats queue header, discarding queue: %s", path.c_str());
+    file.close();
+    Storage.remove(path.c_str());
+    return true;
+  }
+
+  if (!file.seek(sizeof(QUEUE_MAGIC) + firstIndex * sizeof(BookOrbitStatEvent))) {
+    LOG_ERR("BOQ", "Failed to seek stats queue to event %u: %s", (unsigned)firstIndex, path.c_str());
+    file.close();
+    return false;
+  }
+
+  // Never read past the cap readAll() enforces, so both paths agree on what the
+  // queue contains even if a file from a future format grew beyond it.
+  const size_t wanted = std::min(maxEvents, MAX_QUEUED_EVENTS - firstIndex);
+  outEvents.reserve(wanted);
+  BookOrbitStatEvent event;
+  while (outEvents.size() < wanted && file.read(&event, sizeof(event)) == sizeof(event)) {
     outEvents.push_back(event);
   }
   file.close();

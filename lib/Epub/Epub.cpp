@@ -13,12 +13,16 @@
 #include <ZipFile.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <string_view>
 #include <utility>
 
+#include "Epub/image/OptimizerCachePublish.h"
+#include "Epub/image/OptimizerIndex.h"
 #include "Epub/parsers/ContainerParser.h"
 #include "Epub/parsers/ContentOpfParser.h"
 #include "Epub/parsers/TocNavParser.h"
@@ -31,6 +35,19 @@ constexpr char kXLocationsFormat[] = "x-locations";
 constexpr char kLegacyXLocationsFormat[] = "crossink-locations";
 constexpr size_t kXLocationsMaxBytes = 64 * 1024;
 constexpr uint32_t kDefaultReferenceCharactersPerPage = 1500;
+constexpr char kOptimizerManifestPath[] = "META-INF/crossink/optimizer-v1.json";
+constexpr char kOptimizerManifestFormat[] = "crossink-optimizer";
+constexpr size_t kOptimizerManifestMaxBytes = 64 * 1024;
+constexpr size_t kOptimizerMaxPxcBytes = 4 + 128 * 1024;
+constexpr uint16_t kOptimizerMaxPxcDimension = 1024;
+constexpr size_t kOptimizerMaxPxcRowBytes = (kOptimizerMaxPxcDimension + 3) / 4;
+// Legacy sidecar inflation borrows framebuffer scratch during page preflight.
+// Keep the remaining ZIP input/output allocations bounded.
+constexpr size_t kOptimizerPxcExtractionChunkSize = 256;
+// The parser is single-threaded. Static row buffers avoid a cold-path heap
+// allocation and cap resize working memory at 512 bytes.
+uint8_t optimizerSourceRow[kOptimizerMaxPxcRowBytes];
+uint8_t optimizerTargetRow[kOptimizerMaxPxcRowBytes];
 
 bool isSupportedLocationsFormat(const char* format) {
   return std::strcmp(format, kXLocationsFormat) == 0 || std::strcmp(format, kLegacyXLocationsFormat) == 0;
@@ -81,6 +98,116 @@ void buildXLocationsJsonFilter(JsonDocument& filter) {
   range["count"] = true;
 }
 
+void buildOptimizerManifestJsonFilter(JsonDocument& filter) {
+  JsonObject root = filter.to<JsonObject>();
+  root["format"] = true;
+  root["version"] = true;
+  JsonArray images = root["images"].to<JsonArray>();
+  JsonObject image = images.add<JsonObject>();
+  image["href"] = true;
+  image["pxc"] = true;
+  image["width"] = true;
+  image["height"] = true;
+  image["pxcFormat"] = true;
+  image["pxcBytes"] = true;
+  image["pixelCrc32"] = true;
+}
+
+bool isSafeOptimizerPxcPath(const std::string_view path) {
+  static constexpr char prefix[] = "META-INF/crossink/pxc/";
+  return path.rfind(prefix, 0) == 0 && path.find("..") == std::string::npos;
+}
+
+bool isSafeOptimizerImagePath(const std::string_view path) {
+  return !path.empty() && path.front() != '/' && path.find("..") == std::string::npos;
+}
+
+size_t pxcByteCount(const uint16_t width, const uint16_t height) {
+  return 4U + static_cast<size_t>((width + 3) / 4) * static_cast<size_t>(height);
+}
+
+bool readOptimizerImageMetadata(JsonObjectConst image, const size_t maxHrefLength, const size_t maxPxcHrefLength,
+                                const char*& href, const char*& pxcHref, uint16_t& width, uint16_t& height) {
+  href = image["href"] | "";
+  pxcHref = image["pxc"] | "";
+  const int rawWidth = image["width"] | 0;
+  const int rawHeight = image["height"] | 0;
+  const size_t hrefLength = std::strlen(href);
+  const size_t pxcHrefLength = std::strlen(pxcHref);
+  if (!isSafeOptimizerImagePath(href) || !isSafeOptimizerPxcPath(pxcHref) || rawWidth <= 0 || rawHeight <= 0 ||
+      rawWidth > kOptimizerMaxPxcDimension || rawHeight > kOptimizerMaxPxcDimension ||
+      pxcByteCount(static_cast<uint16_t>(rawWidth), static_cast<uint16_t>(rawHeight)) > kOptimizerMaxPxcBytes ||
+      hrefLength > maxHrefLength || pxcHrefLength > maxPxcHrefLength) {
+    return false;
+  }
+  width = static_cast<uint16_t>(rawWidth);
+  height = static_cast<uint16_t>(rawHeight);
+  return true;
+}
+
+bool readPxcHeader(FsFile& file, uint16_t& width, uint16_t& height) {
+  return file.read(&width, sizeof(width)) == sizeof(width) && file.read(&height, sizeof(height)) == sizeof(height);
+}
+
+bool rescalePxcFile(const std::string& sourcePath, const std::string& destinationPath, const int expectedWidth,
+                    const int expectedHeight) {
+  FsFile source;
+  if (!Storage.openFileForRead("EBP", sourcePath, source)) return false;
+  uint16_t sourceWidth = 0;
+  uint16_t sourceHeight = 0;
+  if (!readPxcHeader(source, sourceWidth, sourceHeight) || sourceWidth == 0 || sourceHeight == 0 ||
+      sourceWidth > kOptimizerMaxPxcDimension || sourceHeight > kOptimizerMaxPxcDimension ||
+      source.size() != pxcByteCount(sourceWidth, sourceHeight)) {
+    LOG_ERR("EBP", "Invalid optimizer PXC resize source: %s", sourcePath.c_str());
+    source.close();
+    return false;
+  }
+
+  const size_t sourceRowBytes = (sourceWidth + 3) / 4;
+  const size_t targetRowBytes = (expectedWidth + 3) / 4;
+  if (sourceRowBytes > sizeof(optimizerSourceRow) || targetRowBytes > sizeof(optimizerTargetRow)) {
+    source.close();
+    return false;
+  }
+
+  const std::string tempDestination = destinationPath + ".optimizer.tmp";
+  Storage.remove(tempDestination.c_str());
+  FsFile destination;
+  if (!Storage.openFileForWrite("EBP", tempDestination, destination)) {
+    source.close();
+    return false;
+  }
+  const uint16_t targetWidth = static_cast<uint16_t>(expectedWidth);
+  const uint16_t targetHeight = static_cast<uint16_t>(expectedHeight);
+  bool ok = destination.write(&targetWidth, sizeof(targetWidth)) == sizeof(targetWidth) &&
+            destination.write(&targetHeight, sizeof(targetHeight)) == sizeof(targetHeight);
+  int loadedSourceRow = -1;
+  for (int targetY = 0; ok && targetY < expectedHeight; targetY++) {
+    const int wantedSourceRow = static_cast<int>((static_cast<int64_t>(targetY) * sourceHeight) / expectedHeight);
+    while (ok && loadedSourceRow < wantedSourceRow) {
+      ok = source.read(optimizerSourceRow, sourceRowBytes) == static_cast<int>(sourceRowBytes);
+      loadedSourceRow++;
+    }
+    if (!ok) break;
+    memset(optimizerTargetRow, 0, targetRowBytes);
+    for (int targetX = 0; targetX < expectedWidth; targetX++) {
+      const int sourceX = static_cast<int>((static_cast<int64_t>(targetX) * sourceWidth) / expectedWidth);
+      const uint8_t value = (optimizerSourceRow[sourceX >> 2] >> (6 - ((sourceX & 3) * 2))) & 0x03;
+      optimizerTargetRow[targetX >> 2] |= static_cast<uint8_t>(value << (6 - ((targetX & 3) * 2)));
+    }
+    ok = destination.write(optimizerTargetRow, targetRowBytes) == targetRowBytes;
+  }
+  ok = source.close() && ok;
+  const std::string backup = destinationPath + ".optimizer.previous";
+  ok = OptimizerFormat::finishCache(destination, Storage, ok, tempDestination.c_str(), destinationPath.c_str(),
+                                    backup.c_str());
+  if (!ok) {
+    LOG_ERR("EBP", "Failed to publish resized optimizer image cache");
+    Storage.remove(tempDestination.c_str());
+  }
+  return ok;
+}
+
 float clampUnit(const float value) {
   if (value <= 0.0f) {
     return 0.0f;
@@ -105,8 +232,9 @@ void normalizeThumbDimensions(int& width, int& height) {
   }
 }
 
-std::unique_ptr<BookMetadataCache> makeBookMetadataCacheNoThrow(const std::string& cachePath) {
-  auto cache = makeUniqueNoThrow<BookMetadataCache>(cachePath);
+std::unique_ptr<BookMetadataCache> makeBookMetadataCacheNoThrow(const std::string& cachePath,
+                                                                const bool cacheCumulativeSpineSizes) {
+  auto cache = makeUniqueNoThrow<BookMetadataCache>(cachePath, cacheCumulativeSpineSizes);
   if (!cache) {
     LOG_ERR("EBP", "OOM: BookMetadataCache (%u free, %u max alloc)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   }
@@ -244,6 +372,118 @@ class CoverImageRefScanner final : public Print {
     }
   }
 };
+
+class ContentsDocumentScanner final : public Print {
+ public:
+  bool isContentsDocument() const { return contentsDocument; }
+
+  size_t write(const uint8_t data) override { return write(&data, 1); }
+
+  size_t write(const uint8_t* buffer, const size_t size) override {
+    for (size_t index = 0; index < size; index++) {
+      if (scannedBytes >= kMaxScanBytes || contentsDocument) return index;
+      consume(static_cast<char>(buffer[index]));
+      scannedBytes++;
+    }
+    return size;
+  }
+
+ private:
+  static constexpr size_t kMaxScanBytes = 8 * 1024;
+  static constexpr size_t kMaxTagLength = 192;
+  static constexpr size_t kMaxLabelLength = 64;
+
+  char tag[kMaxTagLength] = {};
+  char label[kMaxLabelLength] = {};
+  size_t tagLength = 0;
+  size_t labelLength = 0;
+  size_t scannedBytes = 0;
+  bool insideTag = false;
+  bool collectingLabel = false;
+  bool contentsDocument = false;
+
+  static bool hasTocTypeAttribute(const char* tag) {
+    for (const char* attr = tag; (attr = std::strstr(attr, "type")) != nullptr; attr += 4) {
+      const char preceding = attr == tag ? ' ' : attr[-1];
+      if (preceding != ' ' && preceding != '\t' && preceding != '\r' && preceding != '\n' && preceding != ':') {
+        continue;
+      }
+      const char* value = attr + 4;
+      while (std::isspace(static_cast<unsigned char>(*value))) value++;
+      if (*value++ != '=') continue;
+      while (std::isspace(static_cast<unsigned char>(*value))) value++;
+      const char quote = *value == '\'' || *value == '\"' ? *value++ : '\0';
+      if (std::strncmp(value, "toc", 3) != 0) continue;
+      const char terminator = value[3];
+      if ((quote && terminator == quote) ||
+          (!quote && (terminator == '\0' || std::isspace(static_cast<unsigned char>(terminator))))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void clearLabel() {
+    labelLength = 0;
+    label[0] = '\0';
+  }
+
+  void appendLabel(const char c) {
+    if (labelLength + 1 >= kMaxLabelLength) return;
+    const unsigned char byte = static_cast<unsigned char>(c);
+    if (std::isspace(byte)) {
+      if (labelLength == 0 || label[labelLength - 1] == ' ') return;
+      label[labelLength++] = ' ';
+    } else {
+      label[labelLength++] = static_cast<char>(std::tolower(byte));
+    }
+    label[labelLength] = '\0';
+  }
+
+  void finishTag() {
+    tag[tagLength] = '\0';
+    const char* name = tag;
+    while (*name == ' ' || *name == '\t' || *name == '\r' || *name == '\n') name++;
+    const bool closing = *name == '/';
+    if (closing) name++;
+    const bool title = std::strncmp(name, "title", 5) == 0 && (name[5] == '\0' || std::isspace(name[5]));
+    const bool heading =
+        name[0] == 'h' && (name[1] == '1' || name[1] == '2') && (name[2] == '\0' || std::isspace(name[2]));
+
+    if (!closing && (std::strstr(name, "doc-toc") || hasTocTypeAttribute(name))) {
+      contentsDocument = true;
+    }
+    if (!closing && (title || heading)) {
+      collectingLabel = true;
+      clearLabel();
+    } else if (closing && (title || heading)) {
+      while (labelLength > 0 && label[labelLength - 1] == ' ') label[--labelLength] = '\0';
+      if (std::strcmp(label, "contents") == 0 || std::strcmp(label, "table of contents") == 0) {
+        contentsDocument = true;
+      }
+      collectingLabel = false;
+    }
+  }
+
+  void consume(const char c) {
+    if (insideTag) {
+      if (c == '>') {
+        finishTag();
+        tagLength = 0;
+        insideTag = false;
+      } else if (tagLength + 1 < kMaxTagLength) {
+        tag[tagLength++] = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+      return;
+    }
+    if (c == '<') {
+      insideTag = true;
+      tagLength = 0;
+    } else if (collectingLabel) {
+      appendLabel(c);
+    }
+  }
+};
 }  // namespace
 
 Epub::Epub(std::string filepath, const std::string& cacheDir) : filepath(std::move(filepath)) {
@@ -375,6 +615,10 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, const 
 
   if (!opfParser.tocNavPath.empty()) {
     tocNavItem = opfParser.tocNavPath;
+  }
+
+  if (!opfParser.guideTocPageHref.empty()) {
+    tocGuideItem = opfParser.guideTocPageHref;
   }
 
   if (collectCssFiles && !opfParser.cssFiles.empty()) {
@@ -651,10 +895,11 @@ Epub::CssParseStatus Epub::parseCssFiles(const bool forceRebuild) const {
 }
 
 // load in the meta data for the epub file
-bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss, const XLocationLoadMode xLocationLoadMode) {
+bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss, const XLocationLoadMode xLocationLoadMode,
+                const bool cacheCumulativeSpineSizes) {
   lastLoadFailure = OpenFailure::InvalidOrUnreadable;
   // Initialize spine/TOC cache
-  bookMetadataCache = makeBookMetadataCacheNoThrow(cachePath);
+  bookMetadataCache = makeBookMetadataCacheNoThrow(cachePath, cacheCumulativeSpineSizes);
   if (!bookMetadataCache) {
     lastLoadFailure = OpenFailure::OutOfMemory;
     return false;
@@ -705,7 +950,7 @@ bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss, const XLoc
         bookMetadataCache.reset();
         const CssParseStatus cssStatus = parseCssFiles(forceCssRebuild);
         releaseCssFileList();
-        bookMetadataCache = makeBookMetadataCacheNoThrow(cachePath);
+        bookMetadataCache = makeBookMetadataCacheNoThrow(cachePath, cacheCumulativeSpineSizes);
         if (!bookMetadataCache) {
           lastLoadFailure = OpenFailure::OutOfMemory;
           return false;
@@ -733,6 +978,7 @@ bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss, const XLoc
     if (xLocationLoadMode == XLocationLoadMode::Immediate) {
       loadXLocations();
     }
+
     lastLoadFailure = OpenFailure::None;
     return true;
   }
@@ -835,7 +1081,7 @@ bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss, const XLoc
   }
 
   // Reload the cache from disk so it's in the correct state
-  bookMetadataCache = makeBookMetadataCacheNoThrow(cachePath);
+  bookMetadataCache = makeBookMetadataCacheNoThrow(cachePath, cacheCumulativeSpineSizes);
   if (!bookMetadataCache) {
     lastLoadFailure = OpenFailure::OutOfMemory;
     return false;
@@ -848,6 +1094,7 @@ bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss, const XLoc
   if (xLocationLoadMode == XLocationLoadMode::Immediate) {
     loadXLocations();
   }
+
   lastLoadFailure = OpenFailure::None;
   return true;
 }
@@ -908,14 +1155,14 @@ bool Epub::hasCoverImage() const {
   return bookMetadataCache && bookMetadataCache->isLoaded() && !bookMetadataCache->coreMetadata.coverItemHref.empty();
 }
 
-std::string Epub::getCoverBmpPath(bool cropped) const {
-  const auto coverFileName = std::string("cover") + (cropped ? "_crop" : "");
+std::string Epub::getCoverBmpPath(bool cropped, bool imageLevels) const {
+  const auto coverFileName = std::string("cover") + (cropped ? "_crop" : "") + (imageLevels ? "_absolute" : "");
   return cachePath + "/" + coverFileName + ".bmp";
 }
 
-bool Epub::generateCoverBmp(bool cropped, const GfxRenderer* renderer, const int readerFontId) const {
+bool Epub::generateCoverBmp(bool cropped, const GfxRenderer* renderer, const int readerFontId, bool imageLevels) const {
   // Already generated, return true
-  if (Storage.exists(getCoverBmpPath(cropped).c_str())) {
+  if (Storage.exists(getCoverBmpPath(cropped, imageLevels).c_str())) {
     return true;
   }
 
@@ -942,19 +1189,19 @@ bool Epub::generateCoverBmp(bool cropped, const GfxRenderer* renderer, const int
     }
 
     FsFile coverBmp;
-    if (!Storage.openFileForWrite("EBP", getCoverBmpPath(cropped), coverBmp)) {
+    if (!Storage.openFileForWrite("EBP", getCoverBmpPath(cropped, imageLevels), coverBmp)) {
       coverJpg.close();
       return false;
     }
     releaseReaderSdFontCachesBeforeCoverDecode(renderer, readerFontId, "cover JPG decode");
-    const bool success = JpegToBmpConverter::jpegFileToBmpStream(coverJpg, coverBmp, cropped);
+    const bool success = JpegToBmpConverter::jpegFileToBmpStream(coverJpg, coverBmp, cropped, imageLevels);
     // Explicitly close() files before leaving the converter path.
     coverJpg.close();
     coverBmp.close();
 
     if (!success) {
       LOG_ERR("EBP", "Failed to generate BMP from cover image");
-      Storage.remove(getCoverBmpPath(cropped).c_str());
+      Storage.remove(getCoverBmpPath(cropped, imageLevels).c_str());
     }
     return success;
   }
@@ -971,19 +1218,19 @@ bool Epub::generateCoverBmp(bool cropped, const GfxRenderer* renderer, const int
     }
 
     FsFile coverBmp;
-    if (!Storage.openFileForWrite("EBP", getCoverBmpPath(cropped), coverBmp)) {
+    if (!Storage.openFileForWrite("EBP", getCoverBmpPath(cropped, imageLevels), coverBmp)) {
       coverPng.close();
       return false;
     }
     releaseReaderSdFontCachesBeforeCoverDecode(renderer, readerFontId, "cover PNG decode");
-    const bool success = PngToBmpConverter::pngFileToBmpStream(coverPng, coverBmp, cropped);
+    const bool success = PngToBmpConverter::pngFileToBmpStream(coverPng, coverBmp, cropped, imageLevels);
     // Explicitly close() files before leaving the converter path.
     coverPng.close();
     coverBmp.close();
 
     if (!success) {
       LOG_ERR("EBP", "Failed to generate BMP from PNG cover image");
-      Storage.remove(getCoverBmpPath(cropped).c_str());
+      Storage.remove(getCoverBmpPath(cropped, imageLevels).c_str());
     }
     return success;
   }
@@ -1190,13 +1437,13 @@ bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, con
   return ZipFile(filepath).readFileToStream(path.c_str(), out, chunkSize, allowEarlyStop);
 }
 
-bool Epub::extractItemToFile(const std::string& itemHref, const std::string& destPath) const {
+bool Epub::extractItemToFile(const std::string& itemHref, const std::string& destPath, const size_t chunkSize) const {
   FsFile out;
   if (!Storage.openFileForWrite("EBP", destPath, out)) {
     return false;
   }
 
-  const bool success = readItemContentsToStream(itemHref, out, 4096);
+  const bool success = readItemContentsToStream(itemHref, out, chunkSize);
   out.flush();
   out.close();
   if (!success) {
@@ -1205,20 +1452,235 @@ bool Epub::extractItemToFile(const std::string& itemHref, const std::string& des
   return success;
 }
 
-std::unique_ptr<ZipFileStreamReader> Epub::openItemContentsStream(const std::string& itemHref,
-                                                                  const size_t chunkSize) const {
-  if (itemHref.empty()) {
-    LOG_DBG("EBP", "Failed to open item stream, empty href");
-    return nullptr;
-  }
-
-  const std::string path = FsHelpers::normalisePath(itemHref);
-  return ZipFile(filepath).openFileStream(path.c_str(), chunkSize);
-}
-
 bool Epub::getItemSize(const std::string& itemHref, size_t* size) const {
   const std::string path = FsHelpers::normalisePath(itemHref);
   return ZipFile(filepath).getInflatedFileSize(path.c_str(), size);
+}
+
+namespace {
+constexpr char kOptimizerIndexPath[] = "META-INF/crossink/optimizer-images-v1.idx";
+using OptimizerFormat::IndexScratch;
+// Optional bounded setup scratch is released before reading the book.
+bool validateOptimizerIndex(const std::string& path, const ZipFile::EntryIdentity& identity, uint16_t& count) {
+  auto scratch = makeUniqueNoThrow<IndexScratch>();
+  if (!scratch) {
+    LOG_ERR("EBP", "OOM validating optimizer index");
+    return false;
+  }
+  FsFile file;
+  if (!Storage.openFileForRead("EBP", path, file)) return false;
+  bool ok = OptimizerFormat::validateIndex(
+      [](void* context, uint32_t offset, uint8_t* bytes, size_t length) {
+        auto& input = *static_cast<FsFile*>(context);
+        return input.seek(offset) && input.read(bytes, length) == static_cast<int>(length);
+      },
+      &file, file.size(), identity.crc32, identity.uncompressedSize, *scratch, count);
+  ok = file.close() && ok;
+  if (!ok) LOG_ERR("EBP", "Invalid optimizer index: %s", path.c_str());
+  return ok;
+}
+}  // namespace
+
+bool Epub::findOptimizerImage(const std::string& itemHref) const {
+  if (!optimizerIndexReady || itemHref.empty() || itemHref.size() > 128) return false;
+  const std::string normalized = FsHelpers::normalisePath(itemHref);
+  if (normalized == optimizerLastHit.href) return true;
+  FsFile file;
+  if (!Storage.openFileForRead("EBP", cachePath + "/optimizer-images.idx", file)) return false;
+  uint8_t bytes[208];
+  bool found = false;
+  for (uint16_t i = 0; i < optimizerIndexCount; ++i) {
+    if (!file.seek(32U + 208U * i) || file.read(bytes, sizeof(bytes)) != sizeof(bytes)) break;
+    if (memcmp(bytes, normalized.c_str(), std::min<size_t>(normalized.size() + 1, 129)) == 0 &&
+        normalized.size() <= 128 && OptimizerFormat::decodeRecord(bytes, optimizerLastHit)) {
+      found = true;
+      break;
+    }
+  }
+  file.close();
+  return found;
+}
+
+bool Epub::getOptimizerImageDimensions(const std::string& itemHref, uint16_t& width, uint16_t& height) const {
+  if (!findOptimizerImage(itemHref)) return false;
+  width = optimizerLastHit.width;
+  height = optimizerLastHit.height;
+  return true;
+}
+
+bool Epub::seedOptimizerImageCache(const std::string& itemHref, const int expectedWidth, const int expectedHeight,
+                                   const std::string& destPxcPath) const {
+  if (expectedWidth <= 0 || expectedHeight <= 0 || expectedWidth > 1024 || expectedHeight > 1024 ||
+      !OptimizerFormat::dimensions(expectedWidth, expectedHeight) || destPxcPath.empty())
+    return false;
+  const std::string backup = destPxcPath + ".optimizer.previous";
+  if (!OptimizerFormat::recoverCache(Storage, destPxcPath.c_str(), backup.c_str())) {
+    LOG_ERR("EBP", "Failed to recover previous optimizer image cache");
+    return false;
+  }
+  // Existing exact-layout output always wins, even if the optional transport is corrupt.
+  FsFile existing;
+  uint16_t w = 0, h = 0;
+  bool cached = Storage.openFileForRead("EBP", destPxcPath, existing) && readPxcHeader(existing, w, h) &&
+                w == expectedWidth && h == expectedHeight && existing.size() == pxcByteCount(w, h);
+  existing.close();
+  if (cached) {
+    Storage.remove(backup.c_str());
+    return true;
+  }
+  if (!findOptimizerImage(itemHref)) return false;
+  const auto& entry = optimizerLastHit;
+  size_t bytes = 0;
+  if (!getItemSize(entry.pxcHref, &bytes) || bytes != entry.bytes) return false;
+  const std::string temp = destPxcPath + ".optimizer.tmp";
+  Storage.remove(temp.c_str());
+  if (entry.format == 2) {
+    // Reused for the reader session, not on the small render-task stack.
+    if (!optimizerWorkspace) {
+      optimizerWorkspace = makeUniqueNoThrow<PxcV2Workspace>();
+      if (optimizerWorkspace)
+        LOG_DBG("EBP", "PXC2 workspace: %u bytes (free=%u maxAlloc=%u)", unsigned(sizeof(PxcV2Workspace)),
+                ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    }
+    if (!optimizerWorkspace) {
+      LOG_ERR("EBP", "OOM: PXC2 workspace (%u bytes)", unsigned(sizeof(PxcV2Workspace)));
+      return false;
+    }
+    FsFile output;
+    if (!Storage.openFileForWrite("EBP", temp, output)) return false;
+    PxcV2 decoder(*optimizerWorkspace, output, entry, expectedWidth, expectedHeight);
+    bool ok = ZipFile(filepath).readStoredFileToStream(entry.pxcHref, decoder) && decoder.finish() &&
+              output.size() == pxcByteCount(expectedWidth, expectedHeight);
+    ok = OptimizerFormat::finishCache(output, Storage, ok, temp.c_str(), destPxcPath.c_str(), backup.c_str());
+    if (!ok) {
+      LOG_ERR("EBP", "PXC2 materialization failed: %s", entry.pxcHref);
+      Storage.remove(temp.c_str());
+    }
+    if (ok) LOG_DBG("EBP", "Materialized PXC2 image: %s", entry.pxcHref);
+    return ok;
+  }
+  const std::string source = destPxcPath + ".optimizer.source";
+  Storage.remove(source.c_str());
+  if (!extractItemToFile(entry.pxcHref, source, kOptimizerPxcExtractionChunkSize)) return false;
+  FsFile verify;
+  bool ok = Storage.openFileForRead("EBP", source, verify) && readPxcHeader(verify, w, h) && w == entry.width &&
+            h == entry.height && verify.size() == entry.bytes;
+  verify.close();
+  if (ok) ok = rescalePxcFile(source, destPxcPath, expectedWidth, expectedHeight);
+  Storage.remove(source.c_str());
+  return ok;
+}
+
+bool Epub::ensureOptimizerImageIndex() {
+  if (optimizerIndexReady) return true;
+  optimizerLastHit = {};
+  const size_t length = strlen(kOptimizerManifestPath);
+  ZipFile::EntryTarget target{ZipFile::fnvHash64(kOptimizerManifestPath, length), static_cast<uint16_t>(length), 0,
+                              kOptimizerManifestPath};
+  ZipFile::EntryIdentity identity;
+  if (ZipFile(filepath).fillEntryIdentities(&target, 1, &identity, 1) < 0 || !identity.found ||
+      !identity.uncompressedSize || identity.uncompressedSize > kOptimizerManifestMaxBytes)
+    return false;
+  const std::string path = cachePath + "/optimizer-images.idx";
+  const std::string temp = path + ".tmp";
+  const std::string manifest = path + ".manifest.tmp";
+  Storage.remove(temp.c_str());
+  Storage.remove(manifest.c_str());
+  if (validateOptimizerIndex(path, identity, optimizerIndexCount)) {
+    optimizerIndexReady = true;
+    return true;
+  }
+  size_t packagedSize = 0;
+  bool ok = false;
+  if (getItemSize(kOptimizerIndexPath, &packagedSize)) {
+    if (packagedSize < 32 || packagedSize > 32 + 208 * 256) return false;
+    FsFile output;
+    if (!Storage.openFileForWrite("EBP", temp, output)) return false;
+    ok = ZipFile(filepath).readStoredFileToStream(kOptimizerIndexPath, output) && output.sync();
+    ok = output.close() && ok;
+  } else {
+    // Caller loans the framebuffer for legacy ZIP inflation. JSON is temporary;
+    // no manifest or record array survives reader setup.
+    if (!extractItemToFile(kOptimizerManifestPath, manifest, 256)) return false;
+    FsFile input;
+    if (!Storage.openFileForRead("EBP", manifest, input)) {
+      Storage.remove(manifest.c_str());
+      return false;
+    }
+    // Bind the legacy JSON bytes to the central-directory identity as well.
+    uint32_t manifestCrc = 0;
+    uint8_t manifestChunk[256];
+    bool manifestOk = input.size() == identity.uncompressedSize;
+    size_t remaining = identity.uncompressedSize;
+    while (manifestOk && remaining) {
+      const size_t n = std::min(remaining, sizeof(manifestChunk));
+      manifestOk = input.read(manifestChunk, n) == static_cast<int>(n);
+      if (manifestOk) manifestCrc = OptimizerFormat::crc(manifestCrc, manifestChunk, n);
+      remaining -= n;
+    }
+    if (!manifestOk || manifestCrc != identity.crc32 || !input.seek(0)) {
+      LOG_ERR("EBP", "Invalid optimizer manifest CRC/size");
+      input.close();
+      Storage.remove(manifest.c_str());
+      return false;
+    }
+    JsonDocument filter;
+    buildOptimizerManifestJsonFilter(filter);
+    JsonDocument doc;
+    const auto error = deserializeJson(doc, input, DeserializationOption::Filter(filter.as<JsonVariantConst>()));
+    input.close();
+    Storage.remove(manifest.c_str());
+    JsonArrayConst images = doc["images"];
+    if (error || strcmp(doc["format"] | "", kOptimizerManifestFormat) || (doc["version"] | 0) != 1 || images.isNull() ||
+        images.size() > 256)
+      return false;
+    auto scratch = makeUniqueNoThrow<IndexScratch>();
+    if (!scratch) {
+      LOG_ERR("EBP", "OOM building optimizer index");
+      return false;
+    }
+    FsFile output;
+    if (!Storage.openFileForWrite("EBP", temp, output)) return false;
+    memset(scratch->bytes, 0, 32);
+    ok = output.write(scratch->bytes, 32) == 32;
+    uint16_t count = 0;
+    uint32_t recordsCrc = 0;
+    for (JsonObjectConst image : images) {
+      if (!ok) break;
+      const char *href = nullptr, *pxc = nullptr;
+      auto& record = scratch->record;
+      record = {};
+      ok = readOptimizerImageMetadata(image, 128, 64, href, pxc, record.width, record.height);
+      if (!ok) break;
+      memcpy(record.href, href, strlen(href) + 1);
+      memcpy(record.pxcHref, pxc, strlen(pxc) + 1);
+      const char* format = image["pxcFormat"] | "pxc1";
+      record.format = !strcmp(format, "pxc2") ? 2 : !strcmp(format, "pxc1") ? 1 : 0;
+      record.bytes = record.format == 1 ? pxcByteCount(record.width, record.height) : (image["pxcBytes"] | 0U);
+      record.pixelCrc = image["pixelCrc32"] | 0U;
+      ok = OptimizerFormat::valid(record);
+      if (!ok) break;
+      OptimizerFormat::encodeRecord(record, scratch->bytes);
+      recordsCrc = OptimizerFormat::crc(recordsCrc, scratch->bytes, 208);
+      ok = output.write(scratch->bytes, 208) == 208;
+      ++count;
+    }
+    OptimizerFormat::indexHeader(scratch->bytes, count, identity.crc32, identity.uncompressedSize, recordsCrc);
+    ok = ok && output.seek(0) && output.write(scratch->bytes, 32) == 32 && output.sync();
+    ok = output.close() && ok;
+  }
+  ok = ok && validateOptimizerIndex(temp, identity, optimizerIndexCount);
+  if (ok) {
+    if (Storage.exists(path.c_str())) Storage.remove(path.c_str());
+    ok = Storage.rename(temp.c_str(), path.c_str());
+  }
+  if (!ok) {
+    LOG_ERR("EBP", "Failed to build optimizer image index");
+    Storage.remove(temp.c_str());
+  }
+  optimizerIndexReady = ok;
+  if (ok) LOG_INF("EBP", "COIX: %u records", optimizerIndexCount);
+  return ok;
 }
 
 bool Epub::loadXLocations() {
@@ -1576,6 +2038,25 @@ int Epub::getTocItemsCount() const {
   }
 
   return bookMetadataCache->getTocCount();
+}
+
+bool Epub::isNavigationDocumentSpine(const int spineIndex, bool* const scanSucceeded) const {
+  if (scanSucceeded) *scanSucceeded = false;
+  if (spineIndex < 0 || spineIndex >= getSpineItemsCount()) {
+    return false;
+  }
+  const std::string& href = getSpineItem(spineIndex).href;
+  if (href == tocNavItem || href == tocGuideItem) {
+    if (scanSucceeded) *scanSucceeded = true;
+    return true;
+  }
+
+  ContentsDocumentScanner scanner;
+  if (!readItemContentsToStream(href, scanner, 512, /*allowEarlyStop=*/true)) {
+    return false;
+  }
+  if (scanSucceeded) *scanSucceeded = true;
+  return scanner.isContentsDocument();
 }
 
 // work out the section index for a toc index

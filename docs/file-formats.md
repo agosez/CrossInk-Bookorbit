@@ -5,6 +5,48 @@ All POD fields are written in the ESP32 little-endian representation used by
 `Serialization.h`; strings are length-prefixed UTF-8 unless a format notes a
 fixed-size char buffer.
 
+## `/.crosspoint/sleep-image-index/<directory-hash>-{bmp,all}.idx`
+
+### Version 1
+
+`ImageFolderIndex` (`src/activities/boot_sleep/ImageFolderIndex.{h,cpp}`) keeps
+a compact, rebuildable index per indexed folder. It backs both the sleep-image
+folder and the boot-screen folder (`/bootscreen` or `/.bootscreen`); the
+directory name predates the boot-screen use and was kept as-is so existing
+sleep caches aren't orphaned by an unrelated rename. The index avoids walking
+a folder on every selection while using only one fixed-size record at a time
+in RAM. `bmp` contains BMP files and `all` contains BMP and PNG files (sleep's
+Page Overlay mode only; the boot screen is BMP-only and always uses a `bmp`
+index). The `validated` header flag means BMP headers were checked while
+rebuilding after a failed render.
+
+The index is disposable: a missing, malformed, or stale selected entry causes
+one rebuild and then the caller falls back to its directory scan. File
+transfer, file-browser, and preferred-folder changes invalidate affected
+indexes via `ImageFolderIndex::invalidateForPath()`. Files added or changed
+directly on the SD card have no notification path; they are picked up when a
+cached entry is found missing or when an index is otherwise rebuilt.
+
+```c++
+struct ImageFolderIndexHeader {
+    char magic[4];       // "CSIX"
+    u8 version;          // 1
+    u8 flags;            // bit 0: BMP+PNG, bit 1: BMP headers validated
+    u16 pathLength;
+    u16 recordCount;
+    u16 recordSize;      // sizeof(ImageFolderIndexRecord)
+    u32 recordsOffset;   // sizeof(header) + pathLength
+    char directory[pathLength];
+};
+
+struct ImageFolderIndexRecord {
+    u16 nameLength;
+    u8 flags;             // bit 0: PNG (otherwise BMP)
+    u8 reserved;
+    char name[256];      // zero-padded UTF-8 filename, max 255 bytes
+};
+```
+
 ## `book.bin`
 
 ### Version 9
@@ -94,7 +136,7 @@ if (parsedSize != fileSize) {
 
 ## `reader_settings.bin`
 
-### Version 5
+### Version 9
 
 Each EPUB cache directory may contain `reader_settings.bin`. Missing files mean
 the book uses global Reader settings and the default auto-page-turn interval.
@@ -108,19 +150,22 @@ Version 2 stores flags before the full reader-settings snapshot. Version 3 adds
 the EPUB word-spacing level to that snapshot. Version 4 adds the EPUB indexing
 method (`0` = incremental, `1` = full section). Version 5 appends a per-book
 dictionary SD-font family name. Version 6 stores reader font sizes as physical
-point sizes, and version 7 appends the dictionary font's selected point size.
+point sizes, version 7 appends the dictionary font's selected point size, and
+version 8 splits the screen margin into vertical and horizontal values. Version
+9 removes the obsolete per-book Dark Mode byte: Dark Mode is now a global
+display setting.
 This lets the
 file preserve an auto-page-turn interval without forcing custom font/layout
 settings for the book. It also stores a per-book EPUB render mode override,
 which can be changed from book action menus before opening the book so a
 problematic EPUB can be moved to Balanced or Light rendering without entering
 the reader first. Safe Mode also uses this file to save Light rendering with
-embedded styles, Bionic Reading, and Guide Dots disabled after that final
+embedded styles, Focus Reading, and Guide Dots disabled after that final
 fallback successfully opens a difficult book.
 
 ```c++
 struct ReaderSettingsBin {
-    u8 version; // 7
+    u8 version; // 9
     u8 flags;   // bit 0 = custom reader settings, bit 1 = custom auto-page-turn interval, bit 2 = render mode override, bit 3 = dictionary font override
     u16 autoPageTurnSeconds;
     u8 renderMode; // 0 = CrossInk Default, 1 = Balanced, 2 = Light
@@ -130,17 +175,17 @@ struct ReaderSettingsBin {
     u8 lineHeightPercent;
     u8 wordSpacing; // 0 = natural font spacing; 1-4 widen each gap by ~75% per level
     u8 orientation;
-    u8 screenMargin;
+    u8 screenMarginVertical;
+    u8 screenMarginHorizontal;
     u8 publisherPageNumbers;
     u8 paragraphAlignment;
     u8 embeddedStyle;
     u8 hyphenationEnabled;
     u8 textAntiAliasing;
-    u8 readerDarkMode;
     u8 imageRendering;
     u8 extraParagraphSpacing;
     u8 forceParagraphIndents;
-    u8 bionicReadingEnabled;
+    u8 focusReadingEnabled;
     u8 guideReadingEnabled;
     u8 snapshotRenderMode;
     u8 indexingMethod; // 0 = incremental, 1 = full section
@@ -150,9 +195,9 @@ struct ReaderSettingsBin {
 };
 ```
 
-## `/.crosspoint/clippings/<bookType>_<crc32(path)>.bin`
+## `/.crosspoint/clippings/<bookType>_<contentHash>.bin`
 
-### Versions 1-3
+### Versions 1-4
 
 Clipping files store the per-book EPUB clipping list used by the reader. A
 saved clipping is also what CrossInk renders as an in-reader highlight; there is
@@ -161,16 +206,23 @@ of the EPUB render-cache directory so clearing/rebuilding layout cache does not
 delete user clippings.
 
 The current implementation only writes EPUB clipping files, so `bookType` is
-`epub`. The numeric suffix is `uzlib_crc32()` of the book's SD-card path, for
-example:
+`epub`. The suffix is the book's 32-hex partial-MD5 content hash — the same
+identity BookOrbit sync reports to the server — so the file follows the book
+through moves and renames. Files written by earlier releases used
+`uzlib_crc32()` of the book's SD-card path as a decimal suffix; `loadForBook`
+renames such a file to the content-keyed name the first time the book is
+loaded, and keeps using the path-keyed name only when the book file itself
+cannot be read. The same applies to bookmark files under
+`/.crosspoint/bookmarks/`, which additionally retain their older
+`std::hash`-suffixed tier as a merged-in legacy. Example:
 
 ```text
-/.crosspoint/clippings/epub_1234567890.bin
+/.crosspoint/clippings/epub_8f14e45fceea167a5a36dedd4bea2543.bin
 ```
 
 Binary layout:
 
-- `[0]` version (`1`, `2`, or current version `3`)
+- `[0]` version (`1`, `2`, `3`, or current version `4`)
 - `[1-2]` clipping count (`uint16_t` LE, maximum `256`)
 - book title (`String`)
 - book author (`String`)
@@ -185,13 +237,21 @@ Binary layout:
   - `wordCount` (`uint16_t` LE)
   - `paragraphIndex` (`uint16_t` LE, `UINT16_MAX` when unavailable)
   - `timestamp` (`uint32_t` LE, seconds since firmware boot when saved)
-  - version 3 only: reader layout signature (`uint32_t` LE; font, spacing,
+  - versions 3-4: reader layout signature (`uint32_t` LE; font, spacing,
     viewport, and other section-layout inputs)
+  - version 4: table selection (`uint16_t` LE; `UINT16_MAX` for non-table text)
   - `chapterTitle` (`char[48]`, null-terminated/truncated)
-  - version 1: selected text (`String`, truncated for the in-app store)
-  - versions 2-3: selected-text length (`uint16_t` LE) followed by that many
-    UTF-8 bytes (maximum `2048`; builds before highlight sync wrote at most
-    `512` and treat a longer record as corrupt on read)
+  - version 1: selected text (`String`; legacy files were written with a
+    `512`-byte in-app limit)
+  - versions 2-4: selected-text length (`uint16_t` LE) followed by that many
+    UTF-8 bytes (the current in-app limit is `4096` bytes, defined by
+    `CLIPPING_TEXT_MAX`; builds with a smaller historical cap treat a longer
+    record as corrupt on read, so downgrading loses long highlights)
+
+The clipping selector has a separate navigation bound: it exposes at most
+`240` visible words from at most three pages. This is a bounded in-memory
+selection window for low-memory devices, not a character-count limit. The
+selected text is still stored separately and is limited to `4096` UTF-8 bytes.
 
 CrossInk uses the stored spine/page/paragraph fields as anchors, then searches
 near that location for the stored clipping text after relayout. This is similar
@@ -202,9 +262,9 @@ survive font, layout, or page-count changes when possible.
 Version 3 records which reader layout produced the numeric page/word anchor.
 When that signature differs, CrossInk ignores the stale numeric range and
 matches the saved text instead, including when both layouts happen to have the
-same total page count. Versions 1-2 retain their numeric fast path until the
-reader sees a relayout, when it stamps the previously active layout before
-rebuilding.
+same total page count. Legacy records without a layout signature use text
+matching rather than trusting ambiguous numeric ranges. Version 4 adds the
+table selection field; versions 1-3 remain readable.
 
 Creating a clipping also appends a Kindle-style export entry to
 `/My Clippings.txt` on the SD-card root. That text export can keep up to `2000`
@@ -253,9 +313,13 @@ Binary layout:
 
 ### Version 1
 
-`bookorbit_annotations.bin` sits beside a book's clipping file in the book's cache
-directory and holds what BookOrbit needs to identify each highlight: the KOReader
-xpointer the server keys on, plus the upload watermark.
+`bookorbit_annotations.bin` lives in the book's content-keyed state directory,
+`/.crosspoint/book_<contentHash>/`, together with `bookorbit_bookmarks.bin`,
+`bookorbit_stats.bin` and `bookorbit_sync.bin`, so all of it follows the book through
+moves and renames. Earlier releases kept these files in the book's path-keyed render
+cache directory; the first sync or position mint after the update moves them over. The
+file holds what BookOrbit needs to identify each highlight: the KOReader xpointer the
+server keys on, plus the upload watermark.
 
 The xpointers are minted when the highlight is created, not when it is synced. Building
 them streams and parses the whole chapter (`ChapterXPathResolver`), which is nearly free
@@ -319,9 +383,10 @@ Binary layout (all little-endian):
 
 ### Version 1
 
-`bookorbit_bookmarks.bin` sits beside a book's bookmark file in the book's cache directory
-and holds what BookOrbit needs to identify each bookmark: the KOReader xpointer the server
-keys on (`md5(datetime | pos)`), plus the upload watermark. Positions are minted when the
+`bookorbit_bookmarks.bin` lives beside `bookorbit_annotations.bin` in the book's
+content-keyed state directory (`/.crosspoint/book_<contentHash>/`) and holds what BookOrbit
+needs to identify each bookmark: the KOReader xpointer the server keys on
+(`md5(datetime | pos)`), plus the upload watermark. Positions are minted when the
 bookmark is created, from the page's first visible codepoint (the layout-independent
 coordinate the section cache stores per page), and never recomputed.
 
@@ -344,42 +409,13 @@ Binary layout (all little-endian):
   - `[10-11]` `posLength` (`uint16_t`, 1-512)
   - `[12…]` `pos` (`posLength` bytes, KOReader xpointer, not null-terminated)
 
-## `bookorbit_bookmarks.bin`
-
-### Version 1
-
-Sits beside a book's cache like `bookorbit_annotations.bin` and plays the same role for
-bookmarks: the KOReader xpointer the server keys each bookmark by, plus the upload watermark.
-Positions are minted when the bookmark is created (the reader has the section and its page
-offsets open) from the bookmarked page's first visible codepoint, and never recomputed.
-
-Records join back to their `Bookmark` by `timestamp` plus `spineIndex`. Bookmark timestamps
-are real UTC epochs stamped by `BookmarkStore::addBookmark` from `wallclock.bin`; bookmarks
-from before that stamping carry 0, are invisible to sync, and gain a timestamp through the
-reader's backfill (one per chapter visit).
-
-`identityEpoch` follows the INVERSE of the annotation convention for server-created entries:
-the device mints a local identity when it applies a web bookmark and reports
-`{key, datetime, pos}` in the acknowledgment -- the server has nothing else to link its copy
-to. For bookmarks made on the device the two fields are equal.
-
-Binary layout (all little-endian):
-
-- `[0-3]` magic + version: ASCII `BOB1`
-- `[4-7]` `watermark` (`uint32_t`, newest identityEpoch the server has accepted)
-- Repeated variable-length records:
-  - `[0-3]` `timestamp` (`uint32_t`, the bookmark's creation epoch; part of the join key)
-  - `[4-7]` `identityEpoch` (`uint32_t`, the datetime the server keys on)
-  - `[8-9]` `spineIndex` (`uint16_t`)
-  - `[10-11]` `posLength` (`uint16_t`, 1-512)
-  - `[12…]` `pos` (`posLength` bytes, KOReader xpointer, not null-terminated)
-
 ## `bookorbit_stats.bin`
 
 ### Version 1
 
-`bookorbit_stats.bin` is a queue of per-page reading events in a book's cache
-directory, waiting to be uploaded to a BookOrbit server's page-stats endpoint
+`bookorbit_stats.bin` is a queue of per-page reading events in a book's
+content-keyed state directory (`/.crosspoint/book_<contentHash>/`), waiting to
+be uploaded to a BookOrbit server's page-stats endpoint
 (the server clusters raw page events into the reading sessions that power its
 time/streak/pace stats). The reader buffers one record per qualifying forward
 page read in RAM and appends them as a single batch when the session ends;
@@ -404,6 +440,32 @@ Binary layout (all little-endian):
   - `[12-13]` `era` (`uint16_t`, truncated WallClock power era the timestamp was taken in)
   - `[14]` `flags` (`uint8_t`, bit0 = clock was approximate / not NTP-confirmed)
   - `[15]` reserved
+
+## `/.crosspoint/bookorbit_downloads.bin`
+
+### Version 1
+
+Remembers where BookOrbit catalog downloads landed on the SD card, keyed by the
+server's book id, so the catalog can mark a book as already on the device even
+when the download folder setting has since changed or the file was renamed
+through a supported flow. It is a best-effort convenience cache: entries are
+verified on lookup (the file must still exist with its recorded size) and
+dropped when stale, and a missing or discarded index only costs the marker, with
+the filename heuristic as fallback. Capped at 128 entries, oldest evicted first.
+
+Book ids are only meaningful on the server that issued them, so the header
+records a CRC32 of the configured server URL; the whole file is discarded when
+it no longer matches, as it is when the magic is unreadable.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `BOD1`
+- `[4-7]` `serverCrc` (`uint32_t`, CRC32 of the configured BookOrbit server URL)
+- Repeated variable-length records:
+  - `[0-7]` `bookId` (`int64_t`, the server's book id)
+  - `[8-11]` `fileSize` (`uint32_t`, size of the downloaded file, for the replacement check)
+  - `[12-13]` `pathLength` (`uint16_t`, 1-256)
+  - `[14…]` `path` (`pathLength` bytes, absolute SD path, not null-terminated)
 
 ## `/.crosspoint/wallclock.bin`
 
@@ -450,7 +512,35 @@ Then `ERA_HISTORY` (6) correction records of 24 bytes each:
 
 ## `section.bin`
 
-### Version 59
+### Version 66
+
+Version 66 keeps the version 63 serialized layout unchanged. It was bumped
+because internal EPUB links now preserve CSS superscript and subscript styles,
+changing their cached word-style flags and page layout. Complete files use
+version byte `66`, and suspended partials use sentinel byte `0xF6`.
+
+The stable v1.5.1 release retains these identifiers from RC6. Do not normalize
+published RC versions to the previous stable version plus one: v1.5.0 used
+`60` / `0xF9`, and RC4 already shipped `61` / `0xF8` with older layout output.
+Reusing those identifiers could accept stale RC caches as current. Per-book
+reader settings likewise retain version `9` and their version 7/8 migrations.
+
+### Version 62
+
+Version 62 stores one compact source-whitespace bit per word in serialized text
+blocks. Touch reader previews use it to reflow words with the selected font
+without inferring spaces from device-specific pixel advances. Full and
+suspended section caches rebuild together; complete files use version byte
+`62`, and suspended partials use sentinel byte `0xF8`.
+
+### Version 61
+
+Version 61 was an earlier v1.5.1 release-candidate cache update. It stores `protectedImageUnits`
+(`uint32_t` LE) after `pageCount`, so image-heavy sections estimate their
+remaining non-image pages accurately. It also updates table fragments and
+geometry, oversized-word wrapping, inline-image margins, and ruby continuation
+layout. Full and suspended section caches rebuild together; complete files use
+version byte `61`, and suspended partials use sentinel byte `0xF8`.
 
 Each file in `sections/*.bin` stores one laid-out spine section. The header is
 also the cache-busting key: if any layout-affecting setting differs from the
@@ -467,7 +557,7 @@ Version 57 is binary-identical to version 56. The version was bumped because
 word-gap suppression now applies only to tokens glued together in the source.
 Older caches could collapse explicit spaces between Hangul words, so full and
 suspended partial section caches rebuild together. Version 58 recalculates
-Bionic Reading split-run offsets with the renderer's combined advance and
+Focus Reading split-run offsets with the renderer's combined advance and
 kerning rounding, so old cached page positions rebuild.
 
 Version 56 changes `<br>` layout: a line break after text no longer reapplies
@@ -486,7 +576,7 @@ read only its header and defer full extraction until the page is shown. Version
 52 keeps Guide Dots centered when extra word spacing is enabled. Version 51
 preserves continuation state for oversized CJK word fragments. Version 50
 paginates chapter-heading image runs within the reader viewport so they do not
-overflow into the reserved status-bar area. Version 49 stores Bionic Reading
+overflow into the reserved status-bar area. Version 49 stores Focus Reading
 split-run offsets in visual order so RTL word prefixes render on the right.
 Version 48 changed Arabic contextual shaping and text measurement, so cached
 word positions from version 47 no longer match what `drawText` renders.
@@ -499,17 +589,17 @@ anchor behavior introduced in version 45. It includes:
 
 - cache-busting fields for font, line compression, extra paragraph spacing,
   forced paragraph indents, paragraph alignment, viewport size, hyphenation,
-  embedded CSS, image rendering mode, Bionic Reading, Guide Dots, word spacing,
+  embedded CSS, image rendering mode, Focus Reading, Guide Dots, word spacing,
   and EPUB render mode
 - page offset LUT
 - anchor-to-page map for fragment and footnote navigation
 - paragraph and list-item LUTs used by KOReader sync page refinement
 - visible-text-offset LUT used to resolve page positions across reflow and sync
-- optional per-word Bionic Reading split metadata
+- optional per-word Focus Reading split metadata
 - optional per-word Guide Dot x-offset metadata
 - optional per-word text flags for CSS backgrounds, layout-inserted hyphens,
   and internal-link IDs
-- reading-aid layout that stores Bionic Reading and Guide Dots as per-word metadata instead of temporary layout words
+- reading-aid layout that stores Focus Reading and Guide Dots as per-word metadata instead of temporary layout words
 - publisher CSS page-break handling and adjusted justification spacing baked into page layout
 - table fragments
 - per-page footnote entries
@@ -528,7 +618,7 @@ import std.mem;
 import std.string;
 import std.core;
 
-#define EXPECTED_VERSION 59
+#define EXPECTED_VERSION 66
 #define MAX_STRING_LENGTH 65535
 #define FOOTNOTE_NUMBER_LEN 32
 #define FOOTNOTE_HREF_LEN 96
@@ -590,7 +680,7 @@ struct BlockStyle {
 
 struct TextBlock {
     u16 wordCount;
-    u8 hasBionic;
+    u8 hasFocus;
     u8 hasGuideDots;
     u8 hasWordFlags;
     u16 textBytes [[comment("Total size of text[], including one NUL per word")]];
@@ -598,15 +688,15 @@ struct TextBlock {
     if (wordCount > 0) {
         u16 textOff[wordCount] [[comment("Byte offset of word i's text within text[]")]];
         s16 wordXPos[wordCount];
-        if (hasBionic != 0) {
-            u16 wordBionicSuffixX[wordCount] [[comment("Suffix x offset from word start")]];
+        if (hasFocus != 0) {
+            u16 wordFocusSuffixX[wordCount] [[comment("Suffix x offset from word start")]];
         }
         if (hasGuideDots != 0) {
             u16 wordGuideDotXOffset[wordCount] [[comment("Guide dot x offset from word start; 0 means no dot")]];
         }
         WordStyle wordStyle[wordCount];
-        if (hasBionic != 0) {
-            u8 wordBionicBoundary[wordCount] [[comment("UTF-8 byte boundary between bold prefix and suffix")]];
+        if (hasFocus != 0) {
+            u8 wordFocusBoundary[wordCount] [[comment("UTF-8 byte boundary between bold prefix and suffix")]];
         }
         if (hasWordFlags != 0) {
             u8 wordFlags[wordCount] [[comment("bit 0 = black background, bit 1 = layout-inserted trailing hyphen")]];
@@ -735,12 +825,13 @@ struct SectionBin {
     bool hyphenationEnabled;
     bool embeddedStyle;
     u8 imageRendering;
-    bool bionicReadingEnabled;
+    bool focusReadingEnabled;
     bool guideReadingEnabled;
     u8 wordSpacing;
     u8 renderMode; // 0 = CrossInk Default, 1 = Balanced, 2 = Light
 
     u16 pageCount;
+    u32 protectedImageUnits;
     u32 pageLutOffset;
     u32 anchorMapOffset;
     u32 paragraphLutOffset;
@@ -776,3 +867,98 @@ if (parsedSize != fileSize) {
     std::warning(std::format("Unparsed data detected: {} bytes remaining at offset 0x{:X}", fileSize - parsedSize, parsedSize));
 }
 ```
+
+## Optimizer image transport (PXC2 and COIX)
+
+Optimizer images are optional EPUB sidecars. Original JPEG/PNG assets remain the
+compatibility fallback. `META-INF/crossink/optimizer-v1.json`,
+`META-INF/crossink/optimizer-images-v1.idx`, and all
+`META-INF/crossink/pxc/*.pxc2` entries must use ZIP STORE. PXC2 has its own block
+compression; the firmware rejects ZIP-deflated PXC2 before starting an inflater.
+The manifest keeps `format: "crossink-optimizer"` and `version: 1`. Each image has
+`href`, `pxc`, `width`, `height`, `pxcFormat: "pxc2"`, `pxcBytes` (complete transport
+size), and `pixelCrc32`. Missing `pxcFormat` means legacy raw PXC1.
+
+All integers below are unsigned little endian. Fields are serialized explicitly,
+not by writing native C++ structures. CRCs use standard IEEE CRC32 (zlib).
+
+### PXC2
+
+The 32-byte header is:
+
+| Offset | Bytes | Field |
+| --- | --- | --- |
+| 0 | 4 | `PXC2` |
+| 4 | 1 | Version 2 |
+| 5 | 1 | Pixel format 1: four 2-bit pixels per byte, most significant first |
+| 6 | 2 | Header bytes: 32 |
+| 8 | 2 | Width |
+| 10 | 2 | Height |
+| 12 | 2 | Row bytes: `(width + 3) / 4` |
+| 14 | 2 | Block bytes: 2048 |
+| 16 | 2 | Block count: ceiling of raw bytes / 2048 |
+| 18 | 2 | Flags: zero |
+| 20 | 4 | Raw pixel bytes |
+| 24 | 4 | Raw pixel CRC32 |
+| 28 | 4 | Complete PXC2 file bytes |
+
+Dimensions are 1–1024, raw data is at most 128 KiB, and there are at most 64
+blocks. Each block starts with a 12-byte header: codec (`u8`, 0 RAW, 1 raw DEFLATE,
+2 PackBits), zero flags (`u8`), raw length (`u16`), encoded length (`u16`), sequence
+(`u16`, starting at zero), decoded-block CRC32 (`u32`). Lengths are 1–2048. All
+non-final blocks have 2048 raw bytes. Compressed blocks must be smaller than raw;
+otherwise producers use RAW. Every block is independent. PackBits controls 0–127
+copy the next control+1 bytes; 129–255 repeat the next byte 257-control times;
+128 is rejected. Raw DEFLATE must terminate exactly, with no extra input/output.
+Python uses zlib level 8 and `wbits=-15`; the browser uses PackBits/RAW.
+
+The reader reuses a fallibly allocated session workspace (5928 bytes on the
+64-bit host; firmware size is compile-time limited below 6500), verifies all
+lengths/CRCs and resizes rows into `img_*.pxc.optimizer.tmp`. It checks size and
+syncs/closes before publishing. On filesystems that cannot rename over an existing
+file, `.optimizer.previous` retains the previous cache until publication succeeds;
+failed rollback leaves that backup available for recovery on the next attempt. PXC2 never needs a full raw source temporary file.
+The local raw PXC layout remains two `u16` dimensions plus packed rows. No section
+cache version change is required. Hardware heap and visual results remain device
+acceptance checks, not implied by host workspace accounting.
+
+### COIX version 1
+
+The local index is `/.crosspoint/epub_<hash>/optimizer-images.idx`. Its header is:
+
+| Offset | Bytes | Field |
+| --- | --- | --- |
+| 0 | 4 | `COIX` |
+| 4 | 2 | Version 1 |
+| 6 | 2 | Header bytes: 32 |
+| 8 | 2 | Record bytes: 208 |
+| 10 | 2 | Record count: 0–256 |
+| 12 | 4 | Flags/reserved: zero |
+| 16 | 4 | Manifest central-directory CRC32 |
+| 20 | 4 | Manifest uncompressed bytes |
+| 24 | 4 | CRC32 of all records |
+| 28 | 4 | CRC32 of header bytes 0–27 |
+
+Each 208-byte record contains NUL-terminated `href[129]` (offset 0),
+`pxcHref[65]` (129), width `u16` (194), height `u16` (196), format `u8` (198,
+1 legacy or 2 PXC2), zero flags `u8` (199), complete sidecar bytes `u32` (200),
+and pixel CRC32 `u32` (204). Paths are relative, bounded UTF-8; traversal,
+backslashes, control characters, colons and percent escapes are rejected.
+Sidecars must be beneath `META-INF/crossink/pxc/`. Duplicate image hrefs are invalid;
+producers keep one optional sidecar per href and omit unsupported/over-limit
+entries. Firmware can resize that sidecar for other layouts.
+
+Reader setup validates a packaged index and copies it through a temporary local
+file, or builds it from a legacy manifest while the framebuffer is loaned. Generic
+`Epub::load()` does not build indexes. A lookup scans records on SD and retains
+only one last hit. Manifest identity changes invalidate the local index. Per-page
+preflight reuses local pixels first, then materializes just that page's sidecars,
+then extracts original assets as fallback. Legacy ZIP inflation also runs under
+the framebuffer loan. Sleep-page generation uses the same preflight. Temporary
+index files are cleaned during setup and per-image temporaries during preflight.
+
+Hardware acceptance: clear only the test book's cache, open legacy/PXC2 variants
+with SD font and AA, visit/revisit image pages and sleep, compare portrait and
+landscape output, and record internal free/largest heap blocks and low-water
+marks. Repeat corrupt sidecars, full/read-only SD, interrupted writes and book
+replacement at the same path on X3/X4, Sticky (SPI SD) and X4 Pro (SDMMC).

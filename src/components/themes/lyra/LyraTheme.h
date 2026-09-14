@@ -10,8 +10,8 @@ class GfxRenderer;
 
 // Lyra theme metrics (zero runtime cost)
 namespace LyraMetrics {
-constexpr ThemeMetrics values = {.batteryWidth = 16,
-                                 .batteryHeight = 12,
+constexpr ThemeMetrics values = {.batteryWidth = StatusBarMetrics::batteryWidth,
+                                 .batteryHeight = StatusBarMetrics::batteryHeight,
                                  .topPadding = 5,
                                  .batteryBarHeight = 40,
                                  .headerHeight = 84,
@@ -53,7 +53,7 @@ constexpr ThemeMetrics values = {.batteryWidth = 16,
                                  .progressBarMarginTop = 1,
                                  .statusBarHorizontalMargin = 5,
                                  .statusBarVerticalMargin = 19,
-                                 .keyboardKeyHeight = 48,
+                                 .keyboardKeyHeight = 56,
                                  .keyboardKeySpacing = 0,
                                  .keyboardCenteredText = false,
                                  .keyboardVerticalOffset = -7,
@@ -111,6 +111,9 @@ class LyraTheme : public BaseTheme {
   void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3, const char* btn4,
                        bool allowInvertedText = false) const override;
   void drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const override;
+  // Rows per page of the home menu; the page shown is the one holding the selection, so a
+  // caller moves pages by moving the selection (see HomeActivity's swipe paging).
+  static constexpr int kMenuPageItems = 7;
   void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                       const std::function<const char*(int index)>& buttonLabel,
                       const std::function<UIIcon(int index)>& rowIcon) const override;

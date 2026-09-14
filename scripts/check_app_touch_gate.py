@@ -41,8 +41,16 @@ def audit_app_touch_gate(target, source, env):
     if _capability_enabled(env):
         return
 
-    toolchain_dir = env.PioPlatform().get_package_dir("toolchain-riscv32-esp")
-    nm = os.path.join(toolchain_dir, "bin", "riscv32-esp-elf-nm")
+    compiler = os.path.basename(env.subst("$CC"))
+    if not compiler.endswith("gcc"):
+        raise RuntimeError(f"Cannot derive nm from compiler: {compiler}")
+
+    package = "toolchain-riscv32-esp" if compiler.startswith("riscv32-") else "toolchain-xtensa-esp-elf"
+    toolchain_dir = env.PioPlatform().get_package_dir(package)
+    if not toolchain_dir:
+        raise RuntimeError(f"PlatformIO package is missing: {package}")
+
+    nm = os.path.join(toolchain_dir, "bin", f"{compiler[:-3]}nm")
     output = subprocess.check_output([nm, "--demangle", "--defined-only", str(target[0])], text=True)
     leaked = [line for line in output.splitlines() if any(symbol in line for symbol in FORBIDDEN_SYMBOLS)]
     if leaked:

@@ -12,7 +12,7 @@ constexpr ThemeMetrics values = [] {
   v.menuRowHeight = 46;
   v.homeCoverTileHeight = 300;
   v.homeRecentBooksCount = 3;
-  v.keyboardKeyHeight = 50;
+  v.keyboardKeyHeight = 56;
   v.keyboardCenteredText = true;
   return v;
 }();

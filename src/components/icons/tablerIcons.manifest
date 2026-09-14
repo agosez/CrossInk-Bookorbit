@@ -1,0 +1,8 @@
+# Tabler filled icons. Regenerate with:
+# python3 scripts/generate_icons.py --library tabler-filled \
+#   --manifest src/components/icons/tablerIcons.manifest \
+#   --sizes 24 --out src/components/icons/tablerIcons.h
+#
+# Keep each generated header to one source library. The alias is the C++ symbol
+# suffix, and the value is the Tabler SVG filename without .svg.
+tabler-moon-filled = moon

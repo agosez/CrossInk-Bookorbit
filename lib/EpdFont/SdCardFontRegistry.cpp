@@ -1,5 +1,6 @@
 #include "SdCardFontRegistry.h"
 
+#include <FsHelpers.h>
 #include <HalStorage.h>
 #include <Logging.h>
 
@@ -27,13 +28,6 @@ const SdCardFontFileInfo* SdCardFontFamilyInfo::findClosestFile(uint8_t targetSi
     }
   }
   return best;
-}
-
-bool SdCardFontFamilyInfo::hasSize(uint8_t size) const {
-  for (const auto& f : files) {
-    if (f.pointSize == size) return true;
-  }
-  return false;
 }
 
 std::vector<uint8_t> SdCardFontFamilyInfo::availableSizes() const {
@@ -213,7 +207,16 @@ bool SdCardFontRegistry::discover() {
 
   // Hidden root is scanned first so it wins on name collisions, matching the
   // sleep-folder pattern (/.sleep preferred over /sleep).
-  if (!scanRoot(FONTS_DIR_HIDDEN, families_) || !scanRoot(FONTS_DIR_VISIBLE, families_)) {
+  char hiddenRoot[16];
+  char visibleRoot[16];
+  const char* hiddenPath = FsHelpers::resolveRootDirectoryIgnoreCase(FONTS_DIR_HIDDEN, hiddenRoot, sizeof(hiddenRoot))
+                               ? hiddenRoot
+                               : FONTS_DIR_HIDDEN;
+  const char* visiblePath =
+      FsHelpers::resolveRootDirectoryIgnoreCase(FONTS_DIR_VISIBLE, visibleRoot, sizeof(visibleRoot))
+          ? visibleRoot
+          : FONTS_DIR_VISIBLE;
+  if (!scanRoot(hiddenPath, families_) || !scanRoot(visiblePath, families_)) {
     discoveryFailed_ = true;
     clear();
     LOG_ERR("SDREG", "Font discovery stopped after an out-of-memory directory scan");
@@ -260,11 +263,4 @@ const SdCardFontFamilyInfo* SdCardFontRegistry::findFamily(const std::string& na
     if (f.name == name) return &f;
   }
   return nullptr;
-}
-
-int SdCardFontRegistry::getFamilyIndex(const std::string& name) const {
-  for (int i = 0; i < static_cast<int>(families_.size()); i++) {
-    if (families_[i].name == name) return i;
-  }
-  return -1;
 }

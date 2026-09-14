@@ -8,6 +8,7 @@
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
+#include "util/InputReleaseGuard.h"
 
 namespace fui = freeink::ui;
 namespace {
@@ -23,11 +24,14 @@ EpubReaderFootnotesActivity::EpubReaderFootnotesActivity(GfxRenderer& renderer, 
 
 void EpubReaderFootnotesActivity::onEnter() {
   Activity::onEnter();
+  ignoreInitialBackRelease = mappedInput.isPressed(MappedInputManager::Button::Back);
+  ignoreInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
+  ignoreInitialPowerRelease = mappedInput.isPressed(MappedInputManager::Button::Power);
   selectedIndex = 0;
   topIndex = 0;
   visibleRows = 1;
   uiReady = false;
-  app.setTheme(uiThemeTokens(uiTarget));
+  applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &EpubReaderFootnotesActivity::onRowEvent, this);
   app.setScreen(&EpubReaderFootnotesActivity::listScreen, this);
   requestUpdate();
@@ -50,6 +54,15 @@ void EpubReaderFootnotesActivity::onRowEvent(const fui::ActionEvent& event, void
 }
 
 void EpubReaderFootnotesActivity::loop() {
+  if (InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Back,
+                                               ignoreInitialBackRelease) ||
+      InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Power,
+                                               ignoreInitialPowerRelease) ||
+      InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Confirm,
+                                               ignoreInitialConfirmRelease)) {
+    return;
+  }
+
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   const Rect header{safe.x, safe.y + metrics.topPadding, safe.width,
@@ -147,7 +160,8 @@ void EpubReaderFootnotesActivity::render(RenderLock&&) {
   uiReady = false;
   app.render();
   uiReady = true;
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), footnotes.empty() ? "" : tr(STR_SELECT), "", "");
+  const auto labels =
+      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), footnotes.empty() ? "" : tr(STR_SELECT), "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   renderer.displayBuffer();
 }

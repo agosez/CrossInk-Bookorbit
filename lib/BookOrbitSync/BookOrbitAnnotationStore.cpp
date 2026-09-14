@@ -92,6 +92,10 @@ bool BookOrbitAnnotationStore::put(const std::string& bookCachePath, const BookO
     LOG_ERR("BOA", "Refusing to store an annotation record with no timestamp or position");
     return false;
   }
+  if (bookCachePath.empty()) {
+    LOG_ERR("BOA", "No state directory for this book; the record is not stored");
+    return false;
+  }
 
   const std::string path = storePath(bookCachePath);
   uint32_t watermark = 0;

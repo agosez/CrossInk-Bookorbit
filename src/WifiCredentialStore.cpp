@@ -92,6 +92,7 @@ bool WifiCredentialStore::fromJson(JsonVariantConst doc) {
 }
 
 bool WifiCredentialStore::loadFromFile() {
+  LOG_INF("WCS", "load start");
   {
     std::lock_guard<std::mutex> lock(credentialMutex);
     credentials.clear();
@@ -100,21 +101,30 @@ bool WifiCredentialStore::loadFromFile() {
 
   const bool hasStoreFile = Storage.exists(getFilePath());
   if (PersistableStore<WifiCredentialStore>::loadFromFile()) {
+    LOG_INF("WCS", "load JSON complete");
     return true;
   }
   if (hasStoreFile) {
+    LOG_INF("WCS", "load JSON present but unreadable");
     return false;
   }
 
-  if (Storage.exists(WIFI_FILE_BIN) && loadFromBinaryFile()) {
+  if (Storage.exists(WIFI_FILE_BIN)) {
+    LOG_INF("WCS", "load legacy migration attempted");
+    if (!loadFromBinaryFile()) {
+      LOG_INF("WCS", "load legacy migration failed: read");
+      return false;
+    }
     if (saveToFile()) {
       Storage.rename(WIFI_FILE_BIN, WIFI_FILE_BAK);
-      LOG_DBG("WCS", "Migrated wifi.bin to wifi.json");
+      LOG_INF("WCS", "load legacy migration complete");
       return true;
     }
-    LOG_ERR("WCS", "Failed to save wifi during migration");
+    LOG_INF("WCS", "load legacy migration failed: save");
+    return false;
   }
 
+  LOG_INF("WCS", "load no store");
   return false;
 }
 
@@ -256,17 +266,6 @@ std::string WifiCredentialStore::getLastConnectedSsid() const {
   ensureLoaded();
   std::lock_guard<std::mutex> lock(credentialMutex);
   return lastConnectedSsid;
-}
-
-void WifiCredentialStore::clearLastConnectedSsid() {
-  ensureLoaded();
-
-  {
-    std::lock_guard<std::mutex> lock(credentialMutex);
-    if (lastConnectedSsid.empty()) return;
-    lastConnectedSsid.clear();
-  }
-  saveToFile();
 }
 
 void WifiCredentialStore::clearAll() {

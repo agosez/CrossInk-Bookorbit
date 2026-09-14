@@ -14,6 +14,7 @@
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
+#include "util/InputReleaseGuard.h"
 
 namespace fui = freeink::ui;
 
@@ -43,19 +44,26 @@ void KOReaderSettingsActivity::onRowEvent(const fui::ActionEvent& event, void* u
 void KOReaderSettingsActivity::onEnter() {
   Activity::onEnter();
 
+  ignoreInitialConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
   selectedIndex = 0;
   uiReady = false;
   visibleRows = 1;
   topIndex = 0;
-  app.setTheme(uiThemeTokens(uiTarget));
+  applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &KOReaderSettingsActivity::onRowEvent, this);
   app.setScreen(&KOReaderSettingsActivity::listScreen, this);
+  KOREADER_STORE.ensureLoaded();
   requestUpdate();
 }
 
 void KOReaderSettingsActivity::onExit() { Activity::onExit(); }
 
 void KOReaderSettingsActivity::loop() {
+  if (InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Confirm,
+                                               ignoreInitialConfirmRelease)) {
+    return;
+  }
+
   auto activateSelected = [this] { handleSelection(); };
 
   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
@@ -111,16 +119,15 @@ void KOReaderSettingsActivity::handleSelection() {
                            });
   } else if (selectedIndex == 1) {
     // Password
-    startActivityForResult(
-        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_KOREADER_PASSWORD),
-                                                KOREADER_STORE.getPassword(), 64, InputType::Password),
-        [this](const ActivityResult& result) {
-          if (!result.isCancelled) {
-            const auto& kb = std::get<KeyboardResult>(result.data);
-            KOREADER_STORE.setCredentials(KOREADER_STORE.getUsername(), kb.text);
-            KOREADER_STORE.saveToFile();
-          }
-        });
+    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_KOREADER_PASSWORD),
+                                                                   KOREADER_STORE.getPassword(), 64, InputType::Text),
+                           [this](const ActivityResult& result) {
+                             if (!result.isCancelled) {
+                               const auto& kb = std::get<KeyboardResult>(result.data);
+                               KOREADER_STORE.setCredentials(KOREADER_STORE.getUsername(), kb.text);
+                               KOREADER_STORE.saveToFile();
+                             }
+                           });
   } else if (selectedIndex == 2) {
     // Sync Server URL - prefill with https:// if empty to save typing
     const std::string currentUrl = KOREADER_STORE.getServerUrl();
@@ -206,8 +213,6 @@ void KOReaderSettingsActivity::buildListScreen(UiApp::ScreenType& screen) {
       }
     } else if (i == 3) {
       values[i] = KOREADER_STORE.getMatchMethod() == DocumentMatchMethod::FILENAME ? tr(STR_FILENAME) : tr(STR_BINARY);
-    } else if (i == 4) {
-      values[i] = KOREADER_STORE.getSendMetadata() ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     } else if (i == 5) {
       values[i] =
           KOREADER_STORE.getSyncBehavior() == KOReaderSyncBehavior::SMART ? tr(STR_SMART_SYNC) : tr(STR_ASK_EVERY_TIME);
@@ -222,6 +227,8 @@ void KOReaderSettingsActivity::buildListScreen(UiApp::ScreenType& screen) {
     fui::ListItem item;
     item.label = I18N.get(menuNames[i]);
     if (!values[i].empty()) item.value = values[i].c_str();
+    item.toggle = i == 4;
+    item.toggleChecked = KOREADER_STORE.getSendMetadata();
     item.actionValue = static_cast<int16_t>(i);
     items.push_back(item);
   }
@@ -259,7 +266,8 @@ void KOReaderSettingsActivity::render(RenderLock&&) {
   app.render();
   uiReady = true;
 
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels =
+      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer();
