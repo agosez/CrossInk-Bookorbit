@@ -139,9 +139,14 @@ class HalGPIO {
   // Verify that the physical power button remains held through input debounce.
   // A device configured to sleep on a short power press can wake on that same
   // short press, which has normally ended before firmware reaches this check.
+  // minHoldMs lengthens the window the button must stay held (ignored when
+  // shortPressWakes): a board that stayed powered through sleep reaches this
+  // check far sooner than one that booted from a full power-off, so without it
+  // a brief tap that would never have woken the powered-off board wakes the
+  // latched one.
   // Returns true if verification succeeded, false if device should return to sleep.
   // Should only be called when wakeup reason is PowerButton.
-  bool verifyPowerButtonWakeup(bool shortPressWakes);
+  bool verifyPowerButtonWakeup(bool shortPressWakes, unsigned long minHoldMs = 0);
 
   // Check if USB is connected
   bool isUsbConnected() const;

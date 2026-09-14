@@ -77,6 +77,9 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 
 #ifndef SIMULATOR
 #include <nvs.h>
+#ifndef SIMULATOR
+#include <esp_rtc_time.h>
+#endif
 #endif
 
 #include "AppVersion.h"
@@ -1098,6 +1101,15 @@ bool shouldClearX4WakeGhosting() {
 // been released during boot. The write is skipped when the value is unchanged.
 constexpr char WAKE_NVS_NAMESPACE[] = "crosspoint";
 constexpr char WAKE_SHORT_PRESS_KEY[] = "wakeShortPr";
+// Mirrored alongside: whether the last sleep kept the battery latch engaged
+// (SETTINGS.keepClockInSleep). A wake that fails verification must go back to
+// sleep the same way it came, not power the board off and lose the clock.
+constexpr char WAKE_KEEP_LATCH_KEY[] = "wakeKeepLatch";
+// A board that stayed powered through sleep skips the bootloader's image
+// validation on wake, so setup() runs while a brief tap is still held and the
+// 10 ms verification passes — the same tap never wakes the board from a full
+// power-off, whose boot outlasts it. Ask for a deliberate hold instead.
+constexpr unsigned long LATCHED_WAKE_HOLD_MS = 400;
 
 bool readWakeShortPressFromNvs() {
 #ifdef SIMULATOR
@@ -1112,16 +1124,39 @@ bool readWakeShortPressFromNvs() {
 #endif
 }
 
+bool readWakeKeepLatchFromNvs() {
+#ifdef SIMULATOR
+  return false;
+#else
+  nvs_handle_t handle;
+  if (nvs_open(WAKE_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return false;
+  uint8_t value = 0;
+  const esp_err_t result = nvs_get_u8(handle, WAKE_KEEP_LATCH_KEY, &value);
+  nvs_close(handle);
+  return result == ESP_OK && value != 0;
+#endif
+}
 void mirrorWakeShortPressToNvs() {
 #ifndef SIMULATOR
   const uint8_t expected =
       (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP || APP_STATE.quickLockResumePending) ? 1 : 0;
+  const uint8_t expectedKeepLatch = SETTINGS.keepClockInSleep != 0 ? 1 : 0;
   nvs_handle_t handle;
   if (nvs_open(WAKE_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return;
+  bool dirty = false;
   uint8_t current = 0;
   const bool hasCurrent = nvs_get_u8(handle, WAKE_SHORT_PRESS_KEY, &current) == ESP_OK;
   if (!hasCurrent || current != expected) {
     nvs_set_u8(handle, WAKE_SHORT_PRESS_KEY, expected);
+    dirty = true;
+  }
+  uint8_t currentKeepLatch = 0;
+  const bool hasKeepLatch = nvs_get_u8(handle, WAKE_KEEP_LATCH_KEY, &currentKeepLatch) == ESP_OK;
+  if (!hasKeepLatch || currentKeepLatch != expectedKeepLatch) {
+    nvs_set_u8(handle, WAKE_KEEP_LATCH_KEY, expectedKeepLatch);
+    dirty = true;
+  }
+  if (dirty) {
     nvs_commit(handle);
   }
   nvs_close(handle);
@@ -1280,8 +1315,15 @@ void setup() {
   // checkPanic() clears the watchdog capture marker after a successful SD
   // dump, so retain the boot classification for the later activity route.
   const bool rebootedFromPanic = HalSystem::isRebootFromPanic();
-  LOG_INF("BOOT", "Reset diagnostic: reset=%d(%s) sleepWake=%d(%s)", static_cast<int>(rawResetReason),
-          resetReasonName(rawResetReason), static_cast<int>(rawWakeupCause), wakeupCauseName(rawWakeupCause));
+  // rtcUpMs counts from power-on, so on a POWERON reset it is the cold-boot latency
+  // up to this line — the reference for LATCHED_WAKE_HOLD_MS.
+#ifdef SIMULATOR
+  const unsigned long long rtcUpMs = 0;
+#else
+  const unsigned long long rtcUpMs = esp_rtc_get_time_us() / 1000;
+#endif
+  LOG_INF("BOOT", "Reset diagnostic: reset=%d(%s) sleepWake=%d(%s) rtcUpMs=%llu", static_cast<int>(rawResetReason),
+          resetReasonName(rawResetReason), static_cast<int>(rawWakeupCause), wakeupCauseName(rawWakeupCause), rtcUpMs);
 
   // Read-and-clear so a panic later in setup() doesn't loop into silent reboot.
   // Validate the target too — RTC_NOINIT memory is uninitialized on cold boot.
@@ -1323,9 +1365,13 @@ void setup() {
   const auto wakeupReason = gpio.getWakeupReason();
 #ifndef SIMULATOR
   const bool shortPressWakes = readWakeShortPressFromNvs();
-  if (wakeupReason == HalGPIO::WakeupReason::PowerButton && !gpio.verifyPowerButtonWakeup(shortPressWakes)) {
+  const bool keepLatchInSleep = readWakeKeepLatchFromNvs();
+  // Only a wake from a latched deep sleep skipped the slow cold-boot path; a
+  // POWERON boot with the option on already outlasted a tap.
+  const unsigned long minHoldMs = (keepLatchInSleep && rawResetReason == ESP_RST_DEEPSLEEP) ? LATCHED_WAKE_HOLD_MS : 0;
+  if (wakeupReason == HalGPIO::WakeupReason::PowerButton && !gpio.verifyPowerButtonWakeup(shortPressWakes, minHoldMs)) {
     LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
-    powerManager.startDeepSleep(gpio);
+    powerManager.startDeepSleep(gpio, keepLatchInSleep);
   }
 #endif
 

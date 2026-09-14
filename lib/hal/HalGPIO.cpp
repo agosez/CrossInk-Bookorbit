@@ -298,7 +298,7 @@ bool HalGPIO::hasEdgeSideButtons() const {
          BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX4Classic;
 }
 
-bool HalGPIO::verifyPowerButtonWakeup(const bool shortPressWakes) {
+bool HalGPIO::verifyPowerButtonWakeup(const bool shortPressWakes, const unsigned long minHoldMs) {
   // M5Paper v1.1 reaches setup after a normal wheel click has already been
   // released. Its hardware pull-ups make this ghost-wake debounce unnecessary.
   if (BoardConfig::isPaperMono() || BoardConfig::isM5PaperV11() || BoardConfig::ACTIVE.input.power < 0) {
@@ -306,10 +306,11 @@ bool HalGPIO::verifyPowerButtonWakeup(const bool shortPressWakes) {
   }
 
   constexpr unsigned long POWER_WAKE_STABILITY_MS = 10;
+  const unsigned long holdMs = shortPressWakes ? POWER_WAKE_STABILITY_MS : std::max(POWER_WAKE_STABILITY_MS, minHoldMs);
   const bool heldAtFirstSample = inputMgr.isPowerButtonPhysicallyPressed();
   const unsigned long sampleStart = millis();
   inputMgr.update();
-  while (millis() - sampleStart < POWER_WAKE_STABILITY_MS || inputMgr.isDebouncePending()) {
+  while (millis() - sampleStart < holdMs || inputMgr.isDebouncePending()) {
     delay(1);
     inputMgr.update();
   }
