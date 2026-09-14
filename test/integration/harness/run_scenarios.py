@@ -109,15 +109,16 @@ def _fixed_str(s: str, size: int) -> bytes:
 
 def write_clipping_store(path: Path, title: str, author: str, book_path: str,
                          clippings: list[dict]) -> None:
-    """Clipping store v3: header then per record 8×u16, u32 timestamp,
-    u32 layoutSignature, char[48] chapter, u16 textLen, text."""
-    blob = struct.pack("<BH", 3, len(clippings))
+    """Clipping store v4: header then per record 8×u16, u32 timestamp,
+    u32 layoutSignature, u16 tableSelection, char[48] chapter, u16 textLen, text."""
+    blob = struct.pack("<BH", 4, len(clippings))
     blob += _pack_str(title) + _pack_str(author) + _pack_str(book_path)
     for c in clippings:
         text = c["text"].encode()
         blob += struct.pack("<8H", c["spine"], c.get("startPage", 0), c.get("endPage", 0),
                             c.get("pageCount", 0), 0, 0, 0, c.get("paragraph", 0xFFFF))
         blob += struct.pack("<II", c["timestamp"], c.get("layoutSignature", 0))
+        blob += struct.pack("<H", c.get("tableSelection", 0xFFFF))  # UINT16_MAX: not a table cell
         blob += _fixed_str(c.get("chapter", ""), CHAPTER_TITLE_MAX)
         blob += struct.pack("<H", len(text)) + text
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -129,7 +130,7 @@ def read_clipping_store(path: Path) -> list[dict]:
         return []
     raw = path.read_bytes()
     version, count = struct.unpack_from("<BH", raw, 0)
-    assert version == 3, f"unexpected clipping store version {version} in {path}"
+    assert version in (3, 4), f"unexpected clipping store version {version} in {path}"
     offset = 3
     title, offset = _read_str(raw, offset)
     author, offset = _read_str(raw, offset)
@@ -140,6 +141,8 @@ def read_clipping_store(path: Path) -> list[dict]:
         offset += 16
         timestamp, _sig = struct.unpack_from("<II", raw, offset)
         offset += 8
+        if version >= 4:
+            offset += 2  # tableSelection (u16), irrelevant to the exchanged text
         chapter = raw[offset:offset + CHAPTER_TITLE_MAX].split(b"\0", 1)[0].decode(errors="replace")
         offset += CHAPTER_TITLE_MAX
         (text_len,) = struct.unpack_from("<H", raw, offset)
