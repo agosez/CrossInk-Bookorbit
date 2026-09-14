@@ -5,6 +5,8 @@
 #include <array>
 #include <cstddef>
 
+#include "util/ReleaseSuppression.h"
+
 class GfxRenderer;
 
 class MappedInputManager {
@@ -72,17 +74,21 @@ class MappedInputManager {
   constexpr void setReaderTouchscreenOverride(bool) {}
 #endif
 
-  void update() const { gpio.update(); }
-  void suppressNextBackRelease() { suppressBackRelease = true; }
-  void suppressNextConfirmRelease() { suppressConfirmRelease = true; }
-  void suppressNextPowerRelease() { suppressPowerRelease = true; }
-  void suppressNextPowerConfirmRelease() { suppressPowerConfirmRelease = true; }
-  bool isPowerReleaseSuppressed() const { return suppressPowerRelease; }
+  void update() const;
+  void suppressNextBackRelease() { releaseSuppression.suppressBack(); }
+  void suppressNextConfirmRelease() { releaseSuppression.suppressConfirm(); }
+  void suppressNextPowerRelease() { releaseSuppression.suppressPower(); }
+  void suppressNextPowerConfirmRelease() { releaseSuppression.suppressPowerConfirm(); }
+  bool isPowerReleaseSuppressed() const { return releaseSuppression.isPowerReleaseSuppressed(); }
   bool wasPressed(Button button) const;
   bool wasReleased(Button button) const;
   void injectRelease(Button button) const { injectedReleases[static_cast<size_t>(button)] = true; }
   void clearInjectedReleases() const { injectedReleases.fill(false); }
   bool isPressed(Button button) const;
+  // Physical state is intentionally independent of release suppression. Use it
+  // when a destination activity must consume the release of the button that
+  // opened it.
+  bool isPhysicalPressed(Button button) const;
   const GfxRenderer& getRenderer() const { return renderer; }
   enum class RowTouch : uint8_t { None, Down, Tap };
 #if CROSSINK_APP_CAP_TOUCH
@@ -251,10 +257,7 @@ class MappedInputManager {
 #if CROSSINK_APP_CAP_TOUCH
   bool readerTouchscreenOverride = false;
 #endif
-  mutable bool suppressBackRelease = false;
-  mutable bool suppressConfirmRelease = false;
-  mutable bool suppressPowerRelease = false;
-  mutable bool suppressPowerConfirmRelease = false;
+  mutable ReleaseSuppression releaseSuppression;
   static constexpr size_t LABEL_BUFFER_SIZE = 128;
   mutable std::array<std::array<char, LABEL_BUFFER_SIZE>, 4> labelBuffers{};
   // One-frame synthetic releases let a chord route through the existing
@@ -287,6 +290,8 @@ class MappedInputManager {
 #endif
 
   bool mapButton(Button button, bool (HalGPIO::*fn)(uint8_t) const) const;
+  bool wasPhysicallyReleased(Button button) const;
+  void expireReleaseSuppressions() const;
   uint8_t mappedFrontButtonFor(Button button) const;
   bool shouldUsePowerAsConfirmFallback() const;
   bool shouldMirrorPowerAsConfirmHold() const;

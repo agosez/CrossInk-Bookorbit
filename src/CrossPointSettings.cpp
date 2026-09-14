@@ -245,6 +245,7 @@ uint8_t migrateTiltDirectionValue(const uint8_t direction) {
 
 const char* CrossPointSettings::getDefaultDeviceName() {
   if (BoardConfig::isSticky()) return "Sticky";
+  if (BoardConfig::isX4Pro()) return "CrossInk X4 Pro";
   if (gpio.deviceIsX3()) return "CrossInk X3";
   if (gpio.deviceIsX4()) return "CrossInk X4";
   return "CrossInk";
@@ -584,6 +585,12 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
       value = std::clamp(value, static_cast<uint8_t>(info.valueRange.min), static_cast<uint8_t>(info.valueRange.max));
     }
     this->*(info.valuePtr) = value;
+  }
+
+  // The old gesture setting controlled both directions. Preserve it on upgrade.
+  if (doc["previousPageGesture"].isNull()) {
+    previousPageGesture = pageTurnGesture;
+    needsResave = true;
   }
 
   // Older global settings files named the display preference readerDarkMode.
@@ -985,7 +992,7 @@ ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWid
   spec.hyphenationEnabled = hyphenationEnabled != 0;
   spec.embeddedStyle = embeddedStyle != 0;
   spec.imageRendering = imageRendering;
-  spec.bionicReadingEnabled = bionicReadingEnabled != 0;
+  spec.focusReadingEnabled = focusReadingEnabled != 0;
   spec.guideReadingEnabled = guideReadingEnabled != 0;
   spec.wordSpacing = wordSpacing;
   spec.renderMode = renderMode;

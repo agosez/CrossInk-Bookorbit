@@ -26,6 +26,7 @@ parser.add_argument("--zopfli", dest="zopfli", action="store_true", help="Use Zo
 parser.add_argument("--force-autohint", dest="force_autohint", action="store_true", help="Force FreeType auto-hinter instead of native font hinting. Improves stem width consistency for fonts with weak or no native TrueType hints.")
 parser.add_argument("--pnum", dest="pnum", action="store_true", help="Use proportional numerals (pnum OpenType feature) instead of default tabular figures. Reduces visual gaps between digits in running prose.")
 parser.add_argument("--darken-aa", dest="darken_aa", action="store_true", help="Use darker 2-bit anti-aliasing thresholds for reader fonts.")
+parser.add_argument("--no-default-intervals", action="store_true", help="Export only explicitly requested intervals, without default characters or controls.")
 args = parser.parse_args()
 
 import freetype
@@ -303,7 +304,7 @@ def load_glyph(code_point):
         face_index += 1
     return None
 
-unmerged_intervals = sorted(intervals + add_ints)
+unmerged_intervals = sorted(([] if args.no_default_intervals else intervals) + add_ints)
 intervals = []
 unvalidated_intervals = []
 for i_start, i_end in unmerged_intervals:

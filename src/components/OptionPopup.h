@@ -78,6 +78,16 @@ class OptionPopup {
 
   void setCancelCallback(std::function<void()> onCancel) { onCancelCallback = std::move(onCancel); }
 
+  // Disabled rows stay visible for context but cannot receive touch or button
+  // selection. The caller supplies one flag per option after show().
+  void setDisabledOptions(std::vector<bool> disabled) {
+    disabledOptions = std::move(disabled);
+    if (disabledOptions.size() != ownedStrings.size()) disabledOptions.assign(ownedStrings.size(), false);
+    selectedIndex = firstEnabledIndex(selectedIndex, 1);
+    firstOptionIndex = -1;
+    layoutValid = false;
+  }
+
   // Confirmation-style option lists can mark one option as the primary action
   // without changing the appearance of ordinary option selectors.
   void setPrimaryOptionIndex(const int index) {
@@ -95,6 +105,8 @@ class OptionPopup {
     activate(currentIndex);
   }
 
+  // Dismiss on the press edge and suppress its matching release, so an
+  // activity revealed beneath a popup cannot receive the same tap.
   void setDismissOnOutsideTouchDown(bool enabled) { dismissOnOutsideTouchDown = enabled; }
 
   // Actions that repaint synchronously can suppress the redundant update queued
@@ -118,13 +130,9 @@ class OptionPopup {
       for (int i = 0; i < static_cast<int>(hitLayout.options.size()); i++) {
         if (contains(hitLayout.options[i], tx, ty)) {
           const int optionIndex = hitLayout.firstOptionIndex + i;
+          if (isDisabled(optionIndex)) break;
           touchDownOptionIndex = optionIndex;
           touchDownTarget = TouchTarget::Option;
-          if (selectedIndex != optionIndex) {
-            selectedIndex = optionIndex;
-            layoutValid = false;
-            requestUpdate();
-          }
           break;
         }
       }
@@ -136,7 +144,12 @@ class OptionPopup {
         touchDownTarget = TouchTarget::Save;
         return true;
       }
-      if ((dismissOnOutsideTouchDown || confirmationMode) && !contains(hitLayout.dialog, tx, ty)) {
+      if (dismissOnOutsideTouchDown && !contains(hitLayout.dialog, tx, ty)) {
+        input.suppressCurrentTouchContact();
+        cancel(input, requestUpdate, false);
+        return true;
+      }
+      if (confirmationMode && !contains(hitLayout.dialog, tx, ty)) {
         touchDownTarget = TouchTarget::Outside;
       }
       return true;
@@ -164,8 +177,11 @@ class OptionPopup {
       }
       for (int i = 0; i < static_cast<int>(hitLayout.options.size()); i++) {
         if (contains(hitLayout.options[i], tx, ty)) {
-          selectedIndex = hitLayout.firstOptionIndex + i;
-          selectTouchOption(input, requestUpdate);
+          const int optionIndex = hitLayout.firstOptionIndex + i;
+          if (!isDisabled(optionIndex)) {
+            selectedIndex = optionIndex;
+            selectTouchOption(input, requestUpdate);
+          }
           return true;
         }
       }
@@ -181,9 +197,12 @@ class OptionPopup {
       const int visibleCount = static_cast<int>(hitLayout.options.size());
       if (visibleCount < count) {
         const int delta = swipe == MappedInputManager::SwipeDir::Up ? visibleCount : -visibleCount;
-        selectedIndex = std::clamp(selectedIndex + delta, 0, count - 1);
-        layoutValid = false;
-        requestUpdate();
+        const int next = std::clamp(hitLayout.firstOptionIndex + delta, 0, count - visibleCount);
+        if (next != firstOptionIndex) {
+          firstOptionIndex = next;
+          layoutValid = false;
+          requestUpdate();
+        }
       }
       touchDownOptionIndex = -1;
       touchDownTarget = TouchTarget::None;
@@ -199,9 +218,11 @@ class OptionPopup {
       } else if (confirmationMode && selectedIndex == 0) {
         footerFocused = true;
       } else {
-        selectedIndex = page ? ButtonNavigator::previousPageIndex(selectedIndex, count, visibleCount)
-                             : ButtonNavigator::previousIndex(selectedIndex, count);
+        const int next = page ? ButtonNavigator::previousPageIndex(selectedIndex, count, visibleCount)
+                              : ButtonNavigator::previousIndex(selectedIndex, count);
+        selectedIndex = firstEnabledIndex(next, -1);
       }
+      followSelection(visibleCount, count);
       layoutValid = false;
       requestUpdate();
     };
@@ -212,9 +233,11 @@ class OptionPopup {
       } else if (confirmationMode && selectedIndex == count - 1) {
         footerFocused = true;
       } else {
-        selectedIndex = page ? ButtonNavigator::nextPageIndex(selectedIndex, count, visibleCount)
-                             : ButtonNavigator::nextIndex(selectedIndex, count);
+        const int next = page ? ButtonNavigator::nextPageIndex(selectedIndex, count, visibleCount)
+                              : ButtonNavigator::nextIndex(selectedIndex, count);
+        selectedIndex = firstEnabledIndex(next, 1);
       }
+      followSelection(visibleCount, count);
       layoutValid = false;
       requestUpdate();
     };
@@ -254,8 +277,10 @@ class OptionPopup {
 
   void render(const GfxRenderer& renderer) const {
     if (!active) return;
+    const auto& renderLayout = getLayout(renderer);
     GUI.drawOptionPopup(renderer, title.c_str(), ownedStrings, selectedIndex, confirmationMode, tr(STR_CANCEL),
-                        tr(STR_SAVE), footerFocused, primaryOptionIndex, popupNote.boldLabel, popupNote.body);
+                        tr(STR_SAVE), footerFocused, primaryOptionIndex, popupNote.boldLabel, popupNote.body,
+                        disabledOptions, renderLayout.firstOptionIndex);
   }
 
   bool isActive() const { return active; }
@@ -334,7 +359,9 @@ class OptionPopup {
     const int rowStep = rowHeight + itemSpacing;
     const int visibleCount = std::max(1, std::min(optionCount, (maxListHeight + itemSpacing) / rowStep));
     const int safeSelectedIndex = std::clamp(selectedIndex, 0, optionCount - 1);
-    const int visibleStart = std::clamp(safeSelectedIndex - visibleCount / 2, 0, optionCount - visibleCount);
+    const int centeredStart = std::clamp(safeSelectedIndex - visibleCount / 2, 0, optionCount - visibleCount);
+    const int visibleStart =
+        firstOptionIndex < 0 ? centeredStart : std::clamp(firstOptionIndex, 0, optionCount - visibleCount);
     const int listHeight = rowHeight * visibleCount + itemSpacing * (visibleCount - 1);
     const bool hasHiddenOptions = visibleCount < optionCount;
     const int scrollBarGutter =
@@ -349,6 +376,7 @@ class OptionPopup {
 
     layout.dialog = Rect{dialogX, dialogY, dialogW, dialogH};
     layout.firstOptionIndex = visibleStart;
+    firstOptionIndex = visibleStart;
     layout.footer = TouchActionButtons::Layout();
     if (confirmationMode) {
       const int footerY = dialogY + dialogH - footerSpace;
@@ -389,7 +417,9 @@ class OptionPopup {
   bool footerFocused = false;
   std::string title;
   std::vector<std::string> ownedStrings;
+  std::vector<bool> disabledOptions;
   int selectedIndex = 0;
+  mutable int firstOptionIndex = -1;
   int touchDownOptionIndex = -1;
   TouchTarget touchDownTarget = TouchTarget::None;
   std::function<void(int)> onSelectCallback;
@@ -404,8 +434,10 @@ class OptionPopup {
 
   void activate(int currentIndex) {
     layoutValid = false;
+    firstOptionIndex = -1;
     touchDownOptionIndex = -1;
     touchDownTarget = TouchTarget::None;
+    disabledOptions.assign(ownedStrings.size(), false);
     footerFocused = false;
     skipPostSelectionUpdate_ = false;
     if (ownedStrings.empty()) {
@@ -450,6 +482,7 @@ class OptionPopup {
   }
 
   void save(MappedInputManager& input, const std::function<void()>& requestUpdate, const bool suppressRelease) {
+    if (isDisabled(selectedIndex)) return;
     active = false;
     suppressSelectionRelease(input, suppressRelease);
     if (onSelectCallback) onSelectCallback(selectedIndex);
@@ -483,5 +516,31 @@ class OptionPopup {
     if (suppressRelease) input.suppressNextBackRelease();
     if (onCancelCallback) onCancelCallback();
     requestUpdate();
+  }
+
+  bool isDisabled(const int index) const {
+    return index >= 0 && index < static_cast<int>(disabledOptions.size()) && disabledOptions[index];
+  }
+
+  int firstEnabledIndex(const int start, const int direction) const {
+    if (ownedStrings.empty()) return 0;
+    const int count = static_cast<int>(ownedStrings.size());
+    int index = std::clamp(start, 0, count - 1);
+    for (int attempts = 0; attempts < count; ++attempts) {
+      if (!isDisabled(index)) return index;
+      index = (index + (direction < 0 ? count - 1 : 1)) % count;
+    }
+    return std::clamp(start, 0, count - 1);
+  }
+
+  void followSelection(const int visibleCount, const int count) {
+    const int maxTop = std::max(0, count - visibleCount);
+    int top = std::clamp(firstOptionIndex, 0, maxTop);
+    if (selectedIndex < top) {
+      top = selectedIndex;
+    } else if (selectedIndex >= top + visibleCount) {
+      top = selectedIndex - visibleCount + 1;
+    }
+    firstOptionIndex = std::clamp(top, 0, maxTop);
   }
 };

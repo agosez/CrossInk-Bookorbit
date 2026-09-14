@@ -77,7 +77,7 @@ struct ReaderLayoutSettingsSnapshot {
   uint8_t imageRendering;
   uint8_t extraParagraphSpacing;
   uint8_t forceParagraphIndents;
-  uint8_t bionicReadingEnabled;
+  uint8_t focusReadingEnabled;
   uint8_t guideReadingEnabled;
   uint8_t epubRenderMode;
   // Indexing method is a build policy, not a layout input. A mode-only change
@@ -102,7 +102,7 @@ ReaderLayoutSettingsSnapshot captureReaderLayoutSettings() {
       SETTINGS.imageRendering,
       SETTINGS.extraParagraphSpacing,
       SETTINGS.forceParagraphIndents,
-      SETTINGS.bionicReadingEnabled,
+      SETTINGS.focusReadingEnabled,
       SETTINGS.guideReadingEnabled,
       SETTINGS.epubRenderMode,
   };
@@ -130,7 +130,7 @@ ReaderSettingsChangeMask classifyReaderSettingsChange(const ReaderLayoutSettings
       before.hyphenationEnabled != after.hyphenationEnabled ||
       before.extraParagraphSpacing != after.extraParagraphSpacing ||
       before.forceParagraphIndents != after.forceParagraphIndents ||
-      before.bionicReadingEnabled != after.bionicReadingEnabled ||
+      before.focusReadingEnabled != after.focusReadingEnabled ||
       before.guideReadingEnabled != after.guideReadingEnabled || before.imageRendering != after.imageRendering ||
       before.epubRenderMode != after.epubRenderMode ||
       std::strncmp(before.sdFontFamilyName, after.sdFontFamilyName, sizeof(before.sdFontFamilyName)) != 0) {
@@ -393,8 +393,11 @@ bool EpubReaderMenuActivity::activateSelectedItem() {
   }
 
   if (selectedAction == MenuAction::CONTROLS_OPTIONS) {
+    if (beginGlobalSettingsEditCallback) beginGlobalSettingsEditCallback(beginGlobalSettingsEditContext);
     startActivityForResult(std::make_unique<ControlsOptionsActivity>(renderer, mappedInput),
                            [this](const ActivityResult&) {
+                             if (endGlobalSettingsEditCallback)
+                               endGlobalSettingsEditCallback(endGlobalSettingsEditContext);
                              ActivityResult result;
                              result.isCancelled = true;
                              result.data = makeMenuResult(-1);
@@ -437,7 +440,11 @@ bool EpubReaderMenuActivity::handleTouchInput() {
   if (mappedInput.wasTabTapped(tabIndex) && tabIndex >= 0) {
     if (mappedInput.hasTouchHardware() && tabIndex == static_cast<int>(TOUCH_LOCK_ICON_INDEX)) {
       SETTINGS.disableReaderTouchscreen = SETTINGS.disableReaderTouchscreen ? 0 : 1;
-      SETTINGS.saveToFile();
+      if (saveGlobalSettingsCallback) {
+        saveGlobalSettingsCallback(saveGlobalSettingsContext);
+      } else {
+        SETTINGS.saveToFile();
+      }
       requestUpdate();
       return true;
     }
@@ -678,8 +685,8 @@ void EpubReaderMenuActivity::render(RenderLock&&) {
   const int tabBarHeight = readerMenuTabBarHeight(metrics.tabBarHeight, hasTouch);
   const bool tabsAtBottom = readerMenuTabsAtBottom(mappedInput);
 
-  // Header via GUI.drawHeader (already FreeInkUI-themed) for the battery
-  // indicator; the rest of the screen renders through the app.
+  // The menu is a system screen, not reading content: its status indicators
+  // stay visible unless their setting is Hide Always.
   const Rect headerRect = readerMenuHeaderRect(renderer, mappedInput);
   if (mappedInput.hasTouchHardware()) {
     const Rect homeRect = readerMenuHeaderActionRect(headerRect, metrics);
@@ -690,7 +697,7 @@ void EpubReaderMenuActivity::render(RenderLock&&) {
     drawSdkIcon(uiTarget, icon_home_24, homeRect.x + (homeRect.width - tabIconSize) / 2,
                 homeRect.y + (homeRect.height - tabIconSize) / 2);
   } else {
-    GUI.drawHeader(renderer, headerRect, title.c_str(), nullptr, true);
+    GUI.drawHeader(renderer, headerRect, title.c_str());
   }
 
   // Progress summary

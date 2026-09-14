@@ -17,10 +17,10 @@ default behavior for your other books.
 
 | Mode             | Best for                                                                                         | What it keeps                                                                                                  | What it simplifies                                                                            |
 | ---------------- | ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| CrossInk Default | Most books                                                                                       | Full CrossInk styling, detailed CSS, table layout, image sizing, publisher spacing, Bionic Reading, Guide Dots | Nothing by default                                                                            |
-| Balanced         | Books where CrossInk has fallen back automatically, or books you want to start in a lighter mode | Publisher spacing, image sizing, decorations, Bionic Reading, Guide Dots                                       | Complex CSS lookups and table layout                                                          |
-| Light            | Books where Balanced is still too heavy, or books you want to start in the safest mode           | Text content, hidden-content rules, basic formatting, Bionic Reading, Guide Dots                               | Complex CSS lookups, table layout, publisher spacing, image sizing, and decorative separators |
-| Safe Mode        | Final automatic fallback for books that still run out of memory in Light                         | Text content, hidden-content rules, basic formatting                                                           | Light-mode simplifications plus embedded styles, Bionic Reading, and Guide Dots               |
+| CrossInk Default | Most books                                                                                       | Full CrossInk styling, detailed CSS, table layout, image sizing, publisher spacing, Focus Reading, Guide Dots | Nothing by default                                                                            |
+| Balanced         | Books where CrossInk has fallen back automatically, or books you want to start in a lighter mode | Publisher spacing, image sizing, decorations, Focus Reading, Guide Dots                                       | Complex CSS lookups and table layout                                                          |
+| Light            | Books where Balanced is still too heavy, or books you want to start in the safest mode           | Text content, hidden-content rules, basic formatting, Focus Reading, Guide Dots                               | Complex CSS lookups, table layout, publisher spacing, image sizing, and decorative separators |
+| Safe Mode        | Final automatic fallback for books that still run out of memory in Light                         | Text content, hidden-content rules, basic formatting                                                           | Light-mode simplifications plus embedded styles, Focus Reading, and Guide Dots               |
 
 Most users can leave books on **CrossInk Default**. If a book runs out of memory
 while building a section, CrossInk will automatically try **Balanced** and then
@@ -41,7 +41,7 @@ CrossInk supports, including:
 - Publisher image sizing
 - Horizontal rules and other visual separators
 - Publisher page number markers, if enabled
-- Bionic Reading and Guide Dots, if enabled
+- Focus Reading and Guide Dots, if enabled
 
 Use this unless a specific book is causing memory errors, very slow indexing, or
 rendering problems.
@@ -58,7 +58,7 @@ It keeps:
 - Horizontal rules and other visual separators
 - Publisher page number markers, if enabled
 - `display: none` hidden-content rules
-- Bionic Reading and Guide Dots, if enabled
+- Focus Reading and Guide Dots, if enabled
 
 It simplifies:
 
@@ -79,7 +79,7 @@ It keeps:
 - Text content
 - Basic bold, italic, underline, superscript, and subscript handling
 - `display: none` hidden-content rules, so intentionally hidden content stays hidden
-- Bionic Reading and Guide Dots, if enabled
+- Focus Reading and Guide Dots, if enabled
 
 It simplifies or removes:
 
@@ -103,7 +103,7 @@ If CrossInk cannot build a section in Light because memory is still too tight,
 it tries Safe Mode once. Safe Mode uses Light rendering and also turns off:
 
 - Embedded styles
-- Bionic Reading
+- Focus Reading
 - Guide Dots
 
 When Safe Mode succeeds, CrossInk saves those settings for that book. The reader
@@ -153,5 +153,5 @@ You can also change it while reading:
 3. Choose **EPUB Render Mode**.
 
 Changing render mode rebuilds the affected book layout cache. Your reading
-progress, bookmarks, clippings, reading stats, Bionic Reading setting, and Guide
+progress, bookmarks, clippings, reading stats, Focus Reading setting, and Guide
 Dots setting are preserved.

@@ -42,8 +42,9 @@ struct Clipping {
   uint32_t layoutSignature = 0;
   uint32_t textOffset = 0;
   uint16_t textLength = 0;
-  // Session-only migration state. This occupies existing alignment padding and
-  // is intentionally omitted from the on-disk record.
+  uint16_t tableSelection = UINT16_MAX;
+  // Session-only migration state, intentionally omitted from the on-disk
+  // record.
   uint8_t resolvedLayoutBoundaries = 0;
   char chapterTitle[CLIPPING_CHAPTER_TITLE_MAX] = {};
 };
@@ -72,7 +73,8 @@ class ClippingStore {
 
   AddResult addClipping(uint16_t spineIndex, uint16_t startPage, uint16_t endPage, uint16_t pageCount,
                         uint16_t startWordIndex, uint16_t endWordIndex, uint16_t wordCount, const char* chapterTitle,
-                        uint16_t paragraphIndex, const std::string& text, uint32_t layoutSignature);
+                        uint16_t paragraphIndex, const std::string& text, uint16_t tableSelection,
+                        uint32_t layoutSignature);
   bool removeClippingAt(size_t index);
   // Replaces one clipping's stored text (capped at CLIPPING_TEXT_MAX), rewriting the file.
   // Used when the exact source text of a highlight becomes known after the clipping was built
@@ -82,18 +84,17 @@ class ClippingStore {
   void clearAll();
 
   bool hasClippings() const { return !clippings.empty(); }
-  bool hasClippingForPage(uint16_t spineIndex, uint16_t page) const;
   size_t clippingCount() const { return clippings.size(); }
   const Clipping* clippingAt(size_t index) const;
   const std::vector<Clipping>& getClippings() const { return clippings; }
   bool cacheResolvedLayoutRange(size_t index, uint16_t page, uint16_t startWord, uint16_t endWord,
                                 uint32_t layoutSignature);
   bool readClippingText(size_t index, std::string& out) const;
+  bool readClippingPreview(size_t index, std::string& out) const;
   bool readClippingText(const Clipping& clipping, std::string& out) const;
   // Reads at most maxBytes of the text (trimming a cut trailing UTF-8 sequence). List rows
   // show a one-line snippet, and reading a 2 KB text to display its first line -- once per
   // visible row, on every scroll step -- is what made the clippings list slow to open.
-  bool readClippingTextPrefix(size_t index, size_t maxBytes, std::string& out) const;
 
   static bool hasAnyClippings();
   static bool getAllClippedBooks(std::vector<ClippedBookEntry>& out);

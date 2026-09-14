@@ -188,6 +188,12 @@ void TxtReaderActivity::openReaderMenu() {
   });
 }
 
+bool TxtReaderActivity::handleFrontlightPanelResult(const FrontlightPanelResult& result) {
+  if (result.action != FrontlightPanelAction::SendNearbyBook || !txt) return false;
+  saveProgress(currentPage);
+  return activityManager.goToNearbyBookSend(txt->getPath(), true);
+}
+
 void TxtReaderActivity::loop() {
   if (quickActionsPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
 #if CROSSINK_APP_CAP_TOUCH
@@ -196,8 +202,10 @@ void TxtReaderActivity::loop() {
   const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
   if (touch.tapped &&
       ReaderUtils::isBottomStatusBarTap(renderer, touch.y, UITheme::getInstance().getStatusBarHeight())) {
-    statusBarVisible = !statusBarVisible;
-    requestUpdate();
+    if (SETTINGS.tapToHideStatusBar) {
+      statusBarVisible = !statusBarVisible;
+      requestUpdate();
+    }
     return;
   }
   if (consumeLongPowerButtonRelease()) {
@@ -530,9 +538,9 @@ bool TxtReaderActivity::executePowerButtonAction() {
   }
 
   if (executeReaderShortcutAction(longPowerAction)) {
-    if (longPowerAction == CrossPointSettings::SHORT_PWRBTN::TOGGLE_DARK_MODE) {
-      mappedInput.suppressNextPowerRelease();
-    }
+    // Reader long-press actions execute while Power is still held. Consume its
+    // later release so the app-wide shortcut dispatcher cannot run it again.
+    mappedInput.suppressNextPowerRelease();
     return true;
   }
 
@@ -834,8 +842,7 @@ void TxtReaderActivity::renderPage() {
 
   ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
 
-  // cppcheck-suppress knownConditionTrueFalse  // constant via ReaderUtils compatibility helper
-  if (SETTINGS.textAntiAliasing && ReaderUtils::readerForegroundBlack()) {
+  if (SETTINGS.textAntiAliasing) {
     ReaderUtils::renderAntiAliased(renderer, [&renderLines]() { renderLines(); });
   }
   // scope destructor clears font cache via FontCacheManager
@@ -853,6 +860,23 @@ void TxtReaderActivity::renderStatusBar() const {
   }
   GUI.drawStatusBar(renderer, progress, currentPage + 1, totalPages, title.c_str(), 0, 0, false, nullptr,
                     ReaderUtils::readerDarkModeEnabled());
+}
+
+bool TxtReaderActivity::getFrontlightPanelBookDetails(FrontlightPanelBookDetails& details) {
+  RenderLock lock(*this);
+  if (!txt) return false;
+
+  details.title = txt->getTitle();
+  details.author.clear();
+  details.chapter.clear();
+  if (!initialized || totalPages <= 0) {
+    details.progressPercent = 0;
+    return true;
+  }
+
+  const int page = std::clamp(currentPage, 0, totalPages - 1);
+  details.progressPercent = (page + 1) * 100 / totalPages;
+  return true;
 }
 
 bool TxtReaderActivity::saveProgress(const int page) {

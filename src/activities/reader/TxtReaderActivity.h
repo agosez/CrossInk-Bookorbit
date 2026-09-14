@@ -98,12 +98,22 @@ class TxtReaderActivity final : public Activity {
     return true;
   }
   bool isReaderActivity() const override { return true; }
+  bool usesFullScreenReaderVerticalSwipes() const override {
+#if defined(FREEINK_DEVICE_STICKY) && FREEINK_DEVICE_STICKY
+    return true;
+#else
+    return false;
+#endif
+  }
   bool canSnapshotForSleepOverlay() const override { return true; }
   bool allowPowerAsConfirmInReaderMode() const override { return quickActionsPopup.isActive(); }
   bool blocksGlobalInput() const override { return quickActionsPopup.isActive(); }
   bool handleShortcutAction(uint8_t action) override;
   bool handleShortcutAction(CrossPointSettings::SHORT_PWRBTN action) override;
   std::string getCurrentBookPath() const override { return txt ? txt->getPath() : std::string{}; }
+  std::string getCurrentBookTitle() const override { return txt ? txt->getTitle() : std::string{}; }
+  bool getFrontlightPanelBookDetails(FrontlightPanelBookDetails& details) override;
+  bool handleFrontlightPanelResult(const FrontlightPanelResult& result) override;
 
   // Renders the last saved page to the frame buffer without flushing to display.
   // Used by SleepActivity to prepare the background for the overlay sleep mode.

@@ -24,7 +24,7 @@ Open the reader menu and select **Reader Options** to adjust settings such as:
 - Image rendering
 - [Publisher Page Numbers](#publisher-page-numbers)
 - [Stable Page Numbers](#stable-page-numbers), when the book includes CrossInk reference metadata
-- [Bionic Reading](#bionic-reading) / Guide Dots
+- [Focus Reading](#focus-reading) / Guide Dots
 - Dark Reader Mode
 
 Changes take effect immediately.
@@ -33,17 +33,17 @@ For books that are slow to index or fail because of complex publisher styling,
 see [EPUB Indexing Methods](./epub-indexing.md) and
 [EPUB Render Modes](./epub-render-modes.md).
 
-## Bionic Reading
+## Focus Reading
 
-Bionic Reading is a reading aid that bolds the first portion of each word,
+Focus Reading is a reading aid that bolds the first portion of each word,
 guiding your eyes to natural fixation points and helping you read faster with
 less effort. Some readers, particularly those with ADHD, find it helps them
 stay engaged with the text and reduces mind-wandering.
 
-### Enabling Bionic Reading
+### Enabling Focus Reading
 
 1. Open **Settings > Reader**.
-2. Toggle **Bionic Reading** on.
+2. Toggle **Focus Reading** on.
 
 Toggling the setting triggers a re-index of the current book, just like changing
 font settings. Once indexing is complete, page turns proceed as normal. No
@@ -51,25 +51,25 @@ changes are made to the EPUB file.
 
 ### Examples
 
-<img src="./images/bionic-reading/bionic-reading.jpg" height="500" alt="Comparison of the same page with and without Bionic Reading enabled" />
+<img src="./images/focus-reading/focus-reading.jpg" height="500" alt="Comparison of the same page with and without Focus Reading enabled" />
 
-_Left: Bionic Reading off. Right: Bionic Reading on. Both using Literata._
+_Left: Focus Reading off. Right: Focus Reading on. Both using Literata._
 
-<img src="./images/bionic-reading/bionic-reading-notoserif.jpg" height="500" alt="Bionic Reading with Noto Serif font" />
+<img src="./images/focus-reading/focus-reading-notoserif.jpg" height="500" alt="Focus Reading with Noto Serif font" />
 
-_Bionic Reading with Noto Serif font._
+_Focus Reading with Noto Serif font._
 
-<img src="./images/bionic-reading/bionic-reading-merriweather.jpg" height="500" alt="Bionic Reading with Merriweather font" />
+<img src="./images/focus-reading/focus-reading-merriweather.jpg" height="500" alt="Focus Reading with Merriweather font" />
 
-_Bionic Reading with Merriweather font._
+_Focus Reading with Merriweather font._
 
-<img src="./images/bionic-reading/bionic-reading-atkinson.jpg" height="500" alt="Bionic Reading with Atkinson Hyperlegible Next font" />
+<img src="./images/focus-reading/focus-reading-atkinson.jpg" height="500" alt="Focus Reading with Atkinson Hyperlegible Next font" />
 
-_Bionic Reading with Atkinson Hyperlegible Next font._
+_Focus Reading with Atkinson Hyperlegible Next font._
 
 ### Notes
 
-Bionic Reading only applies to regular body text. Already-bold text, including
+Focus Reading only applies to regular body text. Already-bold text, including
 headings and emphasis, is left unchanged.
 
 ## Font Sizes And Downloadable Font Ranges

@@ -1164,8 +1164,9 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
     // highlight: the reader locates it by its text, rather than trusting coordinates this
     // device never measured. Zero is also the honest layout signature here.
     const size_t newIndex = CLIPPINGS.clippingCount();
+    // No table selection either: a server annotation carries text, not a cell coordinate.
     const auto added = CLIPPINGS.addClipping(spine, 0, 0, 0, 0, 0, 0, incoming.chapter.c_str(), paragraphHint,
-                                             incoming.text, /*layoutSignature=*/0);
+                                             incoming.text, /*tableSelection=*/UINT16_MAX, /*layoutSignature=*/0);
     if (added != ClippingStore::AddResult::Added) {
       LOG_ERR("BookOrbit", "Could not store server annotation %lu (result=%d)",
               static_cast<unsigned long>(incoming.serverId), static_cast<int>(added));

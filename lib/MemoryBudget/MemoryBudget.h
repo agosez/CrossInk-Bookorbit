@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include "PoolBudget.h"
+
 #if defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
 #include <esp_heap_caps.h>
 #endif
@@ -53,6 +55,10 @@ constexpr uint32_t IMAGE_DECODER_HEADROOM = 16U * 1024U;
 constexpr uint32_t JPEG_DECODER_APPROX_BYTES = 20U * 1024U;
 constexpr uint32_t EPUB_INLINE_JPEG_MIN_FREE = JPEG_DECODER_APPROX_BYTES + IMAGE_DECODER_HEADROOM;
 constexpr uint32_t EPUB_INLINE_JPEG_MIN_MAX_ALLOC = JPEG_DECODER_APPROX_BYTES;
+// Page preflight loans the framebuffer for legacy ZIP inflation. PXC2 uses
+// a separate session workspace below 6.5 KB; pagination retains only dimensions.
+constexpr uint32_t EPUB_OPTIMIZER_PXC_MIN_FREE = 8U * 1024U;
+constexpr uint32_t EPUB_OPTIMIZER_PXC_MIN_MAX_ALLOC = 6500U;
 
 inline HeapSnapshot snapshot() { return {ESP.getFreeHeap(), ESP.getMaxAllocHeap()}; }
 
@@ -152,6 +158,17 @@ inline bool hasHeapForEpubInlineImage(const char* tag, const char* source) {
 
   LOG_ERR(tag, "Low heap for inline image (%u free, %u max alloc, need %u/%u); suppressing %s", heap.freeHeap,
           heap.maxAllocHeap, requirement.minFree, requirement.minMaxAlloc, source ? source : "");
+  return false;
+}
+
+inline bool hasHeapForOptimizerPxcImage(const char* tag, const char* source) {
+  const auto heap = snapshot();
+  if (hasHeap(heap, EPUB_OPTIMIZER_PXC_MIN_FREE, EPUB_OPTIMIZER_PXC_MIN_MAX_ALLOC)) {
+    return true;
+  }
+
+  LOG_ERR(tag, "Low heap for optimizer image cache (%u free, %u max alloc, need %u/%u); suppressing %s", heap.freeHeap,
+          heap.maxAllocHeap, EPUB_OPTIMIZER_PXC_MIN_FREE, EPUB_OPTIMIZER_PXC_MIN_MAX_ALLOC, source ? source : "");
   return false;
 }
 

@@ -38,7 +38,7 @@ inline bool isPowerButtonActionAvailableOutsideReader(const CrossPointSettings::
     case CrossPointSettings::SHORT_PWRBTN::PAGE_TURN:
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_FONT:
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_GUIDE_DOTS:
-    case CrossPointSettings::SHORT_PWRBTN::TOGGLE_BIONIC_READING:
+    case CrossPointSettings::SHORT_PWRBTN::TOGGLE_FOCUS_READING:
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_BOOKMARK:
     case CrossPointSettings::SHORT_PWRBTN::MARK_FINISHED:
     case CrossPointSettings::SHORT_PWRBTN::READING_STATS:

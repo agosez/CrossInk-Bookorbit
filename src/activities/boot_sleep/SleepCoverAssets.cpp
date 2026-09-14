@@ -67,7 +67,8 @@ bool prepareTxt(const Txt& txt) {
   return txt.generateCoverBmp();
 }
 
-bool prepareFullCoverForPath(const std::string& bookPath, const bool cropped, const GfxRenderer* renderer) {
+bool prepareFullCoverForPath(const std::string& bookPath, const bool cropped, const GfxRenderer* renderer,
+                             bool imageLevels) {
   if (bookPath.empty()) {
     return false;
   }
@@ -77,7 +78,7 @@ bool prepareFullCoverForPath(const std::string& bookPath, const bool cropped, co
     if (!epub.load(/*buildIfMissing=*/false, /*skipLoadingCss=*/true, Epub::XLocationLoadMode::Skip)) {
       return false;
     }
-    return epub.generateCoverBmp(cropped, renderer, readerFontIdForRenderer(renderer));
+    return epub.generateCoverBmp(cropped, renderer, readerFontIdForRenderer(renderer), imageLevels);
   }
   if (FsHelpers::hasXtcExtension(bookPath)) {
     Xtc xtc(bookPath, "/.crosspoint");
@@ -88,7 +89,7 @@ bool prepareFullCoverForPath(const std::string& bookPath, const bool cropped, co
   }
   if (FsHelpers::hasTxtExtension(bookPath) || FsHelpers::hasMarkdownExtension(bookPath)) {
     Txt txt(bookPath, "/.crosspoint");
-    return txt.generateCoverBmp();
+    return txt.generateCoverBmp(imageLevels);
   }
   return false;
 }
@@ -162,14 +163,14 @@ std::string reusableCoverPathFor(const std::string& bookPath) {
   return {};
 }
 
-std::string cachedCoverPathFor(const std::string& bookPath, const bool cropped) {
+std::string cachedCoverPathFor(const std::string& bookPath, const bool cropped, bool imageLevels) {
   std::string coverPath;
   if (FsHelpers::hasEpubExtension(bookPath)) {
-    coverPath = Epub(bookPath, "/.crosspoint").getCoverBmpPath(cropped);
+    coverPath = Epub(bookPath, "/.crosspoint").getCoverBmpPath(cropped, imageLevels);
   } else if (FsHelpers::hasXtcExtension(bookPath)) {
     coverPath = Xtc(bookPath, "/.crosspoint").getCoverBmpPath();
   } else if (FsHelpers::hasTxtExtension(bookPath) || FsHelpers::hasMarkdownExtension(bookPath)) {
-    coverPath = Txt(bookPath, "/.crosspoint").getCoverBmpPath();
+    coverPath = Txt(bookPath, "/.crosspoint").getCoverBmpPath(imageLevels);
   }
 
   return fileExists(coverPath) ? coverPath : std::string{};

@@ -19,6 +19,9 @@ namespace buildscratch {
 void lend(uint8_t* buf, size_t len);
 void reclaim();
 
+// Advisory only: does not reserve the block; claim() must still succeed.
+bool available(size_t minLen);
+
 // Consumer side: exclusive claim of the whole block if it is at least minLen
 // bytes; nullptr means "use the heap". Release with the same pointer.
 uint8_t* claim(size_t minLen, size_t* lenOut = nullptr);

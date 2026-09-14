@@ -257,7 +257,7 @@ uint16_t measureWordWidth(const GfxRenderer& renderer, const int fontId, const s
 
 bool isWordCharacter(uint32_t cp);
 
-struct BionicTokenMetadata {
+struct FocusTokenMetadata {
   EpdFontFamily::Style style;
   uint8_t boundary;
 };
@@ -278,9 +278,9 @@ uint32_t lastCodepointBeforeByteOffset(const std::string& word, const size_t byt
   return utf8NextCodepoint(&ptr);
 }
 
-BionicTokenMetadata computeBionicMetadata(const std::string_view segment, const EpdFontFamily::Style baseStyle,
-                                          const bool bionicReadingEnabled) {
-  if (!bionicReadingEnabled || (baseStyle & EpdFontFamily::BOLD) != 0 || segment.empty()) {
+FocusTokenMetadata computeFocusMetadata(const std::string_view segment, const EpdFontFamily::Style baseStyle,
+                                        const bool focusReadingEnabled) {
+  if (!focusReadingEnabled || (baseStyle & EpdFontFamily::BOLD) != 0 || segment.empty()) {
     return {baseStyle, 0};
   }
 
@@ -319,8 +319,8 @@ BionicTokenMetadata computeBionicMetadata(const std::string_view segment, const 
   return {baseStyle, static_cast<uint8_t>(std::min<size_t>(splitByteOffset, UINT8_MAX))};
 }
 
-int measureBionicRunOffset(const GfxRenderer& renderer, const int fontId, const std::string& word,
-                           const EpdFontFamily::Style style, const uint8_t boundary, const bool rtl) {
+int measureFocusRunOffset(const GfxRenderer& renderer, const int fontId, const std::string& word,
+                          const EpdFontFamily::Style style, const uint8_t boundary, const bool rtl) {
   if (boundary == 0 || boundary >= word.size()) {
     return 0;
   }
@@ -345,14 +345,14 @@ int measureBionicRunOffset(const GfxRenderer& renderer, const int fontId, const 
 }
 
 uint16_t measureTokenWidth(const GfxRenderer& renderer, const int fontId, const std::string& word,
-                           const EpdFontFamily::Style style, const uint8_t bionicBoundary,
+                           const EpdFontFamily::Style style, const uint8_t focusBoundary,
                            const bool appendHyphen = false) {
-  if (bionicBoundary == 0 || bionicBoundary >= word.size() || appendHyphen || containsSoftHyphen(word)) {
+  if (focusBoundary == 0 || focusBoundary >= word.size() || appendHyphen || containsSoftHyphen(word)) {
     return measureWordWidth(renderer, fontId, word, style, appendHyphen);
   }
 
-  const int suffixX = measureBionicRunOffset(renderer, fontId, word, style, bionicBoundary, false);
-  const int suffixWidth = renderer.getTextAdvanceX(fontId, word.c_str() + bionicBoundary, style);
+  const int suffixX = measureFocusRunOffset(renderer, fontId, word, style, focusBoundary, false);
+  const int suffixWidth = renderer.getTextAdvanceX(fontId, word.c_str() + focusBoundary, style);
   return static_cast<uint16_t>(std::max(0, suffixX + suffixWidth));
 }
 
@@ -463,7 +463,7 @@ bool isCjkIdeograph(const uint32_t cp) {
 void ParsedText::reserveTokenCapacity(const size_t additionalTokens) {
   const size_t requiredSize = words.size() + additionalTokens;
   if (wordStyles.capacity() >= requiredSize && wordContinues.capacity() >= requiredSize &&
-      wordNoSpaceBefore.capacity() >= requiredSize && wordBionicBoundary.capacity() >= requiredSize &&
+      wordNoSpaceBefore.capacity() >= requiredSize && wordFocusBoundary.capacity() >= requiredSize &&
       wordGuideDotBefore.capacity() >= requiredSize && wordBackgroundBlack.capacity() >= requiredSize &&
       wordVisibleOffsetDeltas.capacity() >= requiredSize) {
     return;
@@ -479,7 +479,7 @@ void ParsedText::reserveTokenCapacity(const size_t additionalTokens) {
   wordStyles.reserve(newCapacity);
   wordContinues.reserve(newCapacity);
   wordNoSpaceBefore.reserve(newCapacity);
-  wordBionicBoundary.reserve(newCapacity);
+  wordFocusBoundary.reserve(newCapacity);
   wordGuideDotBefore.reserve(newCapacity);
   wordBackgroundBlack.reserve(newCapacity);
   wordVisibleOffsetDeltas.reserve(newCapacity);
@@ -571,14 +571,14 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
 
   bool guideDotBeforeNextToken = false;
   const auto pushToken = [&](std::string token, const bool continues, const bool noSpaceBefore,
-                             const EpdFontFamily::Style tokenStyle, const uint8_t bionicBoundary,
+                             const EpdFontFamily::Style tokenStyle, const uint8_t focusBoundary,
                              const uint32_t tokenVisibleOffset) {
     reserveTokenCapacity(1);
     words.push_back(std::move(token));
     wordStyles.push_back(tokenStyle);
     wordContinues.push_back(continues);
     wordNoSpaceBefore.push_back(noSpaceBefore);
-    wordBionicBoundary.push_back(bionicBoundary);
+    wordFocusBoundary.push_back(focusBoundary);
     wordGuideDotBefore.push_back(guideDotBeforeNextToken);
     guideDotBeforeNextToken = false;
     const uint8_t linkFlags =
@@ -642,8 +642,8 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
     return;
   }
 
-  // Already-bold text should stay fully bold; bionic splitting would make its suffix regular later.
-  if (!this->bionicReadingEnabled || (baseStyle & EpdFontFamily::BOLD) != 0) {
+  // Already-bold text should stay fully bold; focus splitting would make its suffix regular later.
+  if (!this->focusReadingEnabled || (baseStyle & EpdFontFamily::BOLD) != 0) {
     pushToken(std::move(word), effectiveAttachToPrevious, effectiveNoSpaceBefore, baseStyle, 0, visibleTextOffset);
     if (wordStartsRtl) {
       hasRtlWord = true;
@@ -670,8 +670,8 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
       // Punctuation and Numbers stay regular
       pushToken(std::string(segment), attach, noSpaceBefore, baseStyle, 0, segmentOffset);
     } else {
-      const BionicTokenMetadata bionic = computeBionicMetadata(segment, baseStyle, bionicReadingEnabled);
-      pushToken(std::string(segment), attach, noSpaceBefore, bionic.style, bionic.boundary, segmentOffset);
+      const FocusTokenMetadata focus = computeFocusMetadata(segment, baseStyle, focusReadingEnabled);
+      pushToken(std::string(segment), attach, noSpaceBefore, focus.style, focus.boundary, segmentOffset);
     }
   };
 
@@ -777,12 +777,18 @@ bool ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fo
     return true;
   }
 
-  Arena layoutArena;
+  Arena layoutArena(psramHeapAvailable() ? ArenaBacking::PsramPreferred : ArenaBacking::Default);
   if (!layoutArena.init(LAYOUT_ARENA_SLAB_BYTES)) {
     LOG_ERR("PTX", "Failed to allocate layout scratch arena (%u bytes)",
             static_cast<unsigned>(LAYOUT_ARENA_SLAB_BYTES));
     return false;
   }
+
+  ScopedCleanup logLayoutPools{[&layoutArena] {
+    LOG_DBG("PTX", "Layout slabs: internal=%u psram=%u psramReserve=%u",
+            unsigned(layoutArena.capacityInPool(MemoryPool::Internal)),
+            unsigned(layoutArena.capacityInPool(MemoryPool::Psram)), unsigned(MemoryBudget::EPUB_PSRAM_RESERVE));
+  }};
 
   if (!blockStyle.directionDefined && hasRtlWord) {
     const size_t wordsToScan = std::min(words.size(), RTL_PARAGRAPH_PROBE_WORDS);
@@ -807,7 +813,7 @@ bool ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fo
     for (size_t i = 0; i < wordStyles.size(); ++i) {
       const auto s = wordStyles[i];
       styleMask |= static_cast<uint8_t>(1u << (static_cast<uint8_t>(s) & 0x03));
-      if (i < wordBionicBoundary.size() && wordBionicBoundary[i] > 0) {
+      if (i < wordFocusBoundary.size() && wordFocusBoundary[i] > 0) {
         const auto boldStyle = static_cast<EpdFontFamily::Style>(s | EpdFontFamily::BOLD);
         styleMask |= static_cast<uint8_t>(1u << (static_cast<uint8_t>(boldStyle) & 0x03));
       }
@@ -863,7 +869,7 @@ bool ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fo
     wordStyles.erase(wordStyles.begin(), wordStyles.begin() + consumed);
     wordContinues.erase(wordContinues.begin(), wordContinues.begin() + consumed);
     wordNoSpaceBefore.erase(wordNoSpaceBefore.begin(), wordNoSpaceBefore.begin() + consumed);
-    wordBionicBoundary.erase(wordBionicBoundary.begin(), wordBionicBoundary.begin() + consumed);
+    wordFocusBoundary.erase(wordFocusBoundary.begin(), wordFocusBoundary.begin() + consumed);
     wordGuideDotBefore.erase(wordGuideDotBefore.begin(), wordGuideDotBefore.begin() + consumed);
     wordBackgroundBlack.erase(wordBackgroundBlack.begin(), wordBackgroundBlack.begin() + consumed);
     eraseVisibleOffsetPrefix(consumed);
@@ -906,7 +912,7 @@ int ParsedText::calculateRubyExtraStartOffset(const size_t wordIdx, const size_t
   int groupActualWidth = 0;
   for (size_t k = 0; k < groupWordCount; ++k) {
     const size_t index = wordIdx + k;
-    groupActualWidth += measureTokenWidth(renderer, fontId, words[index], wordStyles[index], wordBionicBoundary[index]);
+    groupActualWidth += measureTokenWidth(renderer, fontId, words[index], wordStyles[index], wordFocusBoundary[index]);
   }
   const int rubyWidth = renderer.getTextAdvanceX(fontId, rubyTexts[wordIdx].c_str(), EpdFontFamily::SUP);
   return rubyWidth > groupActualWidth ? (rubyWidth - groupActualWidth) / 2 : 0;
@@ -927,7 +933,7 @@ int ParsedText::calculateRubyExtraEndOffset(const size_t lineStartIdx, const siz
 
   int groupActualWidth = 0;
   for (size_t index = leaderIdx; index < lineBreakIdx; ++index) {
-    groupActualWidth += measureTokenWidth(renderer, fontId, words[index], wordStyles[index], wordBionicBoundary[index]);
+    groupActualWidth += measureTokenWidth(renderer, fontId, words[index], wordStyles[index], wordFocusBoundary[index]);
   }
   const int rubyWidth = renderer.getTextAdvanceX(fontId, rubyTexts[leaderIdx].c_str(), EpdFontFamily::SUP);
   return rubyWidth > groupActualWidth ? (rubyWidth - groupActualWidth) / 2 : 0;
@@ -939,7 +945,7 @@ bool ParsedText::calculateWordWidths(ArenaVector<uint16_t>& wordWidths, const Gf
   }
 
   for (size_t i = 0; i < words.size(); ++i) {
-    if (!wordWidths.push_back(measureTokenWidth(renderer, fontId, words[i], wordStyles[i], wordBionicBoundary[i]))) {
+    if (!wordWidths.push_back(measureTokenWidth(renderer, fontId, words[i], wordStyles[i], wordFocusBoundary[i]))) {
       return false;
     }
   }
@@ -1321,9 +1327,9 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
     if (needsHyphen) {
       prefix.push_back('-');
     }
-    const BionicTokenMetadata prefixBionic = computeBionicMetadata(prefix, style, bionicReadingEnabled);
+    const FocusTokenMetadata prefixFocus = computeFocusMetadata(prefix, style, focusReadingEnabled);
     const int prefixWidth =
-        measureTokenWidth(renderer, fontId, prefix, prefixBionic.style, prefixBionic.boundary, /*appendHyphen=*/false);
+        measureTokenWidth(renderer, fontId, prefix, prefixFocus.style, prefixFocus.boundary, /*appendHyphen=*/false);
     if (prefixWidth > availableWidth || prefixWidth <= chosenWidth) {
       continue;  // Skip if too wide or not an improvement
     }
@@ -1355,18 +1361,18 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
     words[wordIndex].push_back('-');
     wordBackgroundBlack[wordIndex] |= TextBlock::WORD_FLAG_INSERTED_HYPHEN;
   }
-  const BionicTokenMetadata prefixBionic = computeBionicMetadata(words[wordIndex], style, bionicReadingEnabled);
-  wordStyles[wordIndex] = prefixBionic.style;
-  wordBionicBoundary[wordIndex] = prefixBionic.boundary;
+  const FocusTokenMetadata prefixFocus = computeFocusMetadata(words[wordIndex], style, focusReadingEnabled);
+  wordStyles[wordIndex] = prefixFocus.style;
+  wordFocusBoundary[wordIndex] = prefixFocus.boundary;
 
   // Insert the remainder word (with matching style and continuation flag) directly after the prefix.
-  const BionicTokenMetadata remainderBionic = computeBionicMetadata(remainder, style, bionicReadingEnabled);
+  const FocusTokenMetadata remainderFocus = computeFocusMetadata(remainder, style, focusReadingEnabled);
   words.insert(words.begin() + wordIndex + 1, remainder);
   insertVisibleOffset(wordIndex + 1, remainderOffset);
-  wordStyles.insert(wordStyles.begin() + wordIndex + 1, remainderBionic.style);
+  wordStyles.insert(wordStyles.begin() + wordIndex + 1, remainderFocus.style);
   wordBackgroundBlack.insert(wordBackgroundBlack.begin() + wordIndex + 1, wordBackgroundBlack[wordIndex]);
   // The hyphen remainder starts fresh on the next line and does not inherit a virtual guide dot.
-  wordBionicBoundary.insert(wordBionicBoundary.begin() + wordIndex + 1, remainderBionic.boundary);
+  wordFocusBoundary.insert(wordFocusBoundary.begin() + wordIndex + 1, remainderFocus.boundary);
   wordGuideDotBefore.insert(wordGuideDotBefore.begin() + wordIndex + 1, false);
   wordBackgroundBlack[wordIndex + 1] &= static_cast<uint8_t>(~TextBlock::WORD_FLAG_INSERTED_HYPHEN);
   if (wordIndex + 1 <= rubyTexts.size()) {
@@ -1402,7 +1408,7 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
   // Update cached widths to reflect the new prefix/remainder pairing.
   wordWidths[wordIndex] = static_cast<uint16_t>(chosenWidth);
   const uint16_t remainderWidth =
-      measureTokenWidth(renderer, fontId, remainder, remainderBionic.style, remainderBionic.boundary);
+      measureTokenWidth(renderer, fontId, remainder, remainderFocus.style, remainderFocus.boundary);
   if (!wordWidths.insert(wordIndex + 1, remainderWidth)) {
     LOG_ERR("PTX", "OOM inserting hyphenated word width");
     return false;
@@ -1443,8 +1449,8 @@ bool ParsedText::splitTokenAtCodepointBoundary(const size_t wordIndex, const int
 
     const size_t candidateOffset = static_cast<size_t>(next - wordStart);
     prefix.assign(word.data(), candidateOffset);
-    const BionicTokenMetadata prefixBionic = computeBionicMetadata(prefix, style, bionicReadingEnabled);
-    const int prefixWidth = measureTokenWidth(renderer, fontId, prefix, prefixBionic.style, prefixBionic.boundary);
+    const FocusTokenMetadata prefixFocus = computeFocusMetadata(prefix, style, focusReadingEnabled);
+    const int prefixWidth = measureTokenWidth(renderer, fontId, prefix, prefixFocus.style, prefixFocus.boundary);
     if (prefixWidth > availableWidth) {
       // Prefix widths grow with the prefix, so every longer candidate is also
       // too wide. Stop here instead of measuring the rest of a huge token.
@@ -1468,16 +1474,16 @@ bool ParsedText::splitTokenAtCodepointBoundary(const size_t wordIndex, const int
     remainderOffset++;
   }
   words[wordIndex].resize(chosenOffset);
-  const BionicTokenMetadata prefixBionic = computeBionicMetadata(words[wordIndex], style, bionicReadingEnabled);
-  wordStyles[wordIndex] = prefixBionic.style;
-  wordBionicBoundary[wordIndex] = prefixBionic.boundary;
-  const BionicTokenMetadata remainderBionic = computeBionicMetadata(remainder, style, bionicReadingEnabled);
+  const FocusTokenMetadata prefixFocus = computeFocusMetadata(words[wordIndex], style, focusReadingEnabled);
+  wordStyles[wordIndex] = prefixFocus.style;
+  wordFocusBoundary[wordIndex] = prefixFocus.boundary;
+  const FocusTokenMetadata remainderFocus = computeFocusMetadata(remainder, style, focusReadingEnabled);
   reserveTokenCapacity(1);
   words.insert(words.begin() + wordIndex + 1, remainder);
   insertVisibleOffset(wordIndex + 1, remainderOffset);
-  wordStyles.insert(wordStyles.begin() + wordIndex + 1, remainderBionic.style);
+  wordStyles.insert(wordStyles.begin() + wordIndex + 1, remainderFocus.style);
   wordBackgroundBlack.insert(wordBackgroundBlack.begin() + wordIndex + 1, wordBackgroundBlack[wordIndex]);
-  wordBionicBoundary.insert(wordBionicBoundary.begin() + wordIndex + 1, remainderBionic.boundary);
+  wordFocusBoundary.insert(wordFocusBoundary.begin() + wordIndex + 1, remainderFocus.boundary);
   wordGuideDotBefore.insert(wordGuideDotBefore.begin() + wordIndex + 1, false);
   wordBackgroundBlack[wordIndex + 1] &= static_cast<uint8_t>(~TextBlock::WORD_FLAG_INSERTED_HYPHEN);
   wordContinues.insert(wordContinues.begin() + wordIndex + 1, false);
@@ -1487,7 +1493,7 @@ bool ParsedText::splitTokenAtCodepointBoundary(const size_t wordIndex, const int
   const uint16_t remainderWidth =
       remainder.size() >= PATHOLOGICAL_TOKEN_MIN_BYTES
           ? std::numeric_limits<uint16_t>::max()
-          : measureTokenWidth(renderer, fontId, remainder, remainderBionic.style, remainderBionic.boundary);
+          : measureTokenWidth(renderer, fontId, remainder, remainderFocus.style, remainderFocus.boundary);
   if (!wordWidths.insert(wordIndex + 1, remainderWidth)) {
     LOG_ERR("PTX", "OOM inserting split token width");
     return false;
@@ -1511,13 +1517,13 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
   auto& lineWords = lineWordsScratch;
   auto& lineWordStyles = lineStylesScratch;
   auto& lineWordWidths = lineWidthsScratch;
-  auto& lineBionicBoundary = lineBionicBoundaryScratch;
+  auto& lineFocusBoundary = lineFocusBoundaryScratch;
   auto& lineGuideDotBefore = lineGuideDotBeforeScratch;
   auto& lineBackgroundBlack = lineBackgroundBlackScratch;
   lineWords.clear();
   lineWordStyles.clear();
   lineWordWidths.clear();
-  lineBionicBoundary.clear();
+  lineFocusBoundary.clear();
   lineGuideDotBefore.clear();
   lineBackgroundBlack.clear();
   std::vector<std::string> lineRubyTexts;
@@ -1531,7 +1537,7 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
   lineWords.reserve(lineWordCount);
   lineWordStyles.reserve(lineWordCount);
   lineWordWidths.reserve(lineWordCount);
-  lineBionicBoundary.reserve(lineWordCount);
+  lineFocusBoundary.reserve(lineWordCount);
   lineGuideDotBefore.reserve(lineWordCount);
   lineBackgroundBlack.reserve(lineWordCount);
 
@@ -1541,9 +1547,9 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
     lineWords.push_back(std::move(word));
     lineWordStyles.push_back(wordStyles[sourceIndex]);
     lineWordWidths.push_back(wordWidths[sourceIndex]);
-    lineBionicBoundary.push_back(wordBionicBoundary[sourceIndex]);
-    if (lineBionicBoundary.back() >= lineWords.back().size()) {
-      lineBionicBoundary.back() = 0;
+    lineFocusBoundary.push_back(wordFocusBoundary[sourceIndex]);
+    if (lineFocusBoundary.back() >= lineWords.back().size()) {
+      lineFocusBoundary.back() = 0;
     }
     lineGuideDotBefore.push_back(i > 0 && wordGuideDotBefore[sourceIndex]);
     lineBackgroundBlack.push_back(wordBackgroundBlack[sourceIndex]);
@@ -1603,14 +1609,14 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
     reorderedStylesScratch.clear();
     reorderedContinuesScratch.clear();
     reorderedNoSpaceBeforeScratch.clear();
-    reorderedBionicBoundaryScratch.clear();
+    reorderedFocusBoundaryScratch.clear();
     reorderedGuideDotBeforeScratch.clear();
     reorderedBackgroundBlackScratch.clear();
     reorderedWordsScratch.reserve(visualOrderScratch.size());
     reorderedStylesScratch.reserve(visualOrderScratch.size());
     reorderedContinuesScratch.reserve(visualOrderScratch.size());
     reorderedNoSpaceBeforeScratch.reserve(visualOrderScratch.size());
-    reorderedBionicBoundaryScratch.reserve(visualOrderScratch.size());
+    reorderedFocusBoundaryScratch.reserve(visualOrderScratch.size());
     reorderedGuideDotBeforeScratch.reserve(visualOrderScratch.size());
     reorderedBackgroundBlackScratch.reserve(visualOrderScratch.size());
 
@@ -1622,7 +1628,7 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
         LOG_ERR("PTX", "OOM growing reordered word-width scratch");
         return false;
       }
-      reorderedBionicBoundaryScratch.push_back(lineBionicBoundary[src]);
+      reorderedFocusBoundaryScratch.push_back(lineFocusBoundary[src]);
       reorderedBackgroundBlackScratch.push_back(lineBackgroundBlack[src]);
       if (!lineRubyTexts.empty()) reorderedRubyTexts.push_back(std::move(lineRubyTexts[src]));
 
@@ -1712,7 +1718,7 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
 
     lineWords.swap(reorderedWordsScratch);
     lineWordStyles.swap(reorderedStylesScratch);
-    lineBionicBoundary.swap(reorderedBionicBoundaryScratch);
+    lineFocusBoundary.swap(reorderedFocusBoundaryScratch);
     lineGuideDotBefore.swap(reorderedGuideDotBeforeScratch);
     lineBackgroundBlack.swap(reorderedBackgroundBlackScratch);
     if (!lineRubyTexts.empty()) lineRubyTexts.swap(reorderedRubyTexts);
@@ -1772,12 +1778,12 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
     }
   }
 
-  bool lineHasBionicSplit = false;
+  bool lineHasFocusSplit = false;
   bool lineHasGuideDot = false;
   bool lineHasBackgroundFlags = false;
   for (size_t i = 0; i < lineWordCount; i++) {
-    if (lineBionicBoundary[i] > 0) {
-      lineHasBionicSplit = true;
+    if (lineFocusBoundary[i] > 0) {
+      lineHasFocusSplit = true;
     }
     if (i > 0 && lineGuideDotBefore[i]) {
       lineHasGuideDot = true;
@@ -1785,7 +1791,7 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
     if (lineBackgroundBlack[i] != 0) {
       lineHasBackgroundFlags = true;
     }
-    if (lineHasBionicSplit && lineHasGuideDot && lineHasBackgroundFlags) {
+    if (lineHasFocusSplit && lineHasGuideDot && lineHasBackgroundFlags) {
       break;
     }
   }
@@ -1803,7 +1809,7 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
   outStyles.reserve(lineWordCount);
   outHasSpaceBefore.clear();
   outHasSpaceBefore.reserve(lineWordCount);
-  if (lineHasBionicSplit) {
+  if (lineHasFocusSplit) {
     outBoundaries.reserve(lineWordCount);
     outRunOffsets.reserve(lineWordCount);
   }
@@ -1815,14 +1821,13 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
   }
 
   for (size_t i = 0; i < lineWordCount; i++) {
-    const uint8_t boundary = lineBionicBoundary[i];
+    const uint8_t boundary = lineFocusBoundary[i];
     const bool wordIsRtl = BidiUtils::detectParagraphLevel(lineWords[i].c_str(), blockStyle.isRtl ? 1 : 0) ==
                            static_cast<int>(BidiUtils::BidiBaseDir::RTL);
     const uint16_t runOffset =
-        boundary > 0
-            ? static_cast<uint16_t>(std::max(
-                  0, measureBionicRunOffset(renderer, fontId, lineWords[i], lineWordStyles[i], boundary, wordIsRtl)))
-            : 0;
+        boundary > 0 ? static_cast<uint16_t>(std::max(0, measureFocusRunOffset(renderer, fontId, lineWords[i],
+                                                                               lineWordStyles[i], boundary, wordIsRtl)))
+                     : 0;
 
     outWords.push_back(std::move(lineWords[i]));
     outXPos.push_back(lineXPos[i]);
@@ -1830,7 +1835,7 @@ bool ParsedText::extractLine(Arena& scratchArena, const size_t breakIndex, const
     const bool continues = willReorder ? reorderedContinuesScratch[i] : wordContinues[lastBreakAt + i];
     const bool noSpaceBefore = willReorder ? reorderedNoSpaceBeforeScratch[i] : wordNoSpaceBefore[lastBreakAt + i];
     outHasSpaceBefore.push_back(!continues && !noSpaceBefore);
-    if (lineHasBionicSplit) {
+    if (lineHasFocusSplit) {
       outBoundaries.push_back(boundary);
       outRunOffsets.push_back(runOffset);
     }

@@ -105,7 +105,7 @@ TEST(ClipTextBuilder, JoinsInsertedHyphenAcrossParagraphBoundary) {
   store.words.push_back(suffix);
 
   const uint16_t order[] = {0, 1};
-  const ClippingResult result = ClipTextBuilder::build(store, order, 0, 1, 2, 0, 2);
+  const ClippingResult result = ClipTextBuilder::build(store, order, 0, 1, 0, 2);
 
   EXPECT_EQ(result.text, "hyphenated");
 }
@@ -136,9 +136,70 @@ TEST(ClipTextBuilder, AppliesDictionaryFragmentBoundsToTheirOwnPages) {
 
   const uint16_t order[] = {0, 1, 2};
   const ClipTextBuilder::SelectionBounds bounds{0, 0, 4, 1, 0, 1};
-  const ClippingResult result = ClipTextBuilder::build(store, order, 0, 2, 3, 0, 2, &bounds);
+  const ClippingResult result = ClipTextBuilder::build(store, order, 0, 2, 0, 2, &bounds);
 
   EXPECT_EQ(result.text, "t middle f");
+}
+
+TEST(ClipTextBuilder, KeepsVerticalTableSelectionsInTheirColumn) {
+  ClipWordStore store;
+  constexpr uint16_t leftColumn = 8;
+  constexpr uint16_t rightColumn = 9;
+  const char* texts[] = {"left-top", "right-top", "left-bottom", "right-bottom"};
+  const uint16_t columns[] = {leftColumn, rightColumn, leftColumn, rightColumn};
+  const int xs[] = {0, 100, 0, 100};
+  const int ys[] = {0, 0, 20, 20};
+  for (uint16_t i = 0; i < 4; ++i) {
+    WordRef word;
+    word.pageWordIndex = i;
+    word.tableSelection = columns[i];
+    word.x = xs[i];
+    word.y = ys[i];
+    word.w = 20;
+    word.h = 10;
+    ASSERT_TRUE(store.appendText(word, texts[i]));
+    store.words.push_back(word);
+  }
+
+  const uint16_t order[] = {0, 1, 2, 3};
+  const ClippingResult result = ClipTextBuilder::build(store, order, 1, 3, 0, 1, nullptr, rightColumn);
+
+  EXPECT_EQ(result.text, "right-top\nright-bottom");
+  EXPECT_EQ(result.wordCount, 2);
+  EXPECT_EQ(result.startPageWordIndex, 1);
+  EXPECT_EQ(result.endPageWordIndex, 3);
+  EXPECT_EQ(result.tableSelection, rightColumn);
+}
+
+TEST(ClipTextBuilder, RetainsSelectionMetadata) {
+  ClipWordStore store;
+  WordRef first;
+  first.pageIdx = 1;
+  first.pageWordIndex = 2;
+  first.tableSelection = 7;
+  ASSERT_TRUE(store.appendText(first, "first"));
+  store.words.push_back(first);
+
+  WordRef last;
+  last.pageIdx = 3;
+  last.pageWordIndex = 5;
+  last.tableSelection = 7;
+  last.x = 10;
+  ASSERT_TRUE(store.appendText(last, "last"));
+  store.words.push_back(last);
+
+  const uint16_t order[] = {0, 1};
+  const ClippingResult result = ClipTextBuilder::build(store, order, 0, 1, 10, 8, nullptr, 7);
+
+  EXPECT_EQ(result.text, "first last");
+  EXPECT_EQ(result.sectionPage, 11);
+  EXPECT_EQ(result.endSectionPage, 13);
+  EXPECT_EQ(result.sectionPageCount, 8);
+  EXPECT_EQ(result.startPageWordIndex, 2);
+  EXPECT_EQ(result.endPageWordIndex, 5);
+  EXPECT_EQ(result.paragraphIndex, UINT16_MAX);
+  EXPECT_EQ(result.tableSelection, 7);
+  EXPECT_EQ(result.wordCount, 2);
 }
 
 TEST(ClippingTextMatcher, MatchesLayoutInsertedHyphenFragmentsAsOneToken) {
@@ -188,6 +249,17 @@ TEST(ClippingHighlightGeometry, DoesNotBridgeDifferentLinesOrUnselectedWords) {
 
   EXPECT_FALSE(ClippingHighlightGeometry::gapBetweenAdjacentWords(first, {13, 140, 220, 10, 20}, gap));
   EXPECT_FALSE(ClippingHighlightGeometry::gapBetweenAdjacentWords(first, {14, 140, 200, 10, 20}, gap));
+}
+
+TEST(ClippingHighlightGeometry, KeepsTextFallbackInTheMatchedTableColumn) {
+  constexpr uint16_t rightColumn = 9;
+  EXPECT_TRUE(ClippingHighlightGeometry::matchesTableSelection(rightColumn, rightColumn));
+  EXPECT_FALSE(ClippingHighlightGeometry::matchesTableSelection(rightColumn, 8));
+  EXPECT_TRUE(ClippingHighlightGeometry::matchesTableSelection(UINT16_MAX, 8));
+  EXPECT_TRUE(ClippingHighlightGeometry::isTableColumnCandidate(rightColumn));
+  EXPECT_FALSE(ClippingHighlightGeometry::isTableColumnCandidate(UINT16_MAX));
+  EXPECT_TRUE(ClippingHighlightGeometry::matchesTableColumn(rightColumn, 17, 8));
+  EXPECT_FALSE(ClippingHighlightGeometry::matchesTableColumn(rightColumn, 8, 8));
 }
 
 TEST(ClippingTextMatcher, RejectsAuthoredHyphensAndMismatchedInsertedSuffixes) {
@@ -255,7 +327,7 @@ TEST(ClippingLayout, CachesLegacyBoundaryRangesWithoutAHeapAllocation) {
   clipping.pageCount = 10;
   clipping.layoutSignature = 123;
 
-  EXPECT_EQ(sizeof(Clipping), 80U);
+  EXPECT_EQ(sizeof(Clipping), 84U);
   EXPECT_FALSE(clippingCachedRangeReadyOnPage(clipping, 2));
   EXPECT_TRUE(clippingCachedRangeReadyOnPage(clipping, 3));
   EXPECT_FALSE(clippingCachedRangeReadyOnPage(clipping, 4));

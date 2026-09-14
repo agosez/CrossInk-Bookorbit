@@ -34,21 +34,56 @@ Note: Even though some actions assigned to the front buttons could be used globa
 
 ### Taps & Gestures
 
-- Page Turn Gesture
+- Next Page
+- Previous Page
 - Pinch to Resize Font (on supported multi-touch devices)
+- Tap to Hide Status Bar
 - Two-finger Swipe (on supported multi-touch devices)
 
-### Page Turn Gesture
+### Next Page and Previous Page Gestures
 
-On touchscreen devices, **Page Turn Gesture** is in
-**Settings > Controls > Taps & Gestures**. It changes page-turn gestures while
-reading.
+On touchscreen devices, **Next Page** and **Previous Page** are in
+**Settings > Controls > Taps & Gestures**. They change page-turn gestures while
+reading and can be configured independently. **Next Page** controls taps and
+left swipes; **Previous Page** controls taps and right swipes.
 
-- **Tap & Swipe** (default): Tap the left third to go back and the rest of the screen to go forward, or swipe right and left.
-- **Tap Only**: Use the normal tap zones; horizontal swipes do not turn pages or go Back/Home.
-- **Swipe Only**: Swipe right or left; taps do not turn pages.
-- **Inverted Tap**: Tap the left two-thirds to go forward and the right third to go back.
-- **Disabled**: Do not turn pages with taps or horizontal swipes.
+Both settings offer the same options:
+
+| Option | Taps | Swipes |
+| ------ | ---- | ------ |
+| **Tap & Swipe** (default) | Enabled | Enabled |
+| **Tap Only** | Enabled | Disabled |
+| **Swipe Only** | Disabled | Enabled |
+| **Inverted Tap** | Enabled, with reversed tap zones | Disabled |
+| **Disabled** | Disabled | Disabled |
+
+When both directions allow taps, the normal zones are the left third for the
+previous page and the right two-thirds for the next page. If either of those
+settings is **Inverted Tap**, the shared zones become the left two-thirds for
+the next page and the right third for the previous page. If only one direction
+allows taps, taps across the page turn in that direction. The top and bottom
+gesture bands are reserved for vertical gestures, so taps there do not turn
+pages. A **Previous Page** setting that does not allow swipes also prevents a
+rightward edge swipe from being treated as Back/Home while reading.
+
+## Pinch to Resize Font
+
+On touchscreen devices with multi-touch support, enable **Pinch to Resize Font**
+in **Settings > Controls > Taps & Gestures**. While reading an EPUB or TXT
+book, move two fingers apart to increase the font or together to decrease it.
+Each completed pinch changes one available font-size step. Pinch resizing also
+requires **Touch Reader Controls** to be enabled. XTC pages are pre-rendered,
+so this option cannot resize them.
+
+## Tap to Hide Status Bar
+
+**Tap to Hide Status Bar** is enabled by default. When it is enabled, tap the
+visible status-bar area while reading to show or hide the entire bar for the
+current reading session. The toggle does not change page layout or page breaks;
+tap the same status-bar region again to restore a hidden bar. Use **Customize
+Status Bar** to choose which items the bar contains. The tap is available while
+**Touch Reader Controls** is enabled. For XTC books, when an XTC status bar is
+enabled, tap its configured top or bottom edge both to hide and to restore it.
 
 ## Two-finger Swipe Actions
 
@@ -104,7 +139,7 @@ Available actions include:
 - Refresh Screen
 - Change Font
 - Guide Dots
-- Bionic Reading
+- Focus Reading
 - Toggle Bookmark
 - Sync Progress
 - Mark as Finished

@@ -11,6 +11,10 @@
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "Epub/converters/PngToFramebufferConverter.h"
+#include "activities/boot_sleep/ImageFolderIndex.h"
+#include "activities/home/BookActions.h"
+#include "activities/home/FileBrowserActionActivity.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -21,6 +25,12 @@ bool isViewableImageFile(const std::string& filename) {
 }
 
 bool isMacOSSidecarFile(const std::string& filename) { return filename.rfind("._", 0) == 0; }
+
+std::string imageDisplayName(const std::string& path) {
+  const size_t filenameStart = path.find_last_of('/') + 1;
+  const size_t extensionStart = path.find_last_of('.');
+  return path.substr(filenameStart, extensionStart - filenameStart);
+}
 
 void drawImageError(GfxRenderer& renderer, const MappedInputManager& mappedInput, const char* message) {
   renderer.clearScreen();
@@ -147,7 +157,7 @@ void BmpViewerActivity::onEnter() {
 
   // 1. Open the file
   if (Storage.openFileForRead("BMP", filePath, file)) {
-    Bitmap bitmap(file, true);
+    Bitmap bitmap(file, true, renderer.supportsAbsoluteGrayscale());
 
     // 2. Parse headers to get dimensions
     if (bitmap.parseHeaders() == BmpReaderError::Ok) {
@@ -182,16 +192,43 @@ void BmpViewerActivity::onEnter() {
 
       GUI.fillPopupProgress(renderer, popupRect, 50);
 
+      const auto drawFrame = [&]() {
+        if (!renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight)) return false;
+        GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+        return true;
+      };
       renderer.clearScreen();
-      // Assuming drawBitmap defaults to 0,0 crop if omitted, or pass explicitly: drawBitmap(bitmap, x, y, pageWidth,
-      // pageHeight, 0, 0)
-      renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, 0, 0);
-
-      // Draw UI hints on the base layer
-      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-      // Single pass for non-grayscale images
-
-      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      bool success = drawFrame();
+      if (success && bitmap.hasGreyscale() && renderer.supportsAbsoluteGrayscale()) {
+        success = renderer.displayAbsoluteGrayscaleBase();
+        for (const auto mode : {GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+          if (!success) break;
+          success = bitmap.rewindToData() == BmpReaderError::Ok;
+          if (!success) break;
+          renderer.clearScreen();
+          renderer.setRenderMode(mode);
+          success = drawFrame();
+          if (!success) break;
+          if (mode == GfxRenderer::GRAYSCALE_LSB)
+            renderer.copyGrayscaleLsbBuffers();
+          else
+            renderer.copyGrayscaleMsbBuffers();
+        }
+        if (success) renderer.displayGrayBuffer();
+        renderer.setRenderMode(GfxRenderer::BW);
+        // Popups need the original B/W image, not the last gray selector plane.
+        if (success) {
+          renderer.clearScreen();
+          success = bitmap.rewindToData() == BmpReaderError::Ok && drawFrame();
+          if (success) renderer.cleanupGrayscaleWithFrameBuffer();
+        }
+      } else if (success) {
+        renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      }
+      if (!success) {
+        LOG_ERR("BMP", "Failed to render complete BMP image");
+        drawImageError(renderer, mappedInput, tr(STR_FAILED_LOWER));
+      }
 
     } else {
       // Handle file parsing error
@@ -240,6 +277,141 @@ void BmpViewerActivity::doSetSleepCover() {
   onEnter();
 }
 
+void BmpViewerActivity::pinSleepFavorite() {
+  APP_STATE.favoriteSleepImagePath = filePath;
+  if (!APP_STATE.saveToFile()) {
+    LOG_ERR("BmpViewer", "Failed to save favorite sleep image path: %s", filePath.c_str());
+    return;
+  }
+  LOG_INF("BmpViewer", "Pinned favorite sleep image: %s", filePath.c_str());
+
+  // Keep the context-menu action consistent with Confirm: PNG sleep images
+  // only render in Page Overlay mode.
+  if (FsHelpers::hasPngExtension(filePath) && SETTINGS.sleepScreen != CrossPointSettings::SLEEP_SCREEN_MODE::OVERLAY) {
+    SETTINGS.sleepScreen = CrossPointSettings::SLEEP_SCREEN_MODE::OVERLAY;
+    if (!SETTINGS.saveToFile()) {
+      LOG_ERR("BmpViewer", "Failed to save Page Overlay mode for PNG sleep image");
+    }
+  }
+}
+
+void BmpViewerActivity::unpinSleepFavorite() {
+  APP_STATE.favoriteSleepImagePath.clear();
+  if (!APP_STATE.saveToFile()) {
+    LOG_ERR("BmpViewer", "Failed to clear favorite sleep image");
+    return;
+  }
+  LOG_INF("BmpViewer", "Cleared favorite sleep image");
+}
+
+void BmpViewerActivity::pinBootFavorite() {
+  APP_STATE.favoriteBootImagePath = filePath;
+  if (!APP_STATE.saveToFile()) {
+    LOG_ERR("BmpViewer", "Failed to save favorite boot image path: %s", filePath.c_str());
+    return;
+  }
+  LOG_INF("BmpViewer", "Pinned favorite boot image: %s", filePath.c_str());
+}
+
+void BmpViewerActivity::unpinBootFavorite() {
+  APP_STATE.favoriteBootImagePath.clear();
+  if (!APP_STATE.saveToFile()) {
+    LOG_ERR("BmpViewer", "Failed to clear favorite boot image");
+    return;
+  }
+  LOG_INF("BmpViewer", "Cleared favorite boot image");
+}
+
+void BmpViewerActivity::promptDeleteImage() {
+  const std::string path = filePath;
+  startActivityForResult(
+      std::make_unique<ConfirmationActivity>(renderer, mappedInput, BookActions::confirmationHeading(StrId::STR_DELETE),
+                                             imageDisplayName(path)),
+      [this, path](const ActivityResult& result) {
+        if (result.isCancelled) return;
+        if (!Storage.remove(path.c_str())) {
+          LOG_ERR("BmpViewer", "Failed to delete image: %s", path.c_str());
+          return;
+        }
+        ImageFolderIndex::invalidateForPath(path.c_str());
+        if (APP_STATE.favoriteSleepImagePath == path) {
+          unpinSleepFavorite();
+        }
+        if (APP_STATE.favoriteBootImagePath == path) {
+          unpinBootFavorite();
+        }
+        activityManager.goToFileBrowser(path);
+      });
+}
+
+void BmpViewerActivity::showContextMenu() {
+  std::vector<FileBrowserActionActivity::MenuItem> items = BookActions::buildBookActionItems(filePath, false);
+  if (BookActions::canSendNearby(filePath)) {
+    items.push_back({FileBrowserAction::SendNearby, StrId::STR_SEND_NEARBY_BOOK});
+  }
+
+  const bool isPinned = APP_STATE.favoriteSleepImagePath == filePath;
+  items.push_back({isPinned ? FileBrowserAction::UnpinFavorite : FileBrowserAction::PinFavorite,
+                   isPinned ? StrId::STR_UNPIN_AS_FAVORITE : StrId::STR_PIN_AS_FAVORITE});
+
+  if (FsHelpers::hasBmpExtension(filePath)) {
+    const bool isBootPinned = APP_STATE.favoriteBootImagePath == filePath;
+    items.push_back({isBootPinned ? FileBrowserAction::UnpinBootFavorite : FileBrowserAction::PinBootFavorite,
+                     isBootPinned ? StrId::STR_CLEAR_BOOT_SCREEN : StrId::STR_SET_AS_BOOT_SCREEN});
+  }
+
+  startActivityForResult(std::make_unique<FileBrowserActionActivity>(renderer, mappedInput, imageDisplayName(filePath),
+                                                                     std::move(items), false, false),
+                         [this](const ActivityResult& result) {
+                           if (result.isCancelled) return;
+
+                           const auto* actionResult = std::get_if<FileBrowserActionResult>(&result.data);
+                           if (actionResult == nullptr) return;
+
+                           switch (static_cast<FileBrowserAction>(actionResult->action)) {
+                             case FileBrowserAction::Delete:
+                               promptDeleteImage();
+                               return;
+                             case FileBrowserAction::SendNearby:
+                               activityManager.goToNearbyBookSend(filePath, false);
+                               return;
+                             case FileBrowserAction::PinFavorite:
+                               if (FsHelpers::hasPngExtension(filePath)) {
+                                 startActivityForResult(std::make_unique<ConfirmationActivity>(
+                                                            renderer, mappedInput, "", tr(STR_PIN_PNG_WARNING)),
+                                                        [this](const ActivityResult& confirmation) {
+                                                          if (!confirmation.isCancelled) pinSleepFavorite();
+                                                        });
+                               } else {
+                                 pinSleepFavorite();
+                               }
+                               return;
+                             case FileBrowserAction::UnpinFavorite:
+                               unpinSleepFavorite();
+                               return;
+                             case FileBrowserAction::PinBootFavorite:
+                               pinBootFavorite();
+                               return;
+                             case FileBrowserAction::UnpinBootFavorite:
+                               unpinBootFavorite();
+                               return;
+                             case FileBrowserAction::DeleteCache:
+                             case FileBrowserAction::SetSleepFolder:
+                             case FileBrowserAction::ClearSleepFolder:
+                             case FileBrowserAction::ToggleCompleted:
+                             case FileBrowserAction::RemoveFromRecents:
+                             case FileBrowserAction::DeleteStats:
+                             case FileBrowserAction::ViewBookmarks:
+                             case FileBrowserAction::ViewClippings:
+                             case FileBrowserAction::DeleteBookmarks:
+                             case FileBrowserAction::DeleteClippings:
+                             case FileBrowserAction::EpubRenderMode:
+                             case FileBrowserAction::ResetReaderSettings:
+                               return;
+                           }
+                         });
+}
+
 void BmpViewerActivity::loop() {
   // Keep CPU awake/polling so 1st click works
   Activity::loop();
@@ -263,6 +435,21 @@ void BmpViewerActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     activityManager.goToFileBrowser(filePath);
     return;
+  }
+
+  if (mappedInput.hasTouchHardware()) {
+    constexpr unsigned long CONTEXT_MENU_HOLD_MS = 1000;
+    int touchX = 0;
+    int touchY = 0;
+    if (mappedInput.isScreenTouchLongPress(touchX, touchY, CONTEXT_MENU_HOLD_MS)) {
+      mappedInput.suppressCurrentTouchContact();
+      showContextMenu();
+      return;
+    }
+    if (mappedInput.wasScreenTapped(touchX, touchY)) {
+      showContextMenu();
+      return;
+    }
   }
 
   const auto swipe = mappedInput.wasSwipe();

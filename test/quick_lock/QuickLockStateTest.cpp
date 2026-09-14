@@ -72,6 +72,21 @@ TEST(ButtonShortcutController, LongPowerRequiresReleaseBeforeItCanUnlock) {
   EXPECT_FALSE(controller.isQuickLocked());
 }
 
+TEST(ButtonShortcutController, HomeQuickLockOnlyUnlocksWithTheMatchingHomeGesture) {
+  ButtonShortcutController controller;
+
+  constexpr QuickLockTrigger homeTriggers[] = {QuickLockTrigger::HomeTap, QuickLockTrigger::HomeDoubleTap,
+                                               QuickLockTrigger::HomeLongPress};
+  for (const auto trigger : homeTriggers) {
+    controller.toggleQuickLock(10U, trigger);
+
+    EXPECT_FALSE(controller.tryUnlockWithTrigger(11U, QuickLockTrigger::ShortPower));
+    EXPECT_TRUE(controller.isQuickLocked());
+    EXPECT_TRUE(controller.tryUnlockWithTrigger(12U, trigger));
+    EXPECT_FALSE(controller.isQuickLocked());
+  }
+}
+
 TEST(ButtonShortcutController, PageTurnChordEmitsPageTurn) {
   ButtonShortcutController controller;
   using Action = ButtonShortcutController::ChordAction;
@@ -105,14 +120,14 @@ TEST(ButtonShortcutController, IdleUpDownDoesNotPreemptReaderQuickLockUnlock) {
 TEST(ButtonShortcutController, EveryChordActionConsumesBothReleaseOrders) {
   using Action = ButtonShortcutController::ChordAction;
   constexpr Action actions[] = {
-      Action::Screenshot,       Action::QuickLock,           Action::Sleep,
-      Action::PageTurn,         Action::ToggleBookmark,      Action::ReadingStats,
-      Action::MarkFinished,     Action::ForceRefresh,        Action::ToggleFont,
-      Action::ToggleGuideDots,  Action::ToggleBionicReading, Action::CyclePageTurn,
-      Action::SyncProgress,     Action::FileTransfer,        Action::CalibreWireless,
-      Action::JoinNetwork,      Action::CreateHotspot,       Action::ToggleDarkMode,
-      Action::Footnotes,        Action::FileBrowser,         Action::CreateClipping,
-      Action::LookupWord,       Action::ToggleHomeButton,    Action::QuickActions,
+      Action::Screenshot,       Action::QuickLock,          Action::Sleep,
+      Action::PageTurn,         Action::ToggleBookmark,     Action::ReadingStats,
+      Action::MarkFinished,     Action::ForceRefresh,       Action::ToggleFont,
+      Action::ToggleGuideDots,  Action::ToggleFocusReading, Action::CyclePageTurn,
+      Action::SyncProgress,     Action::FileTransfer,       Action::CalibreWireless,
+      Action::JoinNetwork,      Action::CreateHotspot,      Action::ToggleDarkMode,
+      Action::Footnotes,        Action::FileBrowser,        Action::CreateClipping,
+      Action::LookupWord,       Action::ToggleHomeButton,   Action::QuickActions,
       Action::ToggleFrontlight, Action::ToggleTouchscreen,
   };
 

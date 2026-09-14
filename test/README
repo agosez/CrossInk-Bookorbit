@@ -26,3 +26,28 @@ Limits:
 - It does not replace hardware testing. The desktop simulator has different memory, filesystem, timing, display, sleep, button, battery, USB, Wi-Fi, and OTA behavior than the ESP32-C3 device.
 - It should not be expected to catch exact hardware heap pressure, SD-card locking/timing issues, e-ink ghosting or refresh quality, real deep-sleep wake behavior, electrical button behavior, subtle visual layout problems, or EPUB cases that are not present in the selected test book.
 - After a simulator pass, still verify important changes on hardware with the same EPUB and theme by turning pages, opening the reader menu, entering Reader Options, toggling a setting, backing out, and watching for crashes or memory-related logs.
+
+Native regression suite (macOS/Linux):
+- Configure: `cmake -S test -B /tmp/crossink-tests -G 'Unix Makefiles'`
+- Build: `cmake --build /tmp/crossink-tests -j 6`
+- Run all registered tests: `ctest --test-dir /tmp/crossink-tests --output-on-failure`
+
+High-risk storage/update coverage:
+- `ota_boot_switch` links production `OtaBootSwitch.cpp` against an in-memory
+  partition API. It checks slot selection, rejection of corrupt/invalid entries,
+  preservation of the active sector, and read/erase/partial-write failures.
+  The ROM CRC primitive is substituted with zlib; this does not validate the
+  physical bootloader, flash driver, power-loss recovery, or image validation.
+- `buffered_file` executes production `BufferedFile.h` and checked serialization
+  helpers against an in-memory file. It checks passthrough and buffer boundaries,
+  logical positions, seeks, short/error I/O, sticky write failures, binary format
+  compatibility, and truncated records. Zero capacity exercises passthrough;
+  allocation failure and real SdFat timing/locking are not simulated.
+- Existing `section_persistence`, `pxc_v2`, `firmware_board_tag`, and memory-policy
+  suites complement these tests with cache persistence, compressed-image input,
+  board compatibility, and allocation-policy coverage.
+
+Remaining high-risk integration gaps include the complete firmware download /
+flash / reboot sequence, interrupted settings writes and migration, and activity
+teardown during asynchronous network/storage work. The source-text OTA staging
+check is an ordering guard, not an executable test of the complete updater.

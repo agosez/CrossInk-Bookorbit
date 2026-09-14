@@ -60,7 +60,6 @@ class ActivityManager {
   PendingAction pendingAction = PendingAction::None;
   // Set when an overlay is closed specifically to hand control back to the
   // reader's menu. It must wait until the reader is current again.
-  bool openReaderMenuAfterPop = false;
   int16_t pendingReaderMenuAction = -1;
 
   // A one-shot Home selection to restore after Settings replaces Home. This
@@ -90,6 +89,7 @@ class ActivityManager {
   // stale child as their backdrop.
   std::atomic<bool> restoredActivityNeedsRender{false};
 
+  Activity* findEpubReader() const;
   bool handleGlobalHomeGesture();
   bool restoreBackdropBehindCurrentOverlay();
 
@@ -150,7 +150,6 @@ class ActivityManager {
   bool openReaderSettingsForTouchscreenEscapeHatch();
   bool handleHomeButtonBackOrHome();
   bool openReaderMenuFromShortcut();
-  bool openReaderMenuAfterClosingOverlay();
   bool handleShortcutAction(uint8_t action);
   bool hasActivityNamed(const char* activityName) const;
 #ifdef SIMULATOR
@@ -160,7 +159,11 @@ class ActivityManager {
   bool requestManualReaderRefresh();
   bool handleShortcutAction(CrossPointSettings::SHORT_PWRBTN action);
   bool handleQuickLockUnlock(QuickLockTrigger trigger);
+  void persistGlobalSettings();
+  bool beginGlobalSettingsEdit();
+  void endGlobalSettingsEdit();
   void notifyInputLockChanged(bool locked);
+  void notifyUserInput();
   bool skipLoopDelay() const;
   std::string getCurrentBookPath() const;
   ScreenshotInfo getScreenshotInfo() const;

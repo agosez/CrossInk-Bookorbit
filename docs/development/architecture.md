@@ -137,7 +137,7 @@ Notes:
   preloading the full ZIP central directory for large books.
 - "section cache exists" depends on cache-busting parameters such as font,
   viewport size, paragraph alignment, forced paragraph indents, hyphenation,
-  embedded CSS, image rendering, Bionic Reading, and Guide Dots settings
+  embedded CSS, image rendering, Focus Reading, and Guide Dots settings
 - rendering favors reusing precomputed layout data to keep page turns responsive on constrained hardware
 - progress/session state is persisted so the reader can reopen at the last position after reboot/sleep
 

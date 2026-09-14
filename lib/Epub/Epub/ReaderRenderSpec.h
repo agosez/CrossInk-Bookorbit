@@ -23,7 +23,7 @@ struct ReaderRenderSpec {
   bool hyphenationEnabled = false;
   bool embeddedStyle = true;
   uint8_t imageRendering = 0;
-  bool bionicReadingEnabled = false;
+  bool focusReadingEnabled = false;
   bool guideReadingEnabled = false;
   uint8_t wordSpacing = 0;
   EpubRenderMode renderMode = EpubRenderMode::CrossInkDefault;
@@ -45,7 +45,7 @@ inline uint32_t readerRenderSpecSignature(const ReaderRenderSpec& spec) {
   mix(spec.hyphenationEnabled);
   mix(spec.embeddedStyle);
   mix(spec.imageRendering);
-  mix(spec.bionicReadingEnabled);
+  mix(spec.focusReadingEnabled);
   mix(spec.guideReadingEnabled);
   mix(spec.wordSpacing);
   mix(static_cast<uint8_t>(spec.renderMode));

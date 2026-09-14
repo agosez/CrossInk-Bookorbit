@@ -63,8 +63,7 @@ inline bool readerDarkModeEnabled() { return false; }
 
 inline uint8_t readerBackgroundColor() { return readerDarkModeEnabled() ? 0x00 : 0xFF; }
 
-// cppcheck-suppress knownConditionTrueFalse  // compatibility constant, see above
-inline bool readerForegroundBlack() { return !readerDarkModeEnabled(); }
+inline bool readerForegroundBlack() { return true; }
 
 inline int getTopClockStatusBarHeight() {
   if (!shouldShowTopClockStatusBar()) {
@@ -133,19 +132,18 @@ inline TouchPageTurn detectTouchPageTurn(const GfxRenderer& renderer, const Mapp
     return result;
   }
 
-  const auto pageTurnGesture = static_cast<CrossPointSettings::PAGE_TURN_GESTURE>(SETTINGS.pageTurnGesture);
-  const bool allowsSwipe =
-      pageTurnGesture == CrossPointSettings::TAP_AND_SWIPE || pageTurnGesture == CrossPointSettings::SWIPE_ONLY;
-  const bool allowsTap = pageTurnGesture == CrossPointSettings::TAP_AND_SWIPE ||
-                         pageTurnGesture == CrossPointSettings::TAP_ONLY ||
-                         pageTurnGesture == CrossPointSettings::INVERTED_TAP;
+  const auto allowsSwipe = [](const uint8_t gesture) {
+    return gesture == CrossPointSettings::TAP_AND_SWIPE || gesture == CrossPointSettings::SWIPE_ONLY;
+  };
+  const auto allowsTap = [](const uint8_t gesture) {
+    return gesture == CrossPointSettings::TAP_AND_SWIPE || gesture == CrossPointSettings::TAP_ONLY ||
+           gesture == CrossPointSettings::INVERTED_TAP;
+  };
 
   const auto swipe = input.wasSwipe();
-  if (allowsSwipe && swipe != MappedInputManager::SwipeDir::None) {
-    // A horizontal reader swipe turns pages wherever it starts. Edge-only
-    // navigation remains handled by the activities that explicitly use it.
-    result.prev = swipe == MappedInputManager::SwipeDir::Right;
-    result.next = swipe == MappedInputManager::SwipeDir::Left;
+  if (swipe != MappedInputManager::SwipeDir::None) {
+    result.prev = swipe == MappedInputManager::SwipeDir::Right && allowsSwipe(SETTINGS.previousPageGesture);
+    result.next = swipe == MappedInputManager::SwipeDir::Left && allowsSwipe(SETTINGS.pageTurnGesture);
     return result;
   }
 
@@ -160,20 +158,19 @@ inline TouchPageTurn detectTouchPageTurn(const GfxRenderer& renderer, const Mapp
   result.heldMs = input.getHeldTime();
   // Reserve the top/bottom gesture bands for vertical edge swipes. If the touch
   // controller loses part of a short edge swipe, do not reinterpret it as a page tap.
-  if (!allowsTap || input.isInVerticalEdgeGestureZone(y)) {
+  if (input.isInVerticalEdgeGestureZone(y)) {
     return result;
   }
 
-  if (pageTurnGesture == CrossPointSettings::INVERTED_TAP) {
-    const int nextZoneWidth = (width * 2) / 3;
-    result.next = x < nextZoneWidth;
-    result.prev = x >= nextZoneWidth;
-    return result;
-  }
-
-  const int previousZoneWidth = width / 3;
-  result.prev = x < previousZoneWidth;
-  result.next = x >= previousZoneWidth;
+  // Give the entire page tap area to the sole tap-enabled direction. When
+  // both accept taps, either Inverted Tap setting swaps their shared zones.
+  const bool nextTaps = allowsTap(SETTINGS.pageTurnGesture);
+  const bool previousTaps = allowsTap(SETTINGS.previousPageGesture);
+  const bool invertedTaps = SETTINGS.pageTurnGesture == CrossPointSettings::INVERTED_TAP ||
+                            SETTINGS.previousPageGesture == CrossPointSettings::INVERTED_TAP;
+  const bool nextZone = invertedTaps ? x < (width * 2) / 3 : x >= width / 3;
+  result.next = nextTaps && (!previousTaps || nextZone);
+  result.prev = previousTaps && (!nextTaps || !nextZone);
   return result;
 #endif
 }

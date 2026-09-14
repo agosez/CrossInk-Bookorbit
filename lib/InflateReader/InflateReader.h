@@ -21,6 +21,9 @@ class InflateReader {
   // so back-references resolve inside it without a separate 32KB dictionary.
   void init();
 
+  // Requires len + 1 bytes of destination capacity to reject extra output.
+  bool readExact(uint8_t* dest, size_t len);
+
   // Set the entire compressed input as a contiguous memory buffer.
   // Used before the single read() call.
   void setSource(const uint8_t* src, size_t len);

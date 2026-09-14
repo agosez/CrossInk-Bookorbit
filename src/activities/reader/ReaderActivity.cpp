@@ -77,6 +77,7 @@ ReaderActivity::EpubOpenResult ReaderActivity::loadEpub(const std::string& path)
   GfxRenderer::FrameBufferLoan loan(renderer);
   const bool loaded = epub->load(true, result.readerSettings.readerSettings.embeddedStyle == 0,
                                  Epub::XLocationLoadMode::Immediate, true);
+  if (loaded) epub->ensureOptimizerImageIndex();
   loan.end();
   if (loaded) {
     result.epub = std::move(epub);

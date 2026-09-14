@@ -20,7 +20,6 @@
 #include <cstring>
 #include <iterator>
 
-#include "AppCapabilities.h"
 #include "AppVersion.h"
 #include "CrossPointSettings.h"
 #include "FontInstaller.h"
@@ -30,7 +29,7 @@
 #include "SettingsList.h"
 #include "WebDAVHandler.h"
 #include "WifiCredentialStore.h"
-#include "activities/boot_sleep/SleepImageIndex.h"
+#include "activities/boot_sleep/ImageFolderIndex.h"
 #include "html/FilesPageHtml.generated.h"
 #include "html/FontsPageHtml.generated.h"
 #include "html/HomePageHtml.generated.h"
@@ -52,18 +51,6 @@ constexpr uint16_t LOCAL_UDP_PORT = 8134;
 // Static pointer for WebSocket callback (WebSocketsServer requires C-style callback)
 CrossPointWebServer* wsInstance = nullptr;
 
-uint8_t enumDisplayIndexForRawValue(const SettingInfo& setting, uint8_t rawValue) {
-  if (setting.enumRawValues.empty()) {
-    return rawValue;
-  }
-
-  auto it = std::find(setting.enumRawValues.begin(), setting.enumRawValues.end(), rawValue);
-  if (it == setting.enumRawValues.end()) {
-    return 0;
-  }
-  return static_cast<uint8_t>(std::distance(setting.enumRawValues.begin(), it));
-}
-
 uint8_t enumRawValueForDisplayIndex(const SettingInfo& setting, uint8_t displayIndex) {
   if (setting.enumRawValues.empty()) {
     return displayIndex;
@@ -74,28 +61,66 @@ uint8_t enumRawValueForDisplayIndex(const SettingInfo& setting, uint8_t displayI
   return setting.enumRawValues[displayIndex];
 }
 
+bool isTwoFingerSwipeSetting(const SettingInfo& setting) {
+  return setting.nameId == StrId::STR_TWO_FINGER_SWIPE_UP || setting.nameId == StrId::STR_TWO_FINGER_SWIPE_DOWN ||
+         setting.nameId == StrId::STR_TWO_FINGER_SWIPE_LEFT || setting.nameId == StrId::STR_TWO_FINGER_SWIPE_RIGHT;
+}
+
+bool isWebEnumOptionAvailable(const SettingInfo& setting, size_t optionIndex) {
+  if (optionIndex >= setting.enumValues.size()) return true;
+
+  const StrId option = setting.enumValues[optionIndex];
+  if (option == StrId::STR_TOGGLE_TOUCHSCREEN && !gpio.hasTouch()) return false;
+
+  if (!Frontlight.present()) {
+    if (option == StrId::STR_TOGGLE_FRONTLIGHT ||
+        (isTwoFingerSwipeSetting(setting) &&
+         (option == StrId::STR_INCREASE_BRIGHTNESS || option == StrId::STR_DECREASE_BRIGHTNESS ||
+          option == StrId::STR_INCREASE_WARMTH || option == StrId::STR_DECREASE_WARMTH))) {
+      return false;
+    }
+    return setting.nameId != StrId::STR_REFRESH_FREQ || optionIndex >= setting.enumRawValues.size() ||
+           setting.enumRawValues[optionIndex] != CrossPointSettings::REFRESH_NEVER;
+  }
+
+  return Frontlight.hasColorTemperature() || !isTwoFingerSwipeSetting(setting) ||
+         (option != StrId::STR_INCREASE_WARMTH && option != StrId::STR_DECREASE_WARMTH);
+}
+
+uint8_t enumDisplayIndexForWeb(const SettingInfo& setting, uint8_t rawValue) {
+  if (setting.enumRawValues.empty()) return rawValue;
+
+  uint8_t displayIndex = 0;
+  for (size_t optionIndex = 0; optionIndex < setting.enumRawValues.size(); ++optionIndex) {
+    if (!isWebEnumOptionAvailable(setting, optionIndex)) continue;
+    if (setting.enumRawValues[optionIndex] == rawValue) return displayIndex;
+    ++displayIndex;
+  }
+  return 0;
+}
+
 bool isWebSettingAvailable(const SettingInfo& setting) {
-  if (setting.nameId == StrId::STR_PAGE_TURN && !gpio.hasTouch()) {
+  const bool isTouchSetting =
+      setting.nameId == StrId::STR_TOUCH_READER_CONTROLS || setting.nameId == StrId::STR_DISABLE_TOUCHSCREEN ||
+      setting.nameId == StrId::STR_NEXT_PAGE || setting.nameId == StrId::STR_PREV_PAGE ||
+      setting.nameId == StrId::STR_TAP_HIDE_STATUS_BAR || setting.nameId == StrId::STR_PINCH_FONT_RESIZE ||
+      setting.nameId == StrId::STR_TWO_FINGER_SWIPE_UP || setting.nameId == StrId::STR_TWO_FINGER_SWIPE_DOWN ||
+      setting.nameId == StrId::STR_TWO_FINGER_SWIPE_LEFT || setting.nameId == StrId::STR_TWO_FINGER_SWIPE_RIGHT;
+  if (isTouchSetting && !gpio.hasTouch()) {
     return false;
   }
 
-#if !CROSSINK_APP_CAP_TOUCH
-  if (setting.nameId == StrId::STR_TOUCH_READER_CONTROLS || setting.nameId == StrId::STR_DISABLE_TOUCHSCREEN) {
+  const bool isMultiTouchSetting = setting.nameId == StrId::STR_PINCH_FONT_RESIZE || isTwoFingerSwipeSetting(setting);
+  if (isMultiTouchSetting && !gpio.supportsMultiTouch()) {
     return false;
   }
-#endif
 
-#if !FREEINK_CAP_FRONTLIGHT
-  if (setting.nameId == StrId::STR_BRIGHTNESS || setting.nameId == StrId::STR_WARMTH ||
-      setting.nameId == StrId::STR_FRONTLIGHT) {
-    return false;
-  }
-#endif
-
-  const bool isFrontlightWakeSetting = setting.nameId == StrId::STR_RESTORE_LIGHT_ON_WAKE ||
-                                       setting.nameId == StrId::STR_FRONTLIGHT_SCHEDULE ||
-                                       setting.nameId == StrId::STR_START || setting.nameId == StrId::STR_END;
-  if (isFrontlightWakeSetting && !Frontlight.present()) {
+  const bool isFrontlightSetting = setting.nameId == StrId::STR_BRIGHTNESS || setting.nameId == StrId::STR_WARMTH ||
+                                   setting.nameId == StrId::STR_FRONTLIGHT ||
+                                   setting.nameId == StrId::STR_RESTORE_LIGHT_ON_WAKE ||
+                                   setting.nameId == StrId::STR_FRONTLIGHT_SCHEDULE ||
+                                   setting.nameId == StrId::STR_START || setting.nameId == StrId::STR_END;
+  if (isFrontlightSetting && !Frontlight.present()) {
     return false;
   }
 
@@ -962,7 +987,7 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
         if (!filePath.endsWith("/")) filePath += "/";
         filePath += state.fileName;
         clearBookCachePreservingUserState(filePath.c_str());
-        SleepImageIndex::invalidateForPath(filePath.c_str());
+        ImageFolderIndex::invalidateForPath(filePath.c_str());
       }
     }
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
@@ -1045,7 +1070,7 @@ void CrossPointWebServer::handleCreateFolder() const {
       server->send(500, "text/plain", "Folder could not be added to the directory listing");
       return;
     }
-    SleepImageIndex::invalidateForPath(folderPath.c_str());
+    ImageFolderIndex::invalidateForPath(folderPath.c_str());
     server->send(200, "text/plain", "Folder created: " + folderName);
   } else {
     LOG_DBG("WEB", "Failed to create folder: %s", folderPath.c_str());
@@ -1125,8 +1150,8 @@ void CrossPointWebServer::handleRename() const {
 
   if (success) {
     LOG_DBG("WEB", "Renamed file: %s -> %s", itemPath.c_str(), newPath.c_str());
-    SleepImageIndex::invalidateForPath(itemPath.c_str());
-    SleepImageIndex::invalidateForPath(newPath.c_str());
+    ImageFolderIndex::invalidateForPath(itemPath.c_str());
+    ImageFolderIndex::invalidateForPath(newPath.c_str());
     server->send(200, "text/plain", "Renamed successfully");
   } else {
     LOG_ERR("WEB", "Failed to rename file: %s -> %s", itemPath.c_str(), newPath.c_str());
@@ -1218,8 +1243,8 @@ void CrossPointWebServer::handleMove() const {
 
   if (success) {
     LOG_DBG("WEB", "Moved file: %s -> %s", itemPath.c_str(), newPath.c_str());
-    SleepImageIndex::invalidateForPath(itemPath.c_str());
-    SleepImageIndex::invalidateForPath(newPath.c_str());
+    ImageFolderIndex::invalidateForPath(itemPath.c_str());
+    ImageFolderIndex::invalidateForPath(newPath.c_str());
     server->send(200, "text/plain", "Moved successfully");
   } else {
     LOG_ERR("WEB", "Failed to move file: %s -> %s", itemPath.c_str(), newPath.c_str());
@@ -1303,7 +1328,7 @@ void CrossPointWebServer::handleDelete() const {
       failedItems += itemPath + " (deletion failed); ";
       allSuccess = false;
     } else {
-      SleepImageIndex::invalidateForPath(itemPath.c_str());
+      ImageFolderIndex::invalidateForPath(itemPath.c_str());
     }
   }
 
@@ -1373,7 +1398,7 @@ void CrossPointWebServer::handleGetSettings() const {
           const auto it = std::find(sizes.begin(), sizes.end(), selectedPointSize);
           doc["value"] = static_cast<int>(it == sizes.end() ? 0 : std::distance(sizes.begin(), it));
         } else if (s.valuePtr) {
-          doc["value"] = static_cast<int>(enumDisplayIndexForRawValue(s, SETTINGS.*(s.valuePtr)));
+          doc["value"] = static_cast<int>(enumDisplayIndexForWeb(s, SETTINGS.*(s.valuePtr)));
         } else if (s.valueGetter) {
           doc["value"] = static_cast<int>(s.valueGetter());
         }
@@ -1397,8 +1422,10 @@ void CrossPointWebServer::handleGetSettings() const {
             options.add(opt);
           }
         } else {
-          for (const auto& opt : s.enumValues) {
-            options.add(I18N.get(opt));
+          for (size_t optionIndex = 0; optionIndex < s.enumValues.size(); ++optionIndex) {
+            if (isWebEnumOptionAvailable(s, optionIndex)) {
+              options.add(I18N.get(s.enumValues[optionIndex]));
+            }
           }
         }
         break;
@@ -1913,7 +1940,7 @@ void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* 
             wsLastCompleteAt = millis();
             LOG_DBG("WS", "Zero-byte upload complete: %s", filePath.c_str());
             clearBookCachePreservingUserState(filePath.c_str());
-            SleepImageIndex::invalidateForPath(filePath.c_str());
+            ImageFolderIndex::invalidateForPath(filePath.c_str());
             wsServer->sendTXT(num, "DONE");
             wsLastProgressSent = 0;
             break;
@@ -1981,7 +2008,7 @@ void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* 
         if (!filePath.endsWith("/")) filePath += "/";
         filePath += wsUploadFileName;
         clearBookCachePreservingUserState(filePath.c_str());
-        SleepImageIndex::invalidateForPath(filePath.c_str());
+        ImageFolderIndex::invalidateForPath(filePath.c_str());
 
         wsServer->sendTXT(num, "DONE");
         wsLastProgressSent = 0;

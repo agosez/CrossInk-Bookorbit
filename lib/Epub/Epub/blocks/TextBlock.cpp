@@ -54,11 +54,11 @@ bool hasSyntheticIndentPrefix(const char* word, const uint16_t len) {
 
 }  // namespace
 
-size_t TextBlock::arenaSize(const uint16_t wordCount, const bool hasBionic, const bool hasGuideDots,
+size_t TextBlock::arenaSize(const uint16_t wordCount, const bool hasFocus, const bool hasGuideDots,
                             const bool hasWordFlags, const bool hasWordSpaces, const uint16_t textBytes) {
   // 16-bit arrays first so direct loads stay aligned on RISC-V, then byte arrays, then text.
   size_t size = static_cast<size_t>(wordCount) * (sizeof(uint16_t) + sizeof(int16_t) + sizeof(uint8_t));
-  if (hasBionic) {
+  if (hasFocus) {
     size += static_cast<size_t>(wordCount) * (sizeof(uint16_t) + sizeof(uint8_t));
   }
   if (hasGuideDots) {
@@ -79,8 +79,8 @@ void TextBlock::bindArenaPointers() {
   textOffArr = reinterpret_cast<const uint16_t*>(base);
   xposArr = reinterpret_cast<const int16_t*>(base + wc * 2);
   size_t off = wc * 4;
-  if (bionicPresent) {
-    bionicRunOffsetArr = reinterpret_cast<const uint16_t*>(base + off);
+  if (focusPresent) {
+    focusRunOffsetArr = reinterpret_cast<const uint16_t*>(base + off);
     off += wc * 2;
   }
   if (guideDotsPresent) {
@@ -89,8 +89,8 @@ void TextBlock::bindArenaPointers() {
   }
   stylesArr = base + off;
   off += wc;
-  if (bionicPresent) {
-    bionicBoundaryArr = base + off;
+  if (focusPresent) {
+    focusBoundaryArr = base + off;
     off += wc;
   }
   if (wordFlagsPresent) {
@@ -105,8 +105,8 @@ void TextBlock::bindArenaPointers() {
 }
 
 TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<int16_t>& wordXpos,
-                     const std::vector<EpdFontFamily::Style>& wordStyles, const std::vector<uint8_t>& bionicBoundary,
-                     const std::vector<uint16_t>& bionicRunOffset, const std::vector<uint16_t>& guideDotXOffset,
+                     const std::vector<EpdFontFamily::Style>& wordStyles, const std::vector<uint8_t>& focusBoundary,
+                     const std::vector<uint16_t>& focusRunOffset, const std::vector<uint16_t>& guideDotXOffset,
                      const std::vector<uint8_t>& wordFlags, const std::vector<bool>& wordHasSpaceBefore,
                      const BlockStyle& blockStyle, std::vector<std::string> rubyTexts)
     : blockStyle(blockStyle), rubyTexts(std::move(rubyTexts)) {
@@ -117,13 +117,13 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
     this->rubyTexts = std::vector<std::string>{};
   }
 
-  const bool hasBionic = !bionicBoundary.empty();
+  const bool hasFocus = !focusBoundary.empty();
   const bool hasGuideDots = !guideDotXOffset.empty();
   const bool hasWordFlags = !wordFlags.empty();
   const bool hasWordSpaces = !wordHasSpaceBefore.empty();
   if (words.size() != wordXpos.size() || words.size() != wordStyles.size() || words.size() > MAX_WORDS_PER_TEXT_BLOCK ||
-      (hasBionic && (words.size() != bionicBoundary.size() || words.size() != bionicRunOffset.size())) ||
-      (!hasBionic && !bionicRunOffset.empty()) || (hasGuideDots && words.size() != guideDotXOffset.size()) ||
+      (hasFocus && (words.size() != focusBoundary.size() || words.size() != focusRunOffset.size())) ||
+      (!hasFocus && !focusRunOffset.empty()) || (hasGuideDots && words.size() != guideDotXOffset.size()) ||
       (hasWordFlags && words.size() != wordFlags.size()) ||
       (hasWordSpaces && words.size() != wordHasSpaceBefore.size()) ||
       (!this->rubyTexts.empty() && words.size() != this->rubyTexts.size())) {
@@ -131,15 +131,15 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
             "Construction failed: size mismatch (words=%u, xpos=%u, styles=%u, boundary=%u, runOffset=%u, "
             "dotX=%u, flags=%u, spaces=%u)",
             static_cast<uint32_t>(words.size()), static_cast<uint32_t>(wordXpos.size()),
-            static_cast<uint32_t>(wordStyles.size()), static_cast<uint32_t>(bionicBoundary.size()),
-            static_cast<uint32_t>(bionicRunOffset.size()), static_cast<uint32_t>(guideDotXOffset.size()),
+            static_cast<uint32_t>(wordStyles.size()), static_cast<uint32_t>(focusBoundary.size()),
+            static_cast<uint32_t>(focusRunOffset.size()), static_cast<uint32_t>(guideDotXOffset.size()),
             static_cast<uint32_t>(wordFlags.size()), static_cast<uint32_t>(wordHasSpaceBefore.size()));
     isValid = false;
     return;
   }
 
   numWords = static_cast<uint16_t>(words.size());
-  bionicPresent = hasBionic;
+  focusPresent = hasFocus;
   guideDotsPresent = hasGuideDots;
   wordFlagsPresent = hasWordFlags;
   wordSpacesPresent = hasWordSpaces;
@@ -154,7 +154,7 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
   if (totalText > UINT16_MAX) {
     LOG_ERR("TXB", "Construction failed: text size %u exceeds arena limit", static_cast<uint32_t>(totalText));
     numWords = 0;
-    bionicPresent = false;
+    focusPresent = false;
     guideDotsPresent = false;
     wordFlagsPresent = false;
     wordSpacesPresent = false;
@@ -164,13 +164,13 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
   textBytes = static_cast<uint16_t>(totalText);
 
   const size_t size =
-      arenaSize(numWords, bionicPresent, guideDotsPresent, wordFlagsPresent, wordSpacesPresent, textBytes);
+      arenaSize(numWords, focusPresent, guideDotsPresent, wordFlagsPresent, wordSpacesPresent, textBytes);
   arena = makeUniqueNoThrow<uint8_t[]>(size);
   if (!arena) {
     LOG_ERR("TXB", "OOM: arena %u bytes", static_cast<uint32_t>(size));
     numWords = 0;
     textBytes = 0;
-    bionicPresent = false;
+    focusPresent = false;
     guideDotsPresent = false;
     wordFlagsPresent = false;
     wordSpacesPresent = false;
@@ -192,12 +192,12 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
     off += static_cast<uint16_t>(words[i].size());
     text[off++] = '\0';
   }
-  if (bionicPresent) {
-    auto* runOffset = const_cast<uint16_t*>(bionicRunOffsetArr);
-    auto* boundary = const_cast<uint8_t*>(bionicBoundaryArr);
+  if (focusPresent) {
+    auto* runOffset = const_cast<uint16_t*>(focusRunOffsetArr);
+    auto* boundary = const_cast<uint8_t*>(focusBoundaryArr);
     for (uint16_t i = 0; i < numWords; i++) {
-      runOffset[i] = bionicRunOffset[i];
-      boundary[i] = bionicBoundary[i];
+      runOffset[i] = focusRunOffset[i];
+      boundary[i] = focusBoundary[i];
     }
   }
   if (guideDotsPresent) {
@@ -244,7 +244,7 @@ void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int 
     const uint16_t wordLen = wordTextLen(i);
     const int wordX = wordXpos(i) + x;
     const EpdFontFamily::Style currentStyle = wordStyle(i);
-    const uint8_t boundary = bionicBoundary(i);
+    const uint8_t boundary = focusBoundary(i);
     const auto baseDir =
         static_cast<BidiUtils::BidiBaseDir>(BidiUtils::detectParagraphLevel(word, blockStyle.isRtl ? 1 : 0));
 
@@ -269,7 +269,7 @@ void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int 
           std::min<size_t>({static_cast<size_t>(boundary), static_cast<size_t>(wordLen), sizeof(boldBuf) - 1});
       memcpy(boldBuf, word, boldLen);
       boldBuf[boldLen] = '\0';
-      const int secondRunX = wordX + bionicRunOffset(i);
+      const int secondRunX = wordX + focusRunOffset(i);
       if (baseDir == BidiUtils::BidiBaseDir::RTL) {
         renderer.drawText(fontId, wordX, wordY, word + boldLen, foregroundBlack, currentStyle, baseDir);
         renderer.drawText(fontId, secondRunX, wordY, boldBuf, foregroundBlack, boldStyle, baseDir);
@@ -374,7 +374,7 @@ bool TextBlock::serialize(HalFile& file) const {
   }
 
   if (!serialization::tryWritePod(file, numWords) ||
-      !serialization::tryWritePod(file, static_cast<uint8_t>(bionicPresent ? 1 : 0)) ||
+      !serialization::tryWritePod(file, static_cast<uint8_t>(focusPresent ? 1 : 0)) ||
       !serialization::tryWritePod(file, static_cast<uint8_t>(guideDotsPresent ? 1 : 0)) ||
       !serialization::tryWritePod(file, static_cast<uint8_t>(wordFlagsPresent ? 1 : 0)) ||
       !serialization::tryWritePod(file, static_cast<uint8_t>(wordSpacesPresent ? 1 : 0)) ||
@@ -384,7 +384,7 @@ bool TextBlock::serialize(HalFile& file) const {
   }
   if (numWords > 0) {
     const size_t size =
-        arenaSize(numWords, bionicPresent, guideDotsPresent, wordFlagsPresent, wordSpacesPresent, textBytes);
+        arenaSize(numWords, focusPresent, guideDotsPresent, wordFlagsPresent, wordSpacesPresent, textBytes);
     if (file.write(arena.get(), size) != static_cast<int>(size)) {
       LOG_ERR("TXB", "Serialization failed: arena write (%u bytes)", static_cast<uint32_t>(size));
       return false;
@@ -419,12 +419,12 @@ bool TextBlock::serialize(HalFile& file) const {
 
 std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   uint16_t wc = 0;
-  uint8_t hasBionic = 0;
+  uint8_t hasFocus = 0;
   uint8_t hasGuideDots = 0;
   uint8_t hasWordFlags = 0;
   uint8_t hasWordSpaces = 0;
   uint16_t textBytes = 0;
-  if (!serialization::tryReadPod(file, wc) || !serialization::tryReadPod(file, hasBionic) ||
+  if (!serialization::tryReadPod(file, wc) || !serialization::tryReadPod(file, hasFocus) ||
       !serialization::tryReadPod(file, hasGuideDots) || !serialization::tryReadPod(file, hasWordFlags) ||
       !serialization::tryReadPod(file, hasWordSpaces) || !serialization::tryReadPod(file, textBytes)) {
     LOG_ERR("TXB", "Deserialization failed: could not read block header");
@@ -435,7 +435,7 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
     LOG_ERR("TXB", "Deserialization failed: word count %u exceeds maximum", wc);
     return nullptr;
   }
-  if (hasBionic > 1 || hasGuideDots > 1 || hasWordFlags > 1 || hasWordSpaces > 1) {
+  if (hasFocus > 1 || hasGuideDots > 1 || hasWordFlags > 1 || hasWordSpaces > 1) {
     LOG_ERR("TXB", "Deserialization failed: invalid metadata flags");
     return nullptr;
   }
@@ -451,13 +451,13 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   }
   block->numWords = wc;
   block->textBytes = textBytes;
-  block->bionicPresent = hasBionic != 0;
+  block->focusPresent = hasFocus != 0;
   block->guideDotsPresent = hasGuideDots != 0;
   block->wordFlagsPresent = hasWordFlags != 0;
   block->wordSpacesPresent = hasWordSpaces != 0;
 
   if (wc > 0) {
-    const size_t size = arenaSize(wc, block->bionicPresent, block->guideDotsPresent, block->wordFlagsPresent,
+    const size_t size = arenaSize(wc, block->focusPresent, block->guideDotsPresent, block->wordFlagsPresent,
                                   block->wordSpacesPresent, textBytes);
     const int remaining = file.available();
     if (remaining < 0 || static_cast<size_t>(remaining) < size) {

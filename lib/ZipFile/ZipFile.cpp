@@ -7,6 +7,7 @@
 #include <Memory.h>
 
 #include <algorithm>
+#include <cstring>
 
 struct ZipInflateCtx {
   HalFile* file = nullptr;
@@ -465,7 +466,9 @@ bool ZipFile::loadZipDetails() {
   int foundOffset = -1;
   for (int i = scanRange - 22; i >= 0; i--) {
     constexpr uint32_t signature = 0x06054b50;
-    if (*reinterpret_cast<uint32_t*>(&buffer[i]) == signature) {
+    uint32_t candidate = 0;
+    memcpy(&candidate, buffer + i, sizeof(candidate));
+    if (candidate == signature) {
       foundOffset = i;
       break;
     }
@@ -481,8 +484,8 @@ bool ZipFile::loadZipDetails() {
   // Relative positions within EOCD:
   // Offset 10: Total number of entries (2 bytes)
   // Offset 16: Offset of start of central directory with respect to the starting disk number (4 bytes)
-  zipDetails.totalEntries = *reinterpret_cast<uint16_t*>(&buffer[foundOffset + 10]);
-  zipDetails.centralDirOffset = *reinterpret_cast<uint32_t*>(&buffer[foundOffset + 16]);
+  memcpy(&zipDetails.totalEntries, buffer + foundOffset + 10, sizeof(zipDetails.totalEntries));
+  memcpy(&zipDetails.centralDirOffset, buffer + foundOffset + 16, sizeof(zipDetails.centralDirOffset));
   zipDetails.isSet = true;
 
   free(buffer);
@@ -766,6 +769,30 @@ uint8_t* ZipFile::readFileToMemory(const char* filename, size_t* size, const boo
   if (trailingNullByte) data[inflatedDataSize] = '\0';
   if (size) *size = inflatedDataSize;
   return data;
+}
+
+bool ZipFile::readStoredFileToStream(const char* filename, Print& out) {
+  const ScopedOpenClose zip{*this};
+  if (!zip) return false;
+  FileStatSlim stat = {};
+  if (!loadFileStatSlim(filename, &stat)) return false;
+  if (stat.method != ZIP_METHOD_STORED || stat.compressedSize != stat.uncompressedSize) {
+    LOG_ERR("ZIP", "Optimizer entry must use STORE: %s", filename);
+    return false;
+  }
+  const long offset = getDataOffset(stat);
+  if (offset < 0 || !file.seek(offset)) return false;
+  uint8_t buffer[256];
+  size_t remaining = stat.uncompressedSize;
+  while (remaining) {
+    const size_t n = std::min(remaining, sizeof(buffer));
+    if (file.read(buffer, n) != static_cast<int>(n) || out.write(buffer, n) != n) {
+      LOG_ERR("ZIP", "Stored optimizer entry read/write failed: %s", filename);
+      return false;
+    }
+    remaining -= n;
+  }
+  return true;
 }
 
 bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t chunkSize, const bool allowEarlyStop) {

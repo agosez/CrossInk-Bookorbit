@@ -10,6 +10,7 @@
 #include "ReaderUtils.h"
 #include "activities/ActivityResult.h"
 #include "activities/home/FileBrowserActionActivity.h"
+#include "clippings/ClippingPreview.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
@@ -37,32 +38,12 @@ Rect touchDetailOpenButtonRect(const Rect& safe, const ThemeMetrics& metrics) {
               std::max(1, safe.width - sidePadding * 2), TOUCH_DETAIL_BUTTON_HEIGHT};
 }
 
-bool isUtf8SpaceAt(const std::string& text, const size_t index, size_t& advance) {
-  const auto c = static_cast<unsigned char>(text[index]);
-  if (c == 0xC2 && index + 1 < text.size() && static_cast<unsigned char>(text[index + 1]) == 0xA0) {
-    advance = 2;
-    return true;
-  }
-  if (c == 0xE2 && index + 2 < text.size() && static_cast<unsigned char>(text[index + 1]) == 0x80) {
-    const auto c2 = static_cast<unsigned char>(text[index + 2]);
-    if (c2 == 0x83 || c2 == 0xAF) {
-      advance = 3;
-      return true;
-    }
-  }
-  return false;
-}
-
-// One display line never needs more source text than this; reading and measuring beyond it
-// is pure waste, multiplied by every visible row on every scroll step.
-constexpr size_t LIST_SNIPPET_MAX_BYTES = 192;
-
 void buildOneLineSnippetText(const std::string& text, std::string& out) {
   out.clear();
   bool lastWasSpace = true;
   for (size_t i = 0; i < text.size();) {
-    size_t advance = 0;
-    if (isUtf8SpaceAt(text, i, advance)) {
+    const size_t advance = clippingPreview::utf8SpaceLength(text.data() + i, text.size() - i);
+    if (advance != 0) {
       if (!lastWasSpace) {
         out += ' ';
         lastWasSpace = true;
@@ -175,12 +156,17 @@ void EpubReaderClippingListActivity::onEnter() {
   topIndex = 0;
   visibleRows = 1;
   uiReady = false;
+  initialListRender = true;
   applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &EpubReaderClippingListActivity::onRowEvent, this);
   app.setScreen(&EpubReaderClippingListActivity::listScreen, this);
   detailText.reserve(CLIPPING_TEXT_MAX);
   detailLines.reserve(32);
   uiItems.resize(CLIPPINGS.clippingCount());
+  // At most 20 reusable 259-byte previews, instead of full text plus a copy per row.
+  for (size_t i = 0; i < std::min(CLIPPINGS.clippingCount(), CLIPPING_WINDOW_SIZE); ++i) {
+    uiLabels[i].reserve(clippingPreview::MAX_BYTES + clippingPreview::ELLIPSIS_BYTES);
+  }
   requestUpdate();
 }
 
@@ -525,9 +511,7 @@ void EpubReaderClippingListActivity::buildListScreen(UiApp::ScreenType& screen) 
   const int end = std::min({static_cast<int>(count), static_cast<int>(uiItems.size()), topIndex + visibleRows});
   for (int i = topIndex; i < end; ++i) {
     const size_t slot = static_cast<size_t>(i - topIndex);
-    uiRawText[slot].clear();
-    CLIPPINGS.readClippingTextPrefix(static_cast<size_t>(i), LIST_SNIPPET_MAX_BYTES, uiRawText[slot]);
-    buildOneLineSnippetText(uiRawText[slot], uiLabels[slot]);
+    CLIPPINGS.readClippingPreview(static_cast<size_t>(i), uiLabels[slot]);
     const Clipping* clipping = CLIPPINGS.clippingAt(static_cast<size_t>(i));
     fui::ListItem& item = uiItems[static_cast<size_t>(i)];
     item = fui::ListItem{};
@@ -631,6 +615,14 @@ void EpubReaderClippingListActivity::renderDetail() {
 
 void EpubReaderClippingListActivity::render(RenderLock&&) {
   renderer.clearScreen();
+
+  if (initialListRender && CLIPPINGS.clippingCount() > 0) {
+    // Publish feedback before app.render() reads and lays out the clipping previews.
+    // drawPopup flushes the framebuffer while this render still owns RenderLock.
+    GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+    renderer.clearScreen();
+  }
+  initialListRender = false;
 
   if (detailMode) {
     renderDetail();

@@ -9,6 +9,7 @@
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/InputReleaseGuard.h"
 
 namespace {
 
@@ -30,6 +31,25 @@ void drawTouchActionButtons(GfxRenderer& renderer, const Rect& screen, const The
 }
 
 }  // namespace
+
+void NearbyBookPositionSyncActivity::captureInitialInput() {
+  ignoreInitialBackRelease_ = mappedInput.isPressed(MappedInputManager::Button::Back);
+  const bool powerHeld = mappedInput.isPhysicalPressed(MappedInputManager::Button::Power);
+  // A popup selected with Power suppresses its public Power state before this
+  // activity enters. Its matching release can also be the suppressed Confirm
+  // release, so retain both views of the held Power button.
+  ignoreInitialConfirmRelease_ = mappedInput.isPressed(MappedInputManager::Button::Confirm) || powerHeld;
+  ignoreInitialPowerRelease_ = powerHeld;
+}
+
+bool NearbyBookPositionSyncActivity::consumeInitialInputRelease() {
+  return InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Back,
+                                                  ignoreInitialBackRelease_) ||
+         InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Confirm,
+                                                  ignoreInitialConfirmRelease_) ||
+         InputReleaseGuard::consumeInitialRelease(mappedInput, MappedInputManager::Button::Power,
+                                                  ignoreInitialPowerRelease_);
+}
 
 #ifdef SIMULATOR
 
@@ -90,6 +110,7 @@ NearbyBookPositionSyncActivity::~NearbyBookPositionSyncActivity() = default;
 
 void NearbyBookPositionSyncActivity::onEnter() {
   Activity::onEnter();
+  captureInitialInput();
   if (!prepareLocalPosition()) return;
   setState(State::READY);
 }
@@ -97,6 +118,8 @@ void NearbyBookPositionSyncActivity::onEnter() {
 void NearbyBookPositionSyncActivity::onExit() { Activity::onExit(); }
 
 void NearbyBookPositionSyncActivity::loop() {
+  if (consumeInitialInputRelease()) return;
+
   const auto& headerMetrics = UITheme::getInstance().getMetrics();
   const Rect headerScreen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   const Rect header{headerScreen.x, headerScreen.y + headerMetrics.topPadding, headerScreen.width,
@@ -718,6 +741,10 @@ bool NearbyBookPositionSyncActivity::prepareLocalPosition() {
 
 void NearbyBookPositionSyncActivity::onEnter() {
   Activity::onEnter();
+  // Quick Actions chooses an item on Confirm press and suppresses that press's
+  // release. Keep the release with this activity so it cannot be mistaken for
+  // the later Apply action after a peer position arrives.
+  captureInitialInput();
   sdFontSystem.releaseLoadedFont(renderer);
   setState(State::STARTING);
 
@@ -744,6 +771,8 @@ void NearbyBookPositionSyncActivity::onExit() {
 }
 
 void NearbyBookPositionSyncActivity::loop() {
+  if (consumeInitialInputRelease()) return;
+
   processEvents();
 
   const auto& headerMetrics = UITheme::getInstance().getMetrics();

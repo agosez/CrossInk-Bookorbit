@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Logging.h>
+#include <Memory.h>
+#include <PoolBudget.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -34,10 +36,13 @@
 //   arena.clear();   // all nodes gone, no per-object free needed
 //   arena.release(); // done with the arena entirely (onExit)
 
-struct ArenaSlab {
+enum class ArenaBacking : uint8_t { Default, PsramOnly, PsramPreferred };
+
+struct alignas(std::max_align_t) ArenaSlab {
   ArenaSlab* next;
   size_t capacity;
   size_t offset;
+  MemoryPool pool;
 
   uint8_t* data() { return reinterpret_cast<uint8_t*>(this + 1); }
 };
@@ -52,13 +57,15 @@ struct Arena {
   ArenaSlab* current = nullptr;
   size_t slabSize = 0;
 
-  Arena() = default;
+  explicit Arena(const ArenaBacking backing = ArenaBacking::Default) : backing_(backing) {}
   ~Arena() { release(); }
   Arena(const Arena&) = delete;
   Arena& operator=(const Arena&) = delete;
 
   // Allocate the first slab. Must be called before alloc(). Returns false on OOM.
   bool init(size_t slabBytes) {
+    release();
+    if (slabBytes == 0) return false;
     slabSize = slabBytes;
     head = current = allocSlab(slabBytes);
     if (!head) {
@@ -73,7 +80,7 @@ struct Arena {
     ArenaSlab* s = head;
     while (s) {
       ArenaSlab* n = s->next;
-      ::free(s);
+      freeSlab(s);
       s = n;
     }
     head = current = nullptr;
@@ -83,6 +90,7 @@ struct Arena {
   // Allocate `size` bytes aligned to `align` (must be a power of two).
   // Returns nullptr only when the heap itself is exhausted.
   void* alloc(size_t size, size_t align = alignof(std::max_align_t)) {
+    if (!current || align == 0 || (align & (align - 1)) != 0 || align > alignof(std::max_align_t)) return nullptr;
     void* p = tryAlloc(current, size, align);
     if (p) return p;
 
@@ -104,7 +112,7 @@ struct Arena {
     ArenaSlab* s = head ? head->next : nullptr;
     while (s) {
       ArenaSlab* n = s->next;
-      ::free(s);
+      freeSlab(s);
       s = n;
     }
     if (head) {
@@ -124,7 +132,7 @@ struct Arena {
     ArenaSlab* s = cp.slab->next;
     while (s) {
       ArenaSlab* n = s->next;
-      ::free(s);
+      freeSlab(s);
       s = n;
     }
     cp.slab->next = nullptr;
@@ -139,27 +147,50 @@ struct Arena {
     return total;
   }
 
- private:
-  static ArenaSlab* allocSlab(size_t dataSize) {
-    auto* s = static_cast<ArenaSlab*>(::malloc(sizeof(ArenaSlab) + dataSize));
-    if (!s) return nullptr;
-    s->next = nullptr;
-    s->capacity = dataSize;
-    s->offset = 0;
-    return s;
+  size_t capacityInPool(const MemoryPool pool) const {
+    size_t total = 0;
+    for (const ArenaSlab* s = head; s; s = s->next) {
+      if (s->pool == pool) total += sizeof(ArenaSlab) + s->capacity;
+    }
+    return total;
   }
 
-  static void* tryAlloc(ArenaSlab* slab, size_t size, size_t align) {
-    if (!slab) return nullptr;
+ private:
+  ArenaBacking backing_ = ArenaBacking::Default;
+
+  ArenaSlab* allocSlab(const size_t dataSize) {
+    if (dataSize > SIZE_MAX - sizeof(ArenaSlab)) return nullptr;
+    const size_t bytes = sizeof(ArenaSlab) + dataSize;
+    HeapByteBuffer storage;
+    if (backing_ == ArenaBacking::Default) {
+      storage = makeAlignedByteBufferNoThrow(bytes);
+    } else {
+      if (MemoryBudget::canAllocatePsram(bytes)) storage = makeAlignedByteBufferNoThrow(bytes, MemoryPool::Psram);
+      if (!storage && backing_ == ArenaBacking::PsramPreferred &&
+          MemoryBudget::canAllocateInternal(bytes, MemoryBudget::EPUB_LAYOUT_INTERNAL_RESERVE, 8U * 1024U)) {
+        storage = makeAlignedByteBufferNoThrow(bytes, MemoryPool::Internal);
+      }
+    }
+    if (!storage) return nullptr;
+    const auto pool = byteBufferPool(storage.get());
+    // Ownership transfers to the slab chain; release/clear/restore use the
+    // matching capability deleter, including mixed-pool fallback chains.
+    return ::new (storage.release()) ArenaSlab{nullptr, dataSize, 0, pool};
+  }
+
+  static void freeSlab(ArenaSlab* slab) { HeapByteBufferDeleter{}(reinterpret_cast<uint8_t*>(slab)); }
+
+  static void* tryAlloc(ArenaSlab* slab, const size_t size, const size_t align) {
+    if (!slab || slab->offset > SIZE_MAX - (align - 1)) return nullptr;
     const size_t aligned = (slab->offset + align - 1u) & ~(align - 1u);
-    if (aligned + size > slab->capacity) return nullptr;
+    if (aligned > slab->capacity || size > slab->capacity - aligned) return nullptr;
     slab->offset = aligned + size;
     return slab->data() + aligned;
   }
 };
 
 // Construct a T in the arena using placement new. Returns nullptr on OOM.
-// align is deduced from alignof(T) automatically.
+// Objects with nontrivial destructors must be explicitly destroyed by callers.
 template <typename T, typename... Args>
 T* arenaNew(Arena& a, Args&&... args) {
   void* mem = a.alloc(sizeof(T), alignof(T));
@@ -167,10 +198,9 @@ T* arenaNew(Arena& a, Args&&... args) {
   return ::new (mem) T(std::forward<Args>(args)...);
 }
 
-// Allocate a value-initialized array of T in the arena. Returns nullptr on OOM.
 template <typename T>
-T* arenaNewArray(Arena& a, size_t count) {
-  if (count == 0) return nullptr;
+T* arenaNewArray(Arena& a, const size_t count) {
+  if (count == 0 || count > SIZE_MAX / sizeof(T)) return nullptr;
   void* mem = a.alloc(sizeof(T) * count, alignof(T));
   if (!mem) return nullptr;
   return ::new (mem) T[count]();

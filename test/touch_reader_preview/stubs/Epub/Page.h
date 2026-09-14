@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "EpdFontFamily.h"
+#include "GfxRenderer.h"
 
 enum class CssTextAlign : uint8_t { Justify = 0, Left = 1, Center = 2, Right = 3, None = 4 };
 
@@ -36,12 +37,17 @@ class TextBlock {
 
   explicit TextBlock(std::vector<Word> words, BlockStyle style = {}) : words(std::move(words)), style(style) {}
 
+  void render(GfxRenderer& renderer, int fontId, int x, int y, bool foregroundBlack) const {
+    for (const auto& word : words)
+      renderer.drawText(fontId, x + word.x, y, word.text.c_str(), foregroundBlack, word.style);
+  }
+
   uint16_t wordCount() const { return static_cast<uint16_t>(words.size()); }
   const char* wordText(uint16_t index) const { return words[index].text.c_str(); }
   uint16_t wordTextLen(uint16_t index) const { return static_cast<uint16_t>(words[index].text.size()); }
   int16_t wordXpos(uint16_t index) const { return words[index].x; }
   EpdFontFamily::Style wordStyle(uint16_t index) const { return words[index].style; }
-  uint8_t bionicBoundary(uint16_t) const { return 0; }
+  uint8_t focusBoundary(uint16_t) const { return 0; }
   bool wordEndsWithInsertedHyphen(uint16_t index) const { return words[index].endsWithInsertedHyphen; }
   bool wordHasSpaceBefore(uint16_t index) const { return words[index].hasSpaceBefore; }
   uint16_t guideDotXOffset(uint16_t) const { return 0; }

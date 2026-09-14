@@ -13,4 +13,5 @@ inline bool hasHeapForEpubTextLayoutStart(Snapshot) { return true; }
 inline bool hasHeap(Snapshot, uint32_t, uint32_t) { return true; }
 inline bool shouldReleaseSdFontCachesForEpubInlineImage(Snapshot) { return false; }
 inline bool hasHeapForEpubInlineImage(const char*, const char*) { return true; }
+inline bool hasHeapForOptimizerPxcImage(const char*, const char*) { return true; }
 }  // namespace MemoryBudget

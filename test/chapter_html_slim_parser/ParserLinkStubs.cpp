@@ -26,7 +26,14 @@ TextBlock::TextBlock(const std::vector<std::string>&, const std::vector<int16_t>
     : blockStyle(blockStyle), rubyTexts(std::move(rubyTexts)) {}
 bool TextBlock::hasRuby() const { return false; }
 
-bool ImageDecoderFactory::isFormatSupported(const std::string&) { return false; }
+bool ImageDecoderFactory::isFormatSupported(const std::string& path) { return path.ends_with(".jpg"); }
+
+ImageBlock::ImageBlock(std::string imagePath, std::string sourcePath, const int16_t width, const int16_t height)
+    : imagePath(std::move(imagePath)), sourcePath(std::move(sourcePath)), width(width), height(height) {}
+
+void PageImage::render(GfxRenderer&, int, int, int, bool) {}
+void PageImage::renderPlaceholder(GfxRenderer&, int, int, bool) const {}
+bool PageImage::serialize(FsFile&) { return false; }
 
 PreviewBlockLocator::PreviewBlockLocator(const char*, IsBlockTagFn) {}
 PreviewBlockLocator::~PreviewBlockLocator() = default;

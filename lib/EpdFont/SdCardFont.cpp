@@ -3,6 +3,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <PoolBudget.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -99,13 +100,42 @@ SdCardFont::~SdCardFont() { freeAll(); }
 
 // --- Per-style free/cleanup ---
 
+bool SdCardFont::ensureBitmapCapacity(PerStyle& s, const uint32_t needed) {
+  if (s.miniBitmap && s.miniBitmapCapacity >= needed) return true;
+  // Rebuild already invalidates the mini view. Keep free-before-grow on both
+  // MCUs: no simultaneous old/new payloads, and no stale pointer on failure.
+  s.miniData.bitmap = nullptr;
+  s.miniBitmap.reset();
+  s.miniBitmapCapacity = 0;
+  s.miniBitmapUsed = 0;
+  s.miniBitmapPool = MemoryPool::None;
+  const size_t bytes = needed > 0 ? needed : 1;
+  if (psramHeapAvailable()) {
+    if (MemoryBudget::canAllocatePsram(bytes)) s.miniBitmap = makePsramByteBufferNoThrow(bytes);
+    // Metadata/read-order buffers are already live. Keep the 40 KiB font
+    // reserve for subsequent typography loading and other foreground work.
+    if (!s.miniBitmap && MemoryBudget::canAllocateInternal(bytes, MemoryBudget::EPUB_FONT_INTERNAL_RESERVE,
+                                                           MINI_RETAIN_MIN_MAX_ALLOC_HEAP)) {
+      s.miniBitmap = makeInternalByteBufferNoThrow(bytes);
+    }
+  } else {
+    s.miniBitmap = makeDefaultByteBufferNoThrow(bytes);
+  }
+  if (!s.miniBitmap) return false;  // caller logs, clears metadata and uses stub
+  s.miniBitmapCapacity = needed;
+  s.miniBitmapPool = byteBufferPool(s.miniBitmap.get());
+  LOG_DBG("SDCF", "Bitmap: bytes=%u pool=%s psramReserve=%u", unsigned(bytes), memoryPoolName(s.miniBitmapPool),
+          unsigned(MemoryBudget::EPUB_PSRAM_RESERVE));
+  return true;
+}
+
 void SdCardFont::freeStyleMiniData(PerStyle& s) {
   delete[] s.miniIntervals;
   s.miniIntervals = nullptr;
   delete[] s.miniGlyphs;
   s.miniGlyphs = nullptr;
-  delete[] s.miniBitmap;
-  s.miniBitmap = nullptr;
+  s.miniBitmap.reset();
+  s.miniBitmapPool = MemoryPool::None;
   s.miniIntervalCount = 0;
   s.miniGlyphCount = 0;
   s.miniIntervalCapacity = 0;
@@ -1126,7 +1156,7 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
       totalBitmapSize += s.miniGlyphs[i].dataLength;
     }
 
-    if (!ensureArrayCapacity(s.miniBitmap, s.miniBitmapCapacity, totalBitmapSize)) {
+    if (!ensureBitmapCapacity(s, totalBitmapSize)) {
       LOG_ERR("SDCF", "Failed to allocate mini bitmap (%u bytes) for style %u", totalBitmapSize, styleIdx);
       delete[] readOrder;
       delete[] mappings;
@@ -1162,7 +1192,7 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
         }
         seekCount++;
       }
-      if (file.read(s.miniBitmap + miniBitmapOffset, glyph.dataLength) != static_cast<int>(glyph.dataLength)) {
+      if (file.read(s.miniBitmap.get() + miniBitmapOffset, glyph.dataLength) != static_cast<int>(glyph.dataLength)) {
         LOG_ERR("SDCF", "Prewarm: short bitmap read (style %u)", styleIdx);
         delete[] readOrder;
         delete[] mappings;
@@ -1196,7 +1226,7 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
   s.miniMetadataOnly = metadataOnly;
   s.miniHysteresisPending = !metadataOnly;  // one hysteresis evaluation per rebuild
   memset(&s.miniData, 0, sizeof(s.miniData));
-  s.miniData.bitmap = metadataOnly ? nullptr : s.miniBitmap;
+  s.miniData.bitmap = metadataOnly ? nullptr : s.miniBitmap.get();
   s.miniData.glyph = s.miniGlyphs;
   s.miniData.intervals = s.miniIntervals;
   s.miniData.intervalCount = s.miniIntervalCount;
@@ -1592,8 +1622,6 @@ EpdFont* SdCardFont::getEpdFont(uint8_t style) {
   if (!styles_[style].present) return nullptr;
   return &styles_[style].epdFont;
 }
-
-bool SdCardFont::hasStyle(uint8_t style) const { return styles_[style & (MAX_STYLES - 1)].present; }
 
 uint8_t SdCardFont::resolveStyle(uint8_t style) const {
   static const uint8_t kFallbacks[MAX_STYLES][MAX_STYLES] = {

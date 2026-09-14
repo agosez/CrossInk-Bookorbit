@@ -24,15 +24,12 @@
 
 class EpubReaderTouchMenuActivity final : public Activity {
  public:
-  using AutoPageTurnIntervalChangedCallback = void (*)(void* ctx, uint16_t seconds);
-
   explicit EpubReaderTouchMenuActivity(
       GfxRenderer& renderer, MappedInputManager& mappedInput, std::shared_ptr<Epub> epub,
       const TouchReaderPreviewModel* previewModel, int bookProgressPercent, bool hasFootnotes, bool hasDictionary,
       bool hasBookmarks, bool hasClippings, bool isCurrentPageBookmarked, bool isBookCompleted,
       bool showReadingPaceReset, bool stablePageNumbersAvailable, uint16_t autoPageTurnIntervalSeconds,
-      bool automaticPageTurnActive, AutoPageTurnIntervalChangedCallback autoPageTurnIntervalChangedCallback,
-      void* autoPageTurnIntervalChangedContext, ReaderOptionsActivity::SaveSettingsCallback saveReaderSettingsCallback,
+      bool automaticPageTurnActive, ReaderOptionsActivity::SaveSettingsCallback saveReaderSettingsCallback,
       void* saveReaderSettingsContext, ReaderOptionsActivity::SaveGlobalSettingsCallback saveGlobalSettingsCallback,
       void* saveGlobalSettingsContext,
       ReaderOptionsActivity::GlobalSettingsEditCallback beginGlobalSettingsEditCallback,
@@ -84,16 +81,17 @@ class EpubReaderTouchMenuActivity final : public Activity {
   bool settingsChanged = false;
   bool didChangeSettings = false;
   bool previewDirty = false;
+  int16_t previousDrawerTop = -1;
   bool previewHasAntiAliasing = false;
   bool draggingSlider = false;
   bool sliderTapPending = false;
   bool buttonFocusActive = false;
-  bool autoPageTurnIntervalChanged = false;
   bool automaticPageTurnActive = false;
   uint16_t autoPageTurnIntervalSeconds = READER_AUTO_PAGE_TURN_MIN_SECONDS;
 
   ReaderDrawerState state{};
   ReaderSettingsDraft draft{};
+  const ReaderSettingsDraft sourceSettings;
   ReaderSettingsChangeMask changeMask = ReaderSettingsChangeMask::None;
   std::array<std::vector<RowId>, READER_DRAWER_TAB_COUNT> rootRows;
   std::vector<RowId> paneRows;
@@ -125,9 +123,6 @@ class EpubReaderTouchMenuActivity final : public Activity {
   bool hasDictionaryFontOverride = false;
   ReaderOptionsActivity::DictionaryFontChangedCallback dictionaryFontChangedCallback = nullptr;
   void* dictionaryFontChangedContext = nullptr;
-  AutoPageTurnIntervalChangedCallback autoPageTurnIntervalChangedCallback = nullptr;
-  void* autoPageTurnIntervalChangedContext = nullptr;
-
   ButtonNavigator buttonNavigator;
   OptionPopup optionPopup;
   freeink::ui::GfxRendererTarget uiTarget;
@@ -179,11 +174,12 @@ class EpubReaderTouchMenuActivity final : public Activity {
                        int selectedIndex);
   void selectEnumOption(int index);
   void completePercentSelection();
+  void completeAutoPageTurnSelection();
   void notifyDictionaryFontChanged();
-  void showDestructiveConfirmation(RowId row, EpubReaderMenuAction action);
   void toggleSetting(RowId row);
   void adjustActiveSlider(int delta);
   void setActiveSliderPermille(int16_t permille);
+  int16_t drawerHeight() const;
   bool renderPreview();
   void renderPreviewWithAntiAliasing();
   void renderPreviewContents(const ReaderSettingsDraft& previewSettings, int previewFontId);

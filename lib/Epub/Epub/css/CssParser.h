@@ -220,7 +220,7 @@ class CssParser {
     uint16_t selectorLen;
     CssStyle style;
   };
-  Arena cachedRuleArena_;
+  Arena cachedRuleArena_{psramHeapAvailable() ? ArenaBacking::PsramOnly : ArenaBacking::Default};
   CachedRule* cachedRules_ = nullptr;
   size_t cachedRuleTableCount_ = 0;
   mutable bool cacheIndexLoaded_ = false;

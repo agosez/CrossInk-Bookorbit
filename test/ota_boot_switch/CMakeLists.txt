@@ -1,0 +1,5 @@
+find_package(ZLIB REQUIRED)
+add_executable(OtaBootSwitchTest OtaBootSwitchTest.cpp ${REPO_ROOT}/src/network/OtaBootSwitch.cpp)
+target_include_directories(OtaBootSwitchTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/stubs ${REPO_ROOT}/src/network)
+target_link_libraries(OtaBootSwitchTest PRIVATE crosspoint_test_common GTest::gtest_main ZLIB::ZLIB)
+gtest_discover_tests(OtaBootSwitchTest)

@@ -198,6 +198,7 @@ bool CompactTableLayout::emitLine(std::array<LineToken, MAX_ROW_TOKENS>& line, c
   words.reserve(lineCount);
   xPositions.reserve(lineCount);
   styles.reserve(lineCount);
+  flags.reserve(lineCount);
   hasSpaceBefore.reserve(lineCount);
   bool anyFlags = false;
   for (uint16_t i = 0; i < lineCount; ++i) {

@@ -24,10 +24,13 @@ class ChapterHtmlSlimParserTest : public ::testing::TestWithParam<const char*> {
   ChapterHtmlSlimParser parser{epub,  filepath, renderer, 0,  1.0f, false, false, 0, 480, 800,     false,
                                false, false,    0,        {}, true, "",    "",    0, {},  nullptr, &cssParser};
   std::array<ChapterHtmlSlimParser::StyleStackEntry, 4> inlineStyles{};
+  std::array<BlockStyle, 4> blockStyles{};
 
   void SetUp() override {
     parser.currentTextBlock = std::make_unique<ParsedText>(false);
     parser.inlineStyleBuf_ = inlineStyles.data();
+    parser.blockStyleBuf_ = blockStyles.data();
+    parser.blockStyleCount_ = 1;
   }
 };
 
@@ -59,5 +62,22 @@ TEST_P(ChapterHtmlSlimParserTest, KeepsCssVerticalAlignAndInternalLinkMetadata) 
 
 INSTANTIATE_TEST_SUITE_P(CssVerticalAlign, ChapterHtmlSlimParserTest,
                          ::testing::Values("vertical-align: super", "vertical-align: sub"));
+
+TEST_F(ChapterHtmlSlimParserTest, UsesOptimizerImageDimensionsWithoutReadingTheCompressedImage) {
+  epub.optimizerImageAvailable = true;
+  epub.optimizerImageWidth = 800;
+  epub.optimizerImageHeight = 7;
+  const XML_Char* attributes[] = {"src", "wide.jpg", nullptr};
+
+  ChapterHtmlSlimParser::startElement(&parser, "img", attributes);
+
+  EXPECT_EQ(epub.streamReadCount, 0u);
+  ASSERT_NE(parser.currentPage, nullptr);
+  ASSERT_EQ(parser.currentPage->elements.size(), 1u);
+  ASSERT_EQ(parser.currentPage->elements.front()->getTag(), TAG_PageImage);
+  const auto& image = static_cast<const PageImage&>(*parser.currentPage->elements.front()).getImageBlock();
+  EXPECT_EQ(image.getWidth(), 480);
+  EXPECT_EQ(image.getHeight(), 4);
+}
 
 }  // namespace

@@ -56,7 +56,11 @@ class MappedInputManager {
     return true;
   }
 
-  SwipeDir wasSwipe() const { return SwipeDir::None; }
+  SwipeDir wasSwipe() const {
+    const SwipeDir result = swipe;
+    swipe = SwipeDir::None;
+    return result;
+  }
   bool wasPressed(const Button button) const {
     if (button != Button::Confirm || !confirmPressed) return false;
     confirmPressed = false;
@@ -78,6 +82,7 @@ class MappedInputManager {
   }
 
   void suppressNextTouchTap() { suppressTouchTap = true; }
+  void suppressCurrentTouchContact() { suppressTouchTap = true; }
   void suppressNextConfirmRelease() {}
   void suppressNextBackRelease() {}
   void suppressNextPowerRelease() { powerReleaseSuppressed = true; }
@@ -93,6 +98,8 @@ class MappedInputManager {
     touchY = y;
     touchRelease = true;
   }
+
+  void injectSwipe(const SwipeDir direction) { swipe = direction; }
 
   void injectPowerConfirmPress() {
     confirmPressed = true;
@@ -120,6 +127,7 @@ class MappedInputManager {
   mutable bool powerPressed = false;
   mutable bool powerReleased = false;
   mutable bool powerReleaseSuppressed = false;
+  mutable SwipeDir swipe = SwipeDir::None;
   mutable int touchX = 0;
   mutable int touchY = 0;
 };

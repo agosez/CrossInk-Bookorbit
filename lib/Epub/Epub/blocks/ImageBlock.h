@@ -15,7 +15,7 @@ class ImageBlock final : public Block {
   int16_t getWidth() const { return width; }
   int16_t getHeight() const { return height; }
 
-  bool imageExists() const;
+  void prepareCache() const;
   bool hasValidCache() const;
   bool needsDecode() const;
   void renderPlaceholder(GfxRenderer& renderer, int x, int y, bool foregroundBlack) const;
@@ -23,9 +23,12 @@ class ImageBlock final : public Block {
   static void releaseSessionPixelCache();
 
   // The section builder only reads image headers. The reader supplies this
-  // allocation-free callback to extract a full image on its first render.
+  // allocation-free callback pair to seed a bundled pixel cache or extract the
+  // original image on its first render.
   using ExtractFn = bool (*)(void* context, const char* sourcePath, const char* destinationPath);
-  static void setExtractor(void* context, ExtractFn fn);
+  using SeedCacheFn = bool (*)(void* context, const char* sourcePath, int width, int height,
+                               const char* destinationPath);
+  static void setExtractor(void* context, ExtractFn extract, SeedCacheFn seedCache);
 
   BlockType getType() override { return IMAGE_BLOCK; }
   bool isEmpty() override { return false; }
@@ -42,4 +45,5 @@ class ImageBlock final : public Block {
 
   static void* extractContext;
   static ExtractFn extractFn;
+  static SeedCacheFn seedCacheFn;
 };

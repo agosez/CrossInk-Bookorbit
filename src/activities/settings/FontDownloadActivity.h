@@ -62,18 +62,22 @@ class FontDownloadActivity : public Activity {
   };
 
   struct ManifestFile {
-    std::string name;
+    // The downloaded manifest can contain hundreds of file names. They all
+    // point into manifestStringArena_ so the catalog does not fragment the
+    // C3 heap with one std::string allocation per entry.
+    const char* name = "";
     size_t size = 0;
     uint32_t crc32 = 0;
     uint8_t pointSize = 0;
   };
 
   struct ManifestFamily {
-    std::string name;
+    const char* name = "";
     std::string installName;
-    std::string description;
-    std::string languages;
-    std::vector<ManifestFile> files;
+    const char* description = "";
+    const char* languages = "";
+    size_t fileStart = 0;
+    size_t fileCount = 0;
     size_t totalSize = 0;
     bool installed = false;
     bool hasUpdate = false;
@@ -86,7 +90,14 @@ class FontDownloadActivity : public Activity {
 
   // Manifest data
   std::string baseUrl_;
-  std::vector<ManifestFamily> families_;
+  // One activity-owned allocation for all manifest labels and file names.
+  // It remains alive while an update batch uses a copied ManifestFamily.
+  std::unique_ptr<char[]> manifestStringArena_;
+  size_t manifestStringArenaUsed_ = 0;
+  size_t manifestStringArenaCapacity_ = 0;
+  std::unique_ptr<ManifestFile[]> manifestFiles_;
+  std::unique_ptr<ManifestFamily[]> manifestFamilies_;
+  size_t manifestFamilyCount_ = 0;
   // Built once after each manifest load. The renderer borrows these pointers,
   // so keeping them activity-owned avoids heap growth on every redraw.
   std::unique_ptr<freeink::ui::ListItem[]> listItems_;
@@ -134,14 +145,14 @@ class FontDownloadActivity : public Activity {
 
   void onWifiSelectionComplete(bool success);
   bool fetchAndParseManifest();
+  bool internManifestString(const char* text, const char*& out);
   bool rebuildListItems();
   const SdCardFontFamilyInfo* findInstalledFamilyCandidate(const char* familyName) const;
-  bool installedFilesMatch(const char* familyName, const std::vector<ManifestFile>& files, bool& hasUpdate,
+  bool installedFilesMatch(const ManifestFamily& family, bool& hasUpdate,
                            std::string* resolvedFamilyName = nullptr) const;
   void resolveInstalledFamilyName(ManifestFamily& family) const;
   void clearManifestFamilies();
   void downloadFamily(ManifestFamily& family);
-  void downloadSelectedFamily(int familyIndex);
   void returnToFamilyList();
   void updateAll();
   static bool computeFileCrc32(const char* path, uint32_t& outCrc);
@@ -155,6 +166,4 @@ class FontDownloadActivity : public Activity {
   int listItemCount() const;
   size_t totalUpdateSize() const;
   static void formatSize(size_t bytes, char* buffer, size_t bufferSize);
-  int fontListPageItems() const;
-  void drawFontList(Rect rect);
 };

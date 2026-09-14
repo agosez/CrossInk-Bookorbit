@@ -210,8 +210,10 @@ void XtcReaderActivity::loop() {
                        (statusBarMode == CrossPointSettings::XTC_STATUS_BAR_MODE::XTC_STATUS_BAR_BOTTOM &&
                         ReaderUtils::isBottomStatusBarTap(renderer, touch.y, statusBarHeight)));
   if (tappedStatusBar) {
-    statusBarVisible = !statusBarVisible;
-    requestUpdate();
+    if (SETTINGS.tapToHideStatusBar) {
+      statusBarVisible = !statusBarVisible;
+      requestUpdate();
+    }
     return;
   }
 
@@ -381,7 +383,7 @@ void XtcReaderActivity::loop() {
                                      : mappedInput.wasReleased(MappedInputManager::Button::PageForward);
   const bool frontPrev = mappedInput.wasReleased(MappedInputManager::Button::Left);
   const bool powerReleased = mappedInput.wasReleased(MappedInputManager::Button::Power);
-  if (powerReleased && longPowerPageTurnHandled) {
+  if (longPowerPageTurnHandled && (powerReleased || !mappedInput.isPressed(MappedInputManager::Button::Power))) {
     longPowerPageTurnHandled = false;
     return;
   }
@@ -392,6 +394,9 @@ void XtcReaderActivity::loop() {
   if (!longPowerPageTurnHandled && mappedInput.isPressed(MappedInputManager::Button::Power) &&
       mappedInput.getHeldTime() >= SETTINGS.getPowerButtonLongPressDuration() &&
       executeReaderShortcutAction(static_cast<CrossPointSettings::SHORT_PWRBTN>(SETTINGS.longPwrBtn))) {
+    // Reader long-press actions execute while Power is still held. Consume its
+    // later release so the app-wide shortcut dispatcher cannot run it again.
+    mappedInput.suppressNextPowerRelease();
     longPowerPageTurnHandled = true;
     return;
   }
@@ -791,6 +796,54 @@ float XtcReaderActivity::getCurrentBookProgressPercent() const {
   return static_cast<float>(xtc->calculateProgress(clampedPage));
 }
 
+bool XtcReaderActivity::getFrontlightPanelBookDetails(FrontlightPanelBookDetails& details) {
+  RenderLock lock(*this);
+  if (!xtc || xtc->getPageCount() == 0) return false;
+
+  const uint32_t pageCount = xtc->getPageCount();
+  const uint32_t page = std::min(currentPage, pageCount - 1);
+  details.title = xtc->getTitle();
+  details.author = xtc->getAuthor();
+  details.chapter.clear();
+  xtc::ChapterInfo chapter{};
+  if (xtc->getChapterForPage(page, chapter)) details.chapter = chapter.name;
+  details.progressPercent = xtc->calculateProgress(page);
+  return true;
+}
+
+std::unique_ptr<Activity> XtcReaderActivity::createFrontlightReadingStatsActivity() {
+  if (!xtc) return {};
+
+  BookReadingStats displayStats = stats;
+  if (SETTINGS.shouldTrackReadingStats()) {
+    displayStats.totalReadingSeconds = displayStats.totalReadingSeconds > UINT32_MAX - sessionReadingSeconds
+                                           ? UINT32_MAX
+                                           : displayStats.totalReadingSeconds + sessionReadingSeconds;
+    uint32_t currentPageSeconds = 0;
+    if (currentPageReadingSecondsForStats(currentPageSeconds, "frontlight_stats_preview")) {
+      displayStats.totalReadingSeconds = displayStats.totalReadingSeconds > UINT32_MAX - currentPageSeconds
+                                             ? UINT32_MAX
+                                             : displayStats.totalReadingSeconds + currentPageSeconds;
+    }
+  }
+
+  const bool hasSyncedStats = GlobalReadingStats::hasSyncedStats();
+  if (hasSyncedStats) {
+    return makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, xtc->getTitle(), xtc->getCachePath(),
+                                                displayStats, getCurrentBookProgressPercent(), false, 0, globalStats,
+                                                GlobalReadingStats::loadAggregated(globalStats));
+  }
+  return makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, xtc->getTitle(), xtc->getCachePath(), displayStats,
+                                              getCurrentBookProgressPercent(), false, 0, globalStats);
+}
+
+void XtcReaderActivity::onFrontlightPanelClosed() {
+  globalStats = GlobalReadingStats::load();
+  stats = xtc ? BookReadingStats::load(xtc->getCachePath()) : stats;
+  resumeReadingStatsTimer("frontlight_panel_return");
+  requestUpdate();
+}
+
 void XtcReaderActivity::openChapterSelection() {
   uint32_t pageToSelect = 0;
   bool hasChapters = false;
@@ -819,53 +872,18 @@ void XtcReaderActivity::openChapterSelection() {
 }
 
 void XtcReaderActivity::openReadingStats() {
-  if (!xtc) {
+  auto bookStats = createFrontlightReadingStatsActivity();
+  if (!bookStats) {
     resumeReadingStatsTimer("book_stats_no_book");
     requestUpdate();
     return;
   }
-
-  BookReadingStats displayStats = stats;
-  if (SETTINGS.shouldTrackReadingStats()) {
-    displayStats.totalReadingSeconds = displayStats.totalReadingSeconds > UINT32_MAX - sessionReadingSeconds
-                                           ? UINT32_MAX
-                                           : displayStats.totalReadingSeconds + sessionReadingSeconds;
-    uint32_t currentPageSeconds = 0;
-    if (currentPageReadingSecondsForStats(currentPageSeconds, "book_stats_preview")) {
-      displayStats.totalReadingSeconds = displayStats.totalReadingSeconds > UINT32_MAX - currentPageSeconds
-                                             ? UINT32_MAX
-                                             : displayStats.totalReadingSeconds + currentPageSeconds;
-    }
-  }
-
-  const bool hasSyncedStats = GlobalReadingStats::hasSyncedStats();
-  const GlobalReadingStats displayAllDevicesStats =
-      hasSyncedStats ? GlobalReadingStats::loadAggregated(globalStats) : GlobalReadingStats{};
-  if (hasSyncedStats) {
-    startActivityForResult(std::make_unique<BookStatsActivity>(
-                               renderer, mappedInput, xtc->getTitle(), xtc->getCachePath(), displayStats,
-                               getCurrentBookProgressPercent(), false, 0, globalStats, displayAllDevicesStats),
-                           [this](const ActivityResult&) {
-                             if (xtc) {
-                               stats = BookReadingStats::load(xtc->getCachePath());
-                             }
-                             globalStats = GlobalReadingStats::load();
-                             resumeReadingStatsTimer("book_stats_return");
-                             requestUpdate();
-                           });
-  } else {
-    startActivityForResult(
-        std::make_unique<BookStatsActivity>(renderer, mappedInput, xtc->getTitle(), xtc->getCachePath(), displayStats,
-                                            getCurrentBookProgressPercent(), false, 0, globalStats),
-        [this](const ActivityResult&) {
-          if (xtc) {
-            stats = BookReadingStats::load(xtc->getCachePath());
-          }
-          globalStats = GlobalReadingStats::load();
-          resumeReadingStatsTimer("book_stats_return");
-          requestUpdate();
-        });
-  }
+  startActivityForResult(std::move(bookStats), [this](const ActivityResult&) {
+    if (xtc) stats = BookReadingStats::load(xtc->getCachePath());
+    globalStats = GlobalReadingStats::load();
+    resumeReadingStatsTimer("book_stats_return");
+    requestUpdate();
+  });
 }
 
 void XtcReaderActivity::deleteBookStats() {
@@ -946,6 +964,12 @@ void XtcReaderActivity::onReaderMenuConfirm(const int action) {
     case XtcReaderMenuActivity::MenuAction::DISABLE_TOUCHSCREEN:
       break;
   }
+}
+
+bool XtcReaderActivity::handleFrontlightPanelResult(const FrontlightPanelResult& result) {
+  if (result.action != FrontlightPanelAction::SendNearbyBook || !xtc) return false;
+  saveProgress(currentPage);
+  return activityManager.goToNearbyBookSend(xtc->getPath(), true);
 }
 
 bool XtcReaderActivity::supportsQuickAction(const CrossPointSettings::SHORT_PWRBTN action) {

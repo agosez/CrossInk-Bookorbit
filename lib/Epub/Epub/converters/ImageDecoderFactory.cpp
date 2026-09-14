@@ -1,6 +1,7 @@
 #include "ImageDecoderFactory.h"
 
 #include <Arduino.h>
+#include <FsHelpers.h>
 #include <Logging.h>
 #include <Memory.h>
 
@@ -51,4 +52,6 @@ ImageToFramebufferDecoder* ImageDecoderFactory::getDecoder(const std::string& im
   return nullptr;
 }
 
-bool ImageDecoderFactory::isFormatSupported(const std::string& imagePath) { return getDecoder(imagePath) != nullptr; }
+bool ImageDecoderFactory::isFormatSupported(const std::string& imagePath) {
+  return FsHelpers::hasJpgExtension(imagePath) || FsHelpers::hasPngExtension(imagePath);
+}

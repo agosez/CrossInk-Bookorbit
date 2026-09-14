@@ -17,6 +17,7 @@ body:
         - "--- Select ---"
         - X4
         - X3
+        - X4 Pro
         - Seeed Sticky
         - X4 Pro
     validations:

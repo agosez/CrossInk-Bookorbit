@@ -37,7 +37,7 @@ inline constexpr std::array<StrId, CrossPointSettings::QUICK_ACTION_SLOT_ACTION_
     StrId::STR_FORCE_REFRESH,
     StrId::STR_CHANGE_FONT,
     StrId::STR_TOGGLE_GUIDE_DOTS,
-    StrId::STR_TOGGLE_BIONIC_READING,
+    StrId::STR_TOGGLE_FOCUS_READING,
     StrId::STR_TOGGLE_BOOKMARK,
     StrId::STR_SYNC_PROGRESS,
     StrId::STR_MARK_FINISHED,
@@ -68,7 +68,7 @@ inline constexpr std::array<CrossPointSettings::SHORT_PWRBTN, 31> shortcutAction
     CrossPointSettings::FORCE_REFRESH,
     CrossPointSettings::TOGGLE_FONT,
     CrossPointSettings::TOGGLE_GUIDE_DOTS,
-    CrossPointSettings::TOGGLE_BIONIC_READING,
+    CrossPointSettings::TOGGLE_FOCUS_READING,
     CrossPointSettings::CYCLE_PAGE_TURN,
     CrossPointSettings::TOGGLE_TILT_PAGE_TURN,
     CrossPointSettings::SYNC_PROGRESS,
@@ -120,8 +120,7 @@ inline bool isQuickActionSlotActionAvailable(const uint8_t action) {
 }
 
 inline StrId actionLabel(const uint8_t action) {
-  // STR_PAGE_TURN also labels the touch gesture setting, so shortcuts use the
-  // directional label without changing that setting's wording.
+  // Use the directional label for the legacy page-turn action ID.
   if (action == CrossPointSettings::PAGE_TURN) return StrId::STR_NEXT_PAGE;
   if (action < CrossPointSettings::QUICK_ACTION_SLOT_ACTION_COUNT) return actionLabels[action];
   if (action == CrossPointSettings::QUICK_ACTIONS) return StrId::STR_QUICK_ACTIONS;

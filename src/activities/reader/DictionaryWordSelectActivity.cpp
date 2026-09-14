@@ -138,30 +138,30 @@ int16_t measureWordAdvanceX(const GfxRenderer& renderer, const int fontId, const
 }
 
 int16_t measureWordAdvanceX(const GfxRenderer& renderer, const int fontId, const char* word, const size_t length,
-                            const EpdFontFamily::Style style, const uint8_t bionicBoundary,
-                            const uint16_t bionicSuffixX, char* scratch, const size_t scratchCapacity) {
-  if (bionicBoundary == 0 || bionicSuffixX == 0) {
+                            const EpdFontFamily::Style style, const uint8_t focusBoundary, const uint16_t focusSuffixX,
+                            char* scratch, const size_t scratchCapacity) {
+  if (focusBoundary == 0 || focusSuffixX == 0) {
     return measureWordAdvanceX(renderer, fontId, word, length, style, scratch, scratchCapacity);
   }
-  const size_t suffixStart = std::min<size_t>(bionicBoundary, length);
-  return static_cast<int16_t>(bionicSuffixX + renderer.getTextAdvanceX(fontId, word + suffixStart, style));
+  const size_t suffixStart = std::min<size_t>(focusBoundary, length);
+  return static_cast<int16_t>(focusSuffixX + renderer.getTextAdvanceX(fontId, word + suffixStart, style));
 }
 
 int16_t measureWordAdvanceX(const GfxRenderer& renderer, const int fontId, const char* word, const size_t length,
-                            const EpdFontFamily::Style style, const uint8_t bionicBoundary,
-                            const uint16_t bionicRunOffset, const bool wordIsRtl, char* scratch,
+                            const EpdFontFamily::Style style, const uint8_t focusBoundary,
+                            const uint16_t focusRunOffset, const bool wordIsRtl, char* scratch,
                             const size_t scratchCapacity) {
-  if (!wordIsRtl || bionicBoundary == 0 || bionicRunOffset == 0) {
-    return measureWordAdvanceX(renderer, fontId, word, length, style, bionicBoundary, bionicRunOffset, scratch,
+  if (!wordIsRtl || focusBoundary == 0 || focusRunOffset == 0) {
+    return measureWordAdvanceX(renderer, fontId, word, length, style, focusBoundary, focusRunOffset, scratch,
                                scratchCapacity);
   }
 
   const auto boldStyle = static_cast<EpdFontFamily::Style>(style | EpdFontFamily::BOLD);
   char boldBuf[40];
-  const size_t boldLen = std::min<size_t>({static_cast<size_t>(bionicBoundary), length, sizeof(boldBuf) - 1});
+  const size_t boldLen = std::min<size_t>({static_cast<size_t>(focusBoundary), length, sizeof(boldBuf) - 1});
   memcpy(boldBuf, word, boldLen);
   boldBuf[boldLen] = '\0';
-  return static_cast<int16_t>(bionicRunOffset + renderer.getTextAdvanceX(fontId, boldBuf, boldStyle));
+  return static_cast<int16_t>(focusRunOffset + renderer.getTextAdvanceX(fontId, boldBuf, boldStyle));
 }
 
 bool isRtlWord(const char* word, const bool fallbackRtl) {
@@ -259,23 +259,6 @@ void DictionaryWordSelectActivity::suspendWorkingSet() {
   MemoryBudget::logHeapShape("dict.parent_suspended");
 }
 
-bool DictionaryWordSelectActivity::restoreWorkingSet() {
-  if (!workingSetSuspended_) return true;
-  page = readerPageLoad_(readerContext_, activePageOffset_);
-  if (!page) {
-    LOG_ERR("DICT", "Failed to reload reader page after dictionary definition");
-    return false;
-  }
-  if (!buildWorkingSet(/*consumeInitialConfirm=*/false)) return false;
-  if (suspendedSelectionX_ >= 0 && suspendedSelectionY_ >= 0) {
-    navigator.selectWordAtPoint(suspendedSelectionX_, suspendedSelectionY_,
-                                renderer.getLineHeight(SETTINGS.getReaderFontId()));
-  }
-  workingSetSuspended_ = false;
-  MemoryBudget::logHeapShape("dict.parent_restored");
-  return true;
-}
-
 void DictionaryWordSelectActivity::onExit() {
   controller.onExit();
   navigator.releaseWorkingSet();
@@ -294,7 +277,7 @@ void DictionaryWordSelectActivity::prewarmHighlightGlyphs(int currIdx) {
   auto* fcm = renderer.getFontCacheManager();
   if (!fcm) return;
   uint8_t styleMask = styleToBitMask(w->style);
-  if (w->bionicBoundary > 0) {
+  if (w->focusBoundary > 0) {
     styleMask |= styleToBitMask(static_cast<EpdFontFamily::Style>(w->style | EpdFontFamily::BOLD));
   }
   fcm->prewarmCache(SETTINGS.getReaderFontId(), navigator.getDisplay(*w), styleMask);
@@ -626,12 +609,12 @@ bool DictionaryWordSelectActivity::extractWords() {
       const char* firstWord = block->wordText(0);
       const size_t firstLength = block->wordTextLen(0);
       const auto firstStyle = block->wordStyle(0);
-      const uint8_t firstBionicBoundary = block->bionicBoundary(0);
-      const uint16_t firstBionicSuffixX = block->bionicRunOffset(0);
+      const uint8_t firstFocusBoundary = block->focusBoundary(0);
+      const uint16_t firstFocusSuffixX = block->focusRunOffset(0);
       const bool firstWordIsRtl = isRtlWord(firstWord, block->getBlockStyle().isRtl);
       const int16_t firstWidth =
           measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), firstWord, firstLength, firstStyle,
-                              firstBionicBoundary, firstBionicSuffixX, firstWordIsRtl, sanitizeScratch, scratchHalf);
+                              firstFocusBoundary, firstFocusSuffixX, firstWordIsRtl, sanitizeScratch, scratchHalf);
       const int16_t derivedGap = static_cast<int16_t>(block->wordXpos(1) - block->wordXpos(0) - firstWidth);
       if (derivedGap > naturalSpaceWidth / 2) lineGapWidth = derivedGap;
     }
@@ -641,8 +624,8 @@ bool DictionaryWordSelectActivity::extractWords() {
       const char* wordText = block->wordText(wordIndex);
       const size_t wordLength = block->wordTextLen(wordIndex);
       const auto wordStyle = block->wordStyle(wordIndex);
-      const uint8_t bionicBoundary = block->bionicBoundary(wordIndex);
-      const uint16_t bionicSuffixX = block->bionicRunOffset(wordIndex);
+      const uint8_t focusBoundary = block->focusBoundary(wordIndex);
+      const uint16_t focusSuffixX = block->focusRunOffset(wordIndex);
       const bool wordIsRtl = isRtlWord(wordText, block->getBlockStyle().isRtl);
 
       if (!hasVisibleWordText(wordText)) {
@@ -666,15 +649,15 @@ bool DictionaryWordSelectActivity::extractWords() {
 
       if (!containsDashSeparator(wordText, wordLength)) {
         int16_t wordWidth;
-        if (bionicBoundary > 0 && bionicSuffixX > 0) {
+        if (focusBoundary > 0 && focusSuffixX > 0) {
           wordWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), wordText, wordLength, wordStyle,
-                                          bionicBoundary, bionicSuffixX, wordIsRtl, sanitizeScratch, scratchHalf);
+                                          focusBoundary, focusSuffixX, wordIsRtl, sanitizeScratch, scratchHalf);
         } else if (wordIndex + 1 < sourceWordCount) {
           const int16_t raw = static_cast<int16_t>(block->wordXpos(wordIndex + 1) - block->wordXpos(wordIndex));
           wordWidth = std::max(static_cast<int16_t>(1), static_cast<int16_t>(raw - lineGapWidth));
         } else {
           wordWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), wordText, wordLength, wordStyle,
-                                          bionicBoundary, bionicSuffixX, sanitizeScratch, scratchHalf);
+                                          focusBoundary, focusSuffixX, sanitizeScratch, scratchHalf);
         }
         wordWidth = static_cast<int16_t>(std::min<int>(wordWidth, sourceGeometry.width));
         if (wordWidth <= 0) {
@@ -689,8 +672,8 @@ bool DictionaryWordSelectActivity::extractWords() {
           const int16_t previousMeasuredWidth = static_cast<int16_t>(
               renderer.getTextAdvanceX(SETTINGS.getReaderFontId(), block->wordText(previousIndex), previousStyle));
           const int16_t currentMeasuredWidth =
-              measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), wordText, wordLength, wordStyle, bionicBoundary,
-                                  bionicSuffixX, wordIsRtl, sanitizeScratch, scratchHalf);
+              measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), wordText, wordLength, wordStyle, focusBoundary,
+                                  focusSuffixX, wordIsRtl, sanitizeScratch, scratchHalf);
           const int currentLeft = screenX;
           const int currentRight = screenX + currentMeasuredWidth;
           auto& previousWord = workingSet_.words[workingSet_.wordCount - 1];
@@ -721,8 +704,8 @@ bool DictionaryWordSelectActivity::extractWords() {
         word.isRtl = wordIsRtl;
         word.joinWithoutSpaceBefore = joinWithoutSpaceBefore;
         word.isTableText = line.isTableText;
-        word.bionicBoundary = bionicBoundary;
-        word.bionicSuffixX = bionicSuffixX;
+        word.focusBoundary = focusBoundary;
+        word.focusSuffixX = focusSuffixX;
         if (!appendWord(word)) return false;
         lastSelectableWordIndex = wordIndex;
         continue;
@@ -1262,6 +1245,13 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
     nextRenderMode_ = RenderMode::FullPage;
     prevHighlightIdx_ = -1;
     return;
+  }
+
+  if (page->hasImages()) {
+    GfxRenderer::FrameBufferLoan loan(renderer);
+    page->prepareImageCaches();
+    loan.end();
+    renderer.clearScreen(ReaderUtils::readerBackgroundColor());
   }
 
   // Font prewarm: scan pass accumulates text, then prewarm, then real render.

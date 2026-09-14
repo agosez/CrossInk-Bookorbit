@@ -68,50 +68,63 @@ std::string fileNameFromPath(const std::string& path) {
   return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
+bool isNearbyTransferFile(const std::string& path) {
+  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasXtcExtension(path) || FsHelpers::hasTxtExtension(path);
+}
+
 FrontlightPanelContext buildFrontlightPanelContext(Activity& activity, GfxRenderer& renderer,
                                                    MappedInputManager& mappedInput) {
   FrontlightPanelContext context;
   context.sourceActivity = &activity;
   const std::string currentPath = activity.getCurrentBookPath();
-  const bool currentValid = FsHelpers::hasEpubExtension(currentPath) && Storage.exists(currentPath.c_str());
+  const bool currentBookValid = isNearbyTransferFile(currentPath) && Storage.exists(currentPath.c_str());
+  const bool currentEpubValid = FsHelpers::hasEpubExtension(currentPath) && currentBookValid;
   const bool lastValid = !APP_STATE.openEpubPath.empty() && FsHelpers::hasEpubExtension(APP_STATE.openEpubPath) &&
                          Storage.exists(APP_STATE.openEpubPath.c_str());
-  const FrontlightBookSource source =
-      chooseFrontlightBookSource(activity.isEpubReaderActivity(), currentValid, lastValid);
-  context.activeEpub = source == FrontlightBookSource::CurrentBook;
-  if (context.activeEpub) {
+  context.activeReaderBook = hasFrontlightActiveReaderBook(activity.isReaderActivity(), currentBookValid);
+  if (context.activeReaderBook) {
     context.bookTitle = activity.getCurrentBookTitle();
     context.bookPath = currentPath;
-    context.showReaderDetails = hasStickyReaderDetailsPanel() && !Frontlight.present();
-    // cppcheck-suppress knownConditionTrueFalse  // constant per board capabilities
-    if (context.showReaderDetails && activity.getFrontlightPanelBookDetails(context.bookDetails)) {
+    context.activeEpub = activity.isEpubReaderActivity() && currentEpubValid;
+    if (shouldShowStickyReaderDetails(hasStickyReaderDetailsPanel(), Frontlight.present(), context.activeReaderBook) &&
+        activity.getFrontlightPanelBookDetails(context.bookDetails)) {
+      context.showReaderDetails = true;
       context.bookTitle = context.bookDetails.title;
     }
     context.readingStatsActivity = activity.createFrontlightReadingStatsActivity();
-    return context;
+    if (context.activeEpub) {
+      context.bookPath = currentPath;
+      return context;
+    }
+    if (context.readingStatsActivity) return context;
   }
+
+  const FrontlightBookSource source = chooseFrontlightBookSource(false, false, lastValid);
 
   const GlobalReadingStats global = GlobalReadingStats::load();
   std::string cachePath;
+  std::string statsTitle;
   BookReadingStats bookStats;
   float progress = -1.0f;
   if (source == FrontlightBookSource::LastBook) {
     context.bookPath = APP_STATE.openEpubPath;
     context.bookTitle = fileNameFromPath(context.bookPath);
+    statsTitle = context.bookTitle;
     cachePath = Epub::cachePathForFilePath(context.bookPath, "/.crosspoint");
     bookStats = BookReadingStats::load(cachePath);
     const RecentBook book{context.bookPath, context.bookTitle, {}, {}};
     progress = RecentBookProgress::loadCachedEpubPercent(book);
   } else {
-    context.bookTitle = tr(STR_READING_STATS);
+    statsTitle = tr(STR_READING_STATS);
+    if (!context.activeReaderBook) context.bookTitle = statsTitle;
   }
   if (GlobalReadingStats::hasSyncedStats()) {
     context.readingStatsActivity =
-        makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, context.bookTitle, cachePath, bookStats, progress,
-                                             false, 0, global, GlobalReadingStats::loadAggregated(global));
+        makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, statsTitle, cachePath, bookStats, progress, false,
+                                             0, global, GlobalReadingStats::loadAggregated(global));
   } else {
-    context.readingStatsActivity = makeUniqueNoThrow<BookStatsActivity>(
-        renderer, mappedInput, context.bookTitle, cachePath, bookStats, progress, false, 0, global);
+    context.readingStatsActivity = makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, statsTitle, cachePath,
+                                                                        bookStats, progress, false, 0, global);
   }
   return context;
 }
@@ -133,7 +146,8 @@ bool openFrontlightPanel(Activity& activity, GfxRenderer& renderer, MappedInputM
   return true;
 }
 
-bool applyTwoFingerSwipeAction(Activity& activity, MappedInputManager& mappedInput, GfxRenderer& renderer) {
+bool applyTwoFingerSwipeAction(Activity& activity, MappedInputManager& mappedInput, GfxRenderer& renderer,
+                               ActivityManager& activityManager) {
   MappedInputManager::CompletedSwipe completed;
   if (!mappedInput.wasCompletedMultiTouchSwipe(completed)) return false;
 
@@ -172,7 +186,7 @@ bool applyTwoFingerSwipeAction(Activity& activity, MappedInputManager& mappedInp
       Frontlight.setOn(true);
       SETTINGS.frontlightBrightness = brightness;
       SETTINGS.frontlightOn = 1;
-      if (brightness != previousBrightness || !previousOn) SETTINGS.saveToFile();
+      if (brightness != previousBrightness || !previousOn) activityManager.persistGlobalSettings();
       return true;
     }
     case CrossPointSettings::TWO_FINGER_SWIPE_INCREASE_WARMTH:
@@ -185,7 +199,7 @@ bool applyTwoFingerSwipeAction(Activity& activity, MappedInputManager& mappedInp
       Frontlight.setWarmth(warmth);
       SETTINGS.frontlightWarmth = warmth;
       SETTINGS.frontlightOn = Frontlight.isOn() ? 1 : 0;
-      if (warmth != previousWarmth || Frontlight.isOn() != previousOn) SETTINGS.saveToFile();
+      if (warmth != previousWarmth || Frontlight.isOn() != previousOn) activityManager.persistGlobalSettings();
       return true;
     }
     case CrossPointSettings::TWO_FINGER_SWIPE_NEXT_CHAPTER:
@@ -242,7 +256,7 @@ void ActivityManager::renderTaskLoop() {
     if (currentActivity) {
       HalPowerManager::Lock powerLock;  // Ensure we don't go into low-power mode while rendering
       // Apply Night Mode to each activity's normal-polarity frame. SleepActivity
-      // explicitly clears inversion for its normal sleep screen.
+      // preserves it only for Quick Resume and clears it for other sleep screens.
       display.setInverted(SETTINGS.screenInverted != 0);
       currentActivity->render(std::move(lock));
       restoredActivityNeedsRender = false;
@@ -288,7 +302,7 @@ void ActivityManager::loop() {
 
       // The frontlight panel owns its own sliders.
       if (currentActivity->name != "FrontlightPanel" &&
-          applyTwoFingerSwipeAction(*currentActivity, mappedInput, renderer)) {
+          applyTwoFingerSwipeAction(*currentActivity, mappedInput, renderer, *this)) {
         return;
       }
 
@@ -343,19 +357,6 @@ void ActivityManager::loop() {
         restoredActivityNeedsRender = true;
 
         if (closedFrontlightPanel) currentActivity->onFrontlightPanelClosed();
-
-        if (openReaderMenuAfterPop) {
-          openReaderMenuAfterPop = false;
-          // Reader menu implementations may acquire RenderLock.
-          lock.unlock();
-          if (currentActivity->openReaderSettingsMenu()) {
-            continue;
-          }
-          // TXT is a reader without a settings menu; retain the icon's
-          // existing Global Settings fallback for that case.
-          goToSettings(true);
-          continue;
-        }
 
         // Handle result if necessary
         if (currentActivity->resultHandler) {
@@ -530,17 +531,6 @@ bool ActivityManager::openReaderMenuFromShortcut() {
   return currentActivity && pendingAction == PendingAction::None && currentActivity->openReaderSettingsMenu();
 }
 
-bool ActivityManager::openReaderMenuAfterClosingOverlay() {
-  if (!currentActivity || pendingAction != PendingAction::None || stackActivities.empty() ||
-      !stackActivities.back()->isReaderActivity()) {
-    return false;
-  }
-
-  openReaderMenuAfterPop = true;
-  popActivity();
-  return true;
-}
-
 bool ActivityManager::handleShortcutAction(const uint8_t action) {
   return currentActivity && pendingAction == PendingAction::None && currentActivity->handleShortcutAction(action);
 }
@@ -554,6 +544,10 @@ void ActivityManager::notifyInputLockChanged(const bool locked) {
   for (const auto& activity : stackActivities) {
     activity->onInputLockChanged(locked);
   }
+}
+
+void ActivityManager::notifyUserInput() {
+  if (currentActivity) currentActivity->onUserInput();
 }
 
 void ActivityManager::exitActivity(const RenderLock& lock) {
@@ -890,6 +884,34 @@ bool ActivityManager::requestManualReaderRefresh() {
 bool ActivityManager::handleShortcutAction(const CrossPointSettings::SHORT_PWRBTN action) {
   return currentActivity && (currentActivity->isReaderActivity() || currentActivity->isHomeActivity()) &&
          currentActivity->handleShortcutAction(action);
+}
+
+Activity* ActivityManager::findEpubReader() const {
+  if (currentActivity && currentActivity->isEpubReaderActivity()) return currentActivity.get();
+  const auto reader = std::find_if(stackActivities.rbegin(), stackActivities.rend(),
+                                   [](const auto& activity) { return activity && activity->isEpubReaderActivity(); });
+  return reader != stackActivities.rend() ? reader->get() : nullptr;
+}
+
+void ActivityManager::persistGlobalSettings() {
+  // A modal may be current while its EPUB reader, which owns the per-book
+  // override, remains on the stack. Let that reader protect the global write.
+  if (auto* reader = findEpubReader()) {
+    reader->persistGlobalSettings();
+  } else if (currentActivity) {
+    currentActivity->persistGlobalSettings();
+  } else {
+    SETTINGS.saveToFile();
+  }
+}
+
+bool ActivityManager::beginGlobalSettingsEdit() {
+  auto* reader = findEpubReader();
+  return reader && reader->onFrontlightGlobalSettingsOpened();
+}
+
+void ActivityManager::endGlobalSettingsEdit() {
+  if (auto* reader = findEpubReader()) reader->onFrontlightGlobalSettingsClosed();
 }
 
 bool ActivityManager::skipLoopDelay() const { return currentActivity && currentActivity->skipLoopDelay(); }

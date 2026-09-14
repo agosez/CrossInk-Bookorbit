@@ -4,6 +4,9 @@
 
 class HalDisplay {
  public:
+  using GrayscaleMode = freeink::GrayscaleMode;
+  using GrayscaleCapabilities = freeink::GrayscaleCapabilities;
+  GrayscaleCapabilities grayscaleCapabilities(GrayscaleMode mode = GrayscaleMode::Overlay) const;
   // Constructor with pin configuration
   HalDisplay();
 
@@ -16,6 +19,8 @@ class HalDisplay {
     HALF_REFRESH,  // Half refresh (1720ms) - balanced quality and speed
     FAST_REFRESH   // Fast refresh using custom LUT
   };
+
+  bool displayGrayscaleBase(GrayscaleMode mode, RefreshMode fallback, bool turnOffScreen = false);
 
   // Pass seamless=true on any path where the panel already shows the
   // content it should after begin() returns (silent reboot's popup,
@@ -99,6 +104,8 @@ class HalDisplay {
   // straight to the controller; supportsStripGrayscale() gates the path. See
   // EInkDisplay::writeGrayscalePlaneStrip.
   void writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* rows, uint16_t yStart, uint16_t numRows);
+  // Firmware policy for the reader's extra white-image refresh.
+  bool shouldSkipImageBlanking() const;
   bool supportsStripGrayscale() const;
 
   // Runtime geometry passthrough

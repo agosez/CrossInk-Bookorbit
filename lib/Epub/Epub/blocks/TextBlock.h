@@ -18,7 +18,7 @@ class TextBlock final : public Block {
   BlockStyle blockStyle;
   uint16_t numWords = 0;
   uint16_t textBytes = 0;  // Total size of the text region, including NULs.
-  bool bionicPresent = false;
+  bool focusPresent = false;
   bool guideDotsPresent = false;
   bool wordFlagsPresent = false;
   bool wordSpacesPresent = false;
@@ -29,18 +29,18 @@ class TextBlock final : public Block {
   const int16_t* xposArr = nullptr;
   // Distance from the word's left edge to the second visual run. The suffix is
   // second for LTR words; the bold logical prefix is second for RTL words.
-  const uint16_t* bionicRunOffsetArr = nullptr;  // null when !bionicPresent
+  const uint16_t* focusRunOffsetArr = nullptr;   // null when !focusPresent
   const uint16_t* guideDotXOffsetArr = nullptr;  // null when !guideDotsPresent
   const uint8_t* stylesArr = nullptr;
-  const uint8_t* bionicBoundaryArr = nullptr;  // null when !bionicPresent
-  const uint8_t* wordFlagsArr = nullptr;       // null when !wordFlagsPresent
-  const uint8_t* wordSpacesArr = nullptr;      // null when !wordSpacesPresent
+  const uint8_t* focusBoundaryArr = nullptr;  // null when !focusPresent
+  const uint8_t* wordFlagsArr = nullptr;      // null when !wordFlagsPresent
+  const uint8_t* wordSpacesArr = nullptr;     // null when !wordSpacesPresent
   const char* textArr = nullptr;
   std::vector<std::string> rubyTexts;
 
   TextBlock() = default;  // deserialize() fills the fields directly.
   static constexpr size_t wordSpacesBytes(const uint16_t wordCount) { return (wordCount + 7U) / 8U; }
-  static size_t arenaSize(uint16_t wordCount, bool hasBionic, bool hasGuideDots, bool hasWordFlags, bool hasWordSpaces,
+  static size_t arenaSize(uint16_t wordCount, bool hasFocus, bool hasGuideDots, bool hasWordFlags, bool hasWordSpaces,
                           uint16_t textBytes);
   void bindArenaPointers();
 
@@ -51,8 +51,8 @@ class TextBlock final : public Block {
   static constexpr uint8_t WORD_FLAG_LINK_ID_MASK = 0xFC;
 
   explicit TextBlock(const std::vector<std::string>& words, const std::vector<int16_t>& wordXpos,
-                     const std::vector<EpdFontFamily::Style>& wordStyles, const std::vector<uint8_t>& bionicBoundary,
-                     const std::vector<uint16_t>& bionicRunOffset, const std::vector<uint16_t>& guideDotXOffset,
+                     const std::vector<EpdFontFamily::Style>& wordStyles, const std::vector<uint8_t>& focusBoundary,
+                     const std::vector<uint16_t>& focusRunOffset, const std::vector<uint16_t>& guideDotXOffset,
                      const std::vector<uint8_t>& wordFlags, const std::vector<bool>& wordHasSpaceBefore,
                      const BlockStyle& blockStyle = BlockStyle(), std::vector<std::string> rubyTexts = {});
   ~TextBlock() override = default;
@@ -71,8 +71,8 @@ class TextBlock final : public Block {
   }
   int16_t wordXpos(const uint16_t i) const { return xposArr[i]; }
   EpdFontFamily::Style wordStyle(const uint16_t i) const { return static_cast<EpdFontFamily::Style>(stylesArr[i]); }
-  uint8_t bionicBoundary(const uint16_t i) const { return bionicPresent ? bionicBoundaryArr[i] : 0; }
-  uint16_t bionicRunOffset(const uint16_t i) const { return bionicPresent ? bionicRunOffsetArr[i] : 0; }
+  uint8_t focusBoundary(const uint16_t i) const { return focusPresent ? focusBoundaryArr[i] : 0; }
+  uint16_t focusRunOffset(const uint16_t i) const { return focusPresent ? focusRunOffsetArr[i] : 0; }
   uint16_t guideDotXOffset(const uint16_t i) const { return guideDotsPresent ? guideDotXOffsetArr[i] : 0; }
   uint8_t wordFlags(const uint16_t i) const { return wordFlagsPresent ? wordFlagsArr[i] : 0; }
   bool wordHasSpaceBefore(const uint16_t i) const {

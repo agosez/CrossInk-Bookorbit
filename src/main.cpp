@@ -95,6 +95,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "SilentRestart.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/boot_sleep/ImageFolderIndex.h"
 #include "activities/home/BookActions.h"
 #include "activities/reader/BookOrbitSyncActivity.h"
 #include "activities/reader/EpubReaderUtils.h"
@@ -231,13 +232,15 @@ EpdFontFamily bitter16FontFamily(&bitter16RegularFont, &bitter16BoldFont, &bitte
 EpdFont smallFont(&inter_8_regular);
 EpdFontFamily smallFontFamily(&smallFont);
 
+const EpdFont uiSymbols10Font(&ui_symbols_10);
+
 EpdFont ui10RegularFont(&inter_10_regular);
 EpdFont ui10BoldFont(&inter_10_bold);
-EpdFontFamily ui10FontFamily(&ui10RegularFont, &ui10BoldFont);
+EpdFontFamily ui10FontFamily(&ui10RegularFont, &ui10BoldFont, nullptr, nullptr, &uiSymbols10Font);
 
 EpdFont ui12RegularFont(&inter_12_regular);
 EpdFont ui12BoldFont(&inter_12_bold);
-EpdFontFamily ui12FontFamily(&ui12RegularFont, &ui12BoldFont);
+EpdFontFamily ui12FontFamily(&ui12RegularFont, &ui12BoldFont, nullptr, nullptr, &uiSymbols10Font);
 
 const char* resetReasonName(const esp_reset_reason_t reason) {
   switch (reason) {
@@ -646,6 +649,7 @@ CrossPointSettings::SHORT_PWRBTN getPowerButtonAction() {
 
 void notifyQuickLockChanged(const bool restoringAfterWake = false) {
   const bool locked = buttonShortcutController.isQuickLocked();
+  x4ProHomeKeyTapPending = false;
   mappedInputManager.clearInjectedReleases();
   LOG_DBG("MAIN", "Quick Lock %s", locked ? "enabled" : "disabled");
   if (locked) {
@@ -773,14 +777,14 @@ bool handleGlobalPowerButtonAction(const CrossPointSettings::SHORT_PWRBTN action
       const bool lightOn = !Frontlight.isOn();
       Frontlight.setOn(lightOn);
       SETTINGS.frontlightOn = lightOn ? 1 : 0;
-      SETTINGS.saveToFile();
+      activityManager.persistGlobalSettings();
       LOG_INF("LIGHT", "Frontlight toggled %s by shortcut", lightOn ? "on" : "off");
       return true;
     }
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_TOUCHSCREEN:
       if (!gpio.hasTouch()) return false;
       SETTINGS.disableReaderTouchscreen = SETTINGS.disableReaderTouchscreen ? 0 : 1;
-      SETTINGS.saveToFile();
+      activityManager.persistGlobalSettings();
       LOG_INF("TOUCH", "Reader touchscreen %s by shortcut", SETTINGS.disableReaderTouchscreen ? "disabled" : "enabled");
       {
         RenderLock lock;
@@ -844,8 +848,8 @@ CrossPointSettings::SHORT_PWRBTN chordPowerAction(const ButtonShortcutController
       return Power::TOGGLE_FONT;
     case Chord::ToggleGuideDots:
       return Power::TOGGLE_GUIDE_DOTS;
-    case Chord::ToggleBionicReading:
-      return Power::TOGGLE_BIONIC_READING;
+    case Chord::ToggleFocusReading:
+      return Power::TOGGLE_FOCUS_READING;
     case Chord::CyclePageTurn:
       return Power::CYCLE_PAGE_TURN;
     case Chord::SyncProgress:
@@ -928,7 +932,8 @@ void putTiltSensorToSleepForDeepSleep() {
   LOG_ERR("MAIN", "Tilt sensor did not confirm sleep before deep sleep");
 }
 
-bool executeX4ProHomeButtonAction(const uint8_t action) {
+bool executeX4ProHomeButtonAction(const uint8_t action,
+                                  const QuickLockTrigger quickLockTrigger = QuickLockTrigger::None) {
   switch (action) {
     case CrossPointSettings::HOME_BUTTON_BACK_HOME:
       return activityManager.handleHomeButtonBackOrHome();
@@ -936,7 +941,7 @@ bool executeX4ProHomeButtonAction(const uint8_t action) {
       const bool lightOn = !Frontlight.isOn();
       Frontlight.setOn(lightOn);
       SETTINGS.frontlightOn = lightOn ? 1 : 0;
-      SETTINGS.saveToFile();
+      activityManager.persistGlobalSettings();
       LOG_INF("LIGHT", "Frontlight toggled %s by Home key", lightOn ? "on" : "off");
       return true;
     }
@@ -955,17 +960,71 @@ bool executeX4ProHomeButtonAction(const uint8_t action) {
     dispatchShortcutAction(powerAction);
     return true;
   }
-  if (handleGlobalPowerButtonAction(powerAction)) {
+  if (handleGlobalPowerButtonAction(powerAction, quickLockTrigger)) {
     return true;
   }
   activityManager.handleShortcutAction(powerAction);
   return true;
 }
 
-bool handleX4ProHomeKeyShortcuts() {
+bool wasX4ProHomeKeyTapped() {
 #ifdef SIMULATOR
-  return false;
+  return simulatorHomeKeyInput.wasTapped();
 #else
+  return gpio.wasHomeKeyTapped();
+#endif
+}
+
+bool wasX4ProHomeKeyLongPressed() {
+#ifdef SIMULATOR
+  return simulatorHomeKeyInput.wasLongPressed();
+#else
+  return gpio.wasHomeKeyLongPressed();
+#endif
+}
+
+bool unlockX4ProHomeQuickLock(const QuickLockTrigger trigger) {
+  if (!buttonShortcutController.tryUnlockWithTrigger(millis(), trigger)) {
+    return false;
+  }
+  notifyQuickLockChanged();
+  return true;
+}
+
+bool handleX4ProHomeKeyQuickLockUnlock() {
+  if (!mappedInputManager.hasHomeKey()) {
+    return false;
+  }
+
+  const QuickLockTrigger trigger = buttonShortcutController.quickLockTrigger();
+  if (trigger == QuickLockTrigger::HomeTap) {
+    return wasX4ProHomeKeyTapped() && unlockX4ProHomeQuickLock(trigger);
+  }
+  if (trigger == QuickLockTrigger::HomeLongPress) {
+    return wasX4ProHomeKeyLongPressed() && unlockX4ProHomeQuickLock(trigger);
+  }
+  if (trigger != QuickLockTrigger::HomeDoubleTap) {
+    return false;
+  }
+
+  const unsigned long now = millis();
+  if (x4ProHomeKeyTapPending && now - lastX4ProHomeKeyTapAt > X4PRO_HOME_KEY_DOUBLE_TAP_MS) {
+    x4ProHomeKeyTapPending = false;
+  }
+  if (!wasX4ProHomeKeyTapped()) {
+    return false;
+  }
+  if (!x4ProHomeKeyTapPending) {
+    lastX4ProHomeKeyTapAt = now;
+    x4ProHomeKeyTapPending = true;
+    return true;
+  }
+
+  x4ProHomeKeyTapPending = false;
+  return unlockX4ProHomeQuickLock(trigger);
+}
+
+bool handleX4ProHomeKeyShortcuts() {
   if (!mappedInputManager.hasHomeKey()) {
     return false;
   }
@@ -976,7 +1035,7 @@ bool handleX4ProHomeKeyShortcuts() {
     const bool hadPendingTap = x4ProHomeKeyTapPending;
     x4ProHomeKeyTapPending = false;
     mappedInputManager.clearDeferredHomeGesture();
-    return hadPendingTap || gpio.wasHomeKeyTapped() || gpio.wasHomeKeyLongPressed();
+    return hadPendingTap || wasX4ProHomeKeyTapped() || wasX4ProHomeKeyLongPressed();
   }
 
   // Reader menus set the touchscreen override while they are active, which
@@ -986,7 +1045,7 @@ bool handleX4ProHomeKeyShortcuts() {
     const bool hadPendingTap = x4ProHomeKeyTapPending;
     x4ProHomeKeyTapPending = false;
     mappedInputManager.clearDeferredHomeGesture();
-    return hadPendingTap || gpio.wasHomeKeyTapped() || gpio.wasHomeKeyLongPressed();
+    return hadPendingTap || wasX4ProHomeKeyTapped() || wasX4ProHomeKeyLongPressed();
   }
 
   // A lower-bezel swipe can report a capacitive Home tap as well. Let the
@@ -1008,22 +1067,22 @@ bool handleX4ProHomeKeyShortcuts() {
       // Keep reader menus and other overlays on their existing local Home route.
       mappedInputManager.queueDeferredHomeGesture();
     } else {
-      executeX4ProHomeButtonAction(SETTINGS.homeButtonTapAction);
+      executeX4ProHomeButtonAction(SETTINGS.homeButtonTapAction, QuickLockTrigger::HomeTap);
       completedPendingTap = true;
     }
   }
 
-  if (gpio.wasHomeKeyLongPressed()) {
+  if (wasX4ProHomeKeyLongPressed()) {
     // A hold is a separate gesture, not the second half of a double tap.
     x4ProHomeKeyTapPending = false;
     if (SETTINGS.homeButtonLongPressAction == CrossPointSettings::HOME_BUTTON_READER_MENU) {
       return completedPendingTap;
     }
-    executeX4ProHomeButtonAction(SETTINGS.homeButtonLongPressAction);
+    executeX4ProHomeButtonAction(SETTINGS.homeButtonLongPressAction, QuickLockTrigger::HomeLongPress);
     return true;
   }
 
-  if (!gpio.wasHomeKeyTapped()) return completedPendingTap;
+  if (!wasX4ProHomeKeyTapped()) return completedPendingTap;
 
   if (!x4ProHomeKeyTapPending) {
     lastX4ProHomeKeyTapAt = now;
@@ -1032,9 +1091,8 @@ bool handleX4ProHomeKeyShortcuts() {
   }
 
   x4ProHomeKeyTapPending = false;
-  executeX4ProHomeButtonAction(SETTINGS.homeButtonDoubleTapAction);
+  executeX4ProHomeButtonAction(SETTINGS.homeButtonDoubleTapAction, QuickLockTrigger::HomeDoubleTap);
   return true;
-#endif
 }
 }  // namespace
 constexpr char SLEEP_FRAME_FILE[] = "/.crosspoint/sleep_frame.bin";
@@ -1207,7 +1265,7 @@ void enterDeepSleep(bool fromTimeout) {
 
   // Last chance to sample: startDeepSleep() cuts the SD rail on X3, so nothing
   // can be written again until the next wake.
-  BatteryDiagnosticLog::record(BatteryDiagnosticLog::Event::Sleep);
+  BatteryDiagnosticLog::record(BatteryDiagnosticLog::Event::Sleep, BoardConfig::ACTIVE.name);
   // All sleep-time file writes are complete. Stop SDMMC before the power path
   // cuts peripheral rails and isolates the bus pads; SPI boards are a no-op.
   Storage.shutdown();
@@ -1444,7 +1502,8 @@ void setup() {
   APP_STATE.loadFromFile();
   mirrorWakeShortPressToNvs();
   // Needs SETTINGS for the clock's UTC offset, so it cannot run any earlier.
-  BatteryDiagnosticLog::record(BatteryDiagnosticLog::Event::Wake);
+  BatteryDiagnosticLog::record(BatteryDiagnosticLog::Event::Wake, BoardConfig::ACTIVE.name,
+                               wakeupRouteName(wakeupReason));
   const bool isSleepWake = wakeupReason == HalGPIO::WakeupReason::PowerButton;
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
   // Normal boot store deferral adapted from Sichroteph/YACP commit
@@ -1517,10 +1576,24 @@ void setup() {
     APP_STATE.saveToFile();
     mirrorWakeShortPressToNvs();
   }
-  const BootResume resume = isNetworkResume                            ? BootResume::Network
-                            : isSilentReboot                           ? BootResume::Silent
-                            : isSleepWake && !APP_STATE.showBootScreen ? BootResume::SplashlessWake
-                                                                       : BootResume::Splash;
+  // A boot-screen folder or an explicitly selected BMP opts a reader into
+  // seeing its boot image after a power-button wake as well as a cold boot.
+  // Without either, retain the fast splashless resume path.
+  bool hasBootScreenDirectory = false;
+  bool hasPinnedBootScreen = false;
+  if (SETTINGS.customBootscreenEnabled && isSleepWake && !APP_STATE.showBootScreen) {
+    std::string bootScreenDirectory;
+    hasBootScreenDirectory = ImageFolderIndex::resolveBootScreenDirectory(bootScreenDirectory);
+    hasPinnedBootScreen = !APP_STATE.favoriteBootImagePath.empty() &&
+                          FsHelpers::hasBmpExtension(APP_STATE.favoriteBootImagePath) &&
+                          Storage.exists(APP_STATE.favoriteBootImagePath.c_str());
+  }
+  const bool skipSplashOnWake =
+      isSleepWake && !APP_STATE.showBootScreen && !hasBootScreenDirectory && !hasPinnedBootScreen;
+  const BootResume resume = isNetworkResume    ? BootResume::Network
+                            : isSilentReboot   ? BootResume::Silent
+                            : skipSplashOnWake ? BootResume::SplashlessWake
+                                               : BootResume::Splash;
   bool isUc8279X3 = false;
 #ifndef SIMULATOR
   isUc8279X3 = gpio.deviceIsX3() && BoardConfig::ACTIVE.board == BoardConfig::Board::XteinkX3Uc8279;
@@ -1697,9 +1770,13 @@ void setup() {
   }
 
   if (restoreQuickLockAfterWake) {
-    // Render the reconstructed route first, then draw the badge. The pending
-    // wake release stays swallowed by the main loop, so it cannot unlock the
-    // restored lock immediately.
+    // Finish queued navigation (including Reader -> EPUB/TXT/XTC) before
+    // locking: the locked main loop intentionally does not dispatch activities.
+    // Waiting for a render alone would paint the temporary Reader loader and
+    // strand its pending transition, losing the page and its orientation.
+    activityManager.loop();
+    // Paint the reconstructed route before saving the badge backdrop. The wake
+    // release remains swallowed, so it cannot immediately unlock the device.
     (void)activityManager.requestUpdateAndWait();
     buttonShortcutController.restoreQuickLock(millis(), quickLockResumeTrigger);
     notifyQuickLockChanged(true);
@@ -1713,7 +1790,10 @@ void loop() {
   const unsigned long loopStartTime = millis();
   static unsigned long lastMemPrint = 0;
 
-  gpio.update();
+  // Keep release suppression in the mapped-input layer in sync with every
+  // hardware input frame. A shortcut may open an activity that never queries
+  // the originating button, so its one-shot release guard must still expire.
+  mappedInputManager.update();
 #ifdef SIMULATOR
   simulatorHomeKeyInput.update();
 #endif
@@ -1755,15 +1835,22 @@ void loop() {
     logSerial.printf("SCREENSHOT_END\n");
   }
 
+  // Notify the active activity before global shortcut and gesture routes consume
+  // the input and skip its loop() for this frame.
+  const bool userInputReceived = gpio.wasAnyPressed() || gpio.wasAnyReleased()
+#if CROSSINK_APP_CAP_TOUCH
+                                 || gpio.wasTouchActivity()
+#endif
+                                 || halTiltSensor.hadActivity();
+
   // Check for any user activity (button press or release) or active background work
   static unsigned long lastActivityTime = millis();
-  if (gpio.wasAnyPressed() || gpio.wasAnyReleased()
-#if CROSSINK_APP_CAP_TOUCH
-      || gpio.wasTouchActivity()
-#endif
-      || halTiltSensor.hadActivity() || activityManager.preventAutoSleep()) {
+  if (userInputReceived || activityManager.preventAutoSleep()) {
     lastActivityTime = millis();         // Reset inactivity timer
     powerManager.setPowerSaving(false);  // Restore normal CPU frequency on user activity
+  }
+  if (userInputReceived) {
+    activityManager.notifyUserInput();
   }
 
   // Let wake continue as soon as its hold has been verified. The release can
@@ -1822,6 +1909,10 @@ void loop() {
       lastActivityTime = millis();
       return;
     }
+    if (handleX4ProHomeKeyQuickLockUnlock()) {
+      lastActivityTime = millis();
+      return;
+    }
     if (activityManager.handleQuickLockUnlock(buttonShortcutController.quickLockTrigger())) {
       lastActivityTime = millis();
       return;
@@ -1857,6 +1948,8 @@ void loop() {
   // Home-key taps are consumed until their single- or double-tap action is
   // known.
   if (handleX4ProHomeKeyShortcuts()) {
+    // Simulator Home-key events bypass HalGPIO's raw touch activity signal.
+    activityManager.notifyUserInput();
     return;
   }
 

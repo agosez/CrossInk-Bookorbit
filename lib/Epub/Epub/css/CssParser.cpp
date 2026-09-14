@@ -1409,8 +1409,14 @@ bool CssParser::loadFromCache() {
   size_t hydratedRuleCount = 0;
   const size_t freeHeapBeforeHydrate = ESP.getFreeHeap();
   const size_t arenaBytes = (static_cast<size_t>(ruleCount) * sizeof(CachedRule)) + CSS_RULE_ARENA_EXTRA_BYTES;
-  if (ruleCount > 0 && freeHeapBeforeHydrate >= MIN_FREE_HEAP_FOR_CSS_RULE_ARENA &&
-      freeHeapBeforeHydrate >= arenaBytes + CSS_RULE_ARENA_MIN_FREE_AFTER_ALLOC) {
+  const bool external = psramHeapAvailable();
+  // The index and descendant/STL containers remain internal. Only remove the
+  // arena payload from their budget, never their existing 80 KiB reserve.
+  const bool admitted = external ? MemoryBudget::canAllocateInternal(0, CSS_RULE_ARENA_MIN_FREE_AFTER_ALLOC,
+                                                                     MIN_LARGEST_BLOCK_FOR_RULE_GROWTH)
+                                 : freeHeapBeforeHydrate >= MIN_FREE_HEAP_FOR_CSS_RULE_ARENA &&
+                                       freeHeapBeforeHydrate >= arenaBytes + CSS_RULE_ARENA_MIN_FREE_AFTER_ALLOC;
+  if (ruleCount > 0 && admitted) {
     if (cachedRuleArena_.init(arenaBytes)) {
       cachedRules_ = arenaNewArray<CachedRule>(cachedRuleArena_, ruleCount);
       hydrateSimpleRules = cachedRules_ != nullptr;
@@ -1419,10 +1425,11 @@ bool CssParser::loadFromCache() {
         cachedRules_ = nullptr;
       }
     }
-  } else if (ruleCount > 0) {
-    LOG_DBG("CSS", "Skipping CSS rule arena hydration (free heap=%u need free>=%u for %u-byte arena)",
-            static_cast<unsigned>(freeHeapBeforeHydrate),
-            static_cast<unsigned>(arenaBytes + CSS_RULE_ARENA_MIN_FREE_AFTER_ALLOC), static_cast<unsigned>(arenaBytes));
+  }
+  if (ruleCount > 0) {
+    LOG_DBG("CSS", "Rule arena: bytes=%u pool=%s psramReserve=%u; %s", unsigned(arenaBytes),
+            memoryPoolName(cachedRuleArena_.head ? cachedRuleArena_.head->pool : MemoryPool::None),
+            unsigned(MemoryBudget::EPUB_PSRAM_RESERVE), hydrateSimpleRules ? "hydrated" : "disk index");
   }
 
   // Read each simple rule payload. When heap allows, hydrate into an arena-backed

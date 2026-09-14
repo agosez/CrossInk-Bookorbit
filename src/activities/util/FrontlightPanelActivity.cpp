@@ -10,6 +10,7 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "activities/ActivityManager.h"
 #include "activities/RenderLock.h"
 #include "activities/home/BookActions.h"
 #include "activities/settings/SettingsActivity.h"
@@ -19,9 +20,9 @@
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
-#include "components/icons/chart.h"
 #include "components/icons/frontlightHeaderIcons.h"
 #include "components/icons/listIcons.h"
+#include "components/icons/readingStatsIcons.h"
 #include "components/icons/tablerIcons.h"
 #include "components/icons/touchscreenStateIcons.h"
 
@@ -106,10 +107,9 @@ void FrontlightPanelActivity::onExit() {
       SETTINGS.frontlightWarmth = warmth;
       SETTINGS.frontlightOn = lightOn ? 1 : 0;
     }
-    if (context.sourceActivity)
-      context.sourceActivity->persistFrontlightPanelSettings();
-    else
-      SETTINGS.saveToFile();
+    // The drawer can be opened over a dictionary or another reader child.
+    // Find the owning reader so its per-book values stay out of the global file.
+    activityManager.persistGlobalSettings();
   }
   mappedInput.setReaderTouchscreenOverride(false);
   Activity::onExit();
@@ -206,15 +206,16 @@ void FrontlightPanelActivity::openReadingStats() {
 }
 
 void FrontlightPanelActivity::openGlobalSettings() {
-  if (context.sourceActivity) context.sourceActivity->onFrontlightGlobalSettingsOpened();
+  // A drawer over Settings must not end the outer screen's edit session.
+  const bool startedGlobalEdit = activityManager.beginGlobalSettingsEdit();
   auto settings = makeUniqueNoThrow<SettingsActivity>(renderer, mappedInput, true, true);
   if (!settings) {
     LOG_ERR("LIGHT", "OOM opening Settings from frontlight panel");
-    if (context.sourceActivity) context.sourceActivity->onFrontlightGlobalSettingsClosed();
+    if (startedGlobalEdit) activityManager.endGlobalSettingsEdit();
     return;
   }
-  startActivityForResult(std::move(settings), [this](const ActivityResult&) {
-    if (context.sourceActivity) context.sourceActivity->onFrontlightGlobalSettingsClosed();
+  startActivityForResult(std::move(settings), [this, startedGlobalEdit](const ActivityResult&) {
+    if (startedGlobalEdit) activityManager.endGlobalSettingsEdit();
     close();
   });
 }
@@ -237,17 +238,19 @@ void FrontlightPanelActivity::openSyncDialog() {
                                                                    FrontlightPanelAction::SendNearbyBook};
 #endif
   drawerState.syncDialogOpen = true;
-  if (context.bookPath.empty()) {
-    std::vector<std::string> disabledOptions;
-    disabledOptions.reserve(OPTIONS.size());
-    for (const StrId option : OPTIONS) {
-      // cppcheck-suppress useStlAlgorithm
-      disabledOptions.emplace_back(std::string(I18N.get(option)) + " - " + tr(STR_UNAVAILABLE));
-    }
-    optionPopup.show(StrId::STR_SYNC_AND_TRANSFER, disabledOptions, 0, [this](const int) { openSyncDialog(); });
-    optionPopup.setCancelCallback([this] { closeSyncDialog(); });
-    requestUpdate();
-    return;
+  // Upstream keeps every row visible and greys out what the context cannot serve;
+  // the fork's row set differs (BookOrbit first, KOReader behind its build switch),
+  // so the flags are derived from ACTIONS instead of hard-coded by index. Book-bound
+  // actions need a book path (Home passes the highlighted book's, the reader its own);
+  // the KOReader and Nearby position syncs additionally need the EPUB to be open.
+  const bool hasBook = !context.bookPath.empty();
+  const bool canSyncBookProgress = context.activeEpub;
+  std::vector<bool> disabled;
+  disabled.reserve(ACTIONS.size());
+  for (const FrontlightPanelAction action : ACTIONS) {
+    const bool needsOpenEpub =
+        action == FrontlightPanelAction::SyncProgress || action == FrontlightPanelAction::NearbyPositionSync;
+    disabled.push_back(needsOpenEpub ? !canSyncBookProgress : !hasBook);
   }
   optionPopup.show(StrId::STR_SYNC_AND_TRANSFER, OPTIONS.data(), OPTIONS.size(), 0, [this](const int index) {
     drawerState.syncDialogOpen = false;
@@ -259,6 +262,7 @@ void FrontlightPanelActivity::openSyncDialog() {
     setResult(ActivityResult(std::move(panelResult)));
     finish();
   });
+  optionPopup.setDisabledOptions(std::move(disabled));
   optionPopup.setCancelCallback([this] { closeSyncDialog(); });
   requestUpdate();
 }
@@ -293,7 +297,7 @@ void FrontlightPanelActivity::activateQuickAction(const int index) {
 }
 
 bool FrontlightPanelActivity::handleHomeGesture() {
-  if (context.activeEpub) {
+  if (context.activeReaderBook) {
     activityManager.goHome();
     return true;
   }
@@ -312,7 +316,8 @@ void FrontlightPanelActivity::loop() {
   }
 
   const Rect homeButton = homeButtonRect();
-  if (context.activeEpub && mappedInput.wasTapInRect(homeButton.x, homeButton.y, homeButton.width, homeButton.height)) {
+  if (context.activeReaderBook &&
+      mappedInput.wasTapInRect(homeButton.x, homeButton.y, homeButton.width, homeButton.height)) {
     activityManager.goHome();
     return;
   }
@@ -458,7 +463,7 @@ void FrontlightPanelActivity::buildPanelScreen(UiApp::ScreenType& screen) {
   const fui::Rect actionBar = screen.takeBottom(ACTION_BAR_HEIGHT);
   const int16_t slotWidth = static_cast<int16_t>(actionBar.width / 5);
   const std::array<fui::BitmapRef, 5> icons = {
-      fui::BitmapRef{ChartListIcon, 32, 32, fui::BitmapFormat::Mask1}, fui::bitmapFromIcon(icon_transfer_24),
+      fui::bitmapFromIcon(icon_reading_stats_24), fui::bitmapFromIcon(icon_transfer_24),
       fui::bitmapFromIcon(icon_tabler_moon_filled_24), fui::bitmapFromIcon(icon_sliders_horizontal_24),
       fui::bitmapFromIcon(pendingTouchscreenDisabled ? icon_device_tablet_off_24 : icon_device_tablet_24)};
   for (int16_t i = 0; i < 5; ++i) {
@@ -531,7 +536,7 @@ void FrontlightPanelActivity::drawHeader() {
   if (context.showReaderDetails) {
     if (formatHeaderDateText(date, sizeof(date))) title = date;
     titleFontId = UI_10_FONT_ID;
-  } else if (context.activeEpub && !context.bookTitle.empty()) {
+  } else if (context.activeReaderBook && !context.bookTitle.empty()) {
     title = context.bookTitle.c_str();
     titleFontId = UI_10_FONT_ID;
   } else if (formatHeaderDateText(date, sizeof(date))) {
@@ -549,7 +554,7 @@ void FrontlightPanelActivity::drawHeader() {
   // owns the clock and battery, so centering across the whole header crowds it.
   const int headerBottom = header.y + header.height;
   const int titleY = headerBottom - HEADER_CONTENT_BOTTOM_GAP - renderer.getLineHeight(titleFontId);
-  const bool showBookTitle = !context.showReaderDetails && context.activeEpub && !context.bookTitle.empty();
+  const bool showBookTitle = !context.showReaderDetails && context.activeReaderBook && !context.bookTitle.empty();
   if (showBookTitle) {
     const auto tokens = uiThemeTokens(uiTarget);
     const Rect homeButton = homeButtonRect();
@@ -562,7 +567,7 @@ void FrontlightPanelActivity::drawHeader() {
     UITheme::drawCenteredText(renderer, header, titleFontId, titleY, title, true);
   }
 
-  if (context.activeEpub) {
+  if (context.activeReaderBook) {
     const Rect button = homeButtonRect();
     uiTarget.bitmap(fui::Rect{static_cast<int16_t>(button.x + (button.width - HEADER_ICON_SIZE) / 2),
                               static_cast<int16_t>(headerBottom - HEADER_CONTENT_BOTTOM_GAP - HEADER_ICON_SIZE),

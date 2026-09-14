@@ -72,7 +72,7 @@ class ReaderOptionsActivity final : public Activity {
   void toggleCurrentSetting();
   void openLineHeightPicker();
   void persistReaderSettings();
-  void persistGlobalSettings();
+  void persistGlobalSettings() override;
   void beginGlobalSettingsEdit();
   void endGlobalSettingsEdit();
   static void optionsScreen(UiApp::ScreenType& screen, void* user);

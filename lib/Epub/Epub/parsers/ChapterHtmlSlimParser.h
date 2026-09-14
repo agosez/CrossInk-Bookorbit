@@ -77,7 +77,7 @@ class ChapterHtmlSlimParser {
   uint16_t viewportWidth;
   uint16_t viewportHeight;
   bool hyphenationEnabled;
-  bool bionicReadingEnabled;
+  bool focusReadingEnabled;
   bool guideReadingEnabled;
   uint8_t wordSpacing;
   CssParser* cssParser;
@@ -106,18 +106,6 @@ class ChapterHtmlSlimParser {
   size_t parseFileOffset_ = 0;
   size_t parseFileSize_ = 0;
   uint32_t parseStartTime_ = 0;
-
-  struct PendingImageExtraction {
-    std::unique_ptr<ZipFileStreamReader> stream;
-    HalFile file;
-    std::string tag;
-    std::string classAttr;
-    std::string styleAttr;
-    std::string alt;
-    std::string cachedImagePath;
-    bool failed = false;
-  };
-  std::unique_ptr<PendingImageExtraction> pendingImageExtraction_;
 
   bool ensureInputFileOpen();
 
@@ -289,11 +277,6 @@ class ChapterHtmlSlimParser {
   void flushMalformedPartialContent();
   bool appendMalformedMarkupWarningPage();
   void prewarmSectionAdvanceTable(FsFile& file) const;
-  bool startImageExtraction(const char* tag, std::string_view classAttr, std::string_view styleAttr,
-                            const std::string& alt, const std::string& resolvedPath);
-  ParseStatus pumpPendingImageExtraction();
-  bool finishPendingImageExtraction(PendingImageExtraction& pending);
-  void fallbackPendingImage(PendingImageExtraction& pending);
   // XML callbacks
   static void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char** atts);
   static void XMLCALL characterData(void* userData, const XML_Char* s, int len);
@@ -305,7 +288,7 @@ class ChapterHtmlSlimParser {
       Epub& epub, const std::string& filepath, GfxRenderer& renderer, const int fontId, const float lineCompression,
       const bool extraParagraphSpacing, const bool forceParagraphIndents, const uint8_t paragraphAlignment,
       const uint16_t viewportWidth, const uint16_t viewportHeight, const bool hyphenationEnabled,
-      const bool bionicReadingEnabled, const bool guideReadingEnabled, const uint8_t wordSpacing,
+      const bool focusReadingEnabled, const bool guideReadingEnabled, const uint8_t wordSpacing,
       const std::function<void(std::unique_ptr<Page>, uint16_t, uint16_t, uint32_t)>& completePageFn,
       const bool embeddedStyle, const std::string& contentBase, const std::string& imageBasePath,
       const uint8_t imageRendering = 0, std::vector<std::string> tocAnchors = {},
@@ -324,7 +307,7 @@ class ChapterHtmlSlimParser {
         viewportWidth(viewportWidth),
         viewportHeight(viewportHeight),
         hyphenationEnabled(hyphenationEnabled),
-        bionicReadingEnabled(bionicReadingEnabled),
+        focusReadingEnabled(focusReadingEnabled),
         guideReadingEnabled(guideReadingEnabled),
         wordSpacing(wordSpacing > 4 ? 4 : wordSpacing),
         completePageFn(completePageFn),

@@ -18,6 +18,8 @@ struct DictionaryFontActivation {
 /// Hides implementation details behind a single begin() + ensureLoaded() API.
 class SdCardFontSystem {
  public:
+  using SettingsPersistenceCallback = void (*)(void* context);
+
   SdCardFontSystem() = default;
   SdCardFontSystem(const SdCardFontSystem&) = delete;
   SdCardFontSystem& operator=(const SdCardFontSystem&) = delete;
@@ -30,6 +32,13 @@ class SdCardFontSystem {
   /// Call before entering the reader or after settings change.
   /// Also re-discovers if the registry has been marked dirty (e.g. by web upload).
   void ensureLoaded(GfxRenderer& renderer);
+
+  // An EPUB can own a temporary per-book settings snapshot while this system
+  // repairs a missing font selection. Let that reader persist its own state.
+  void setSettingsPersistenceCallback(SettingsPersistenceCallback callback, void* context) {
+    settingsPersistenceCallback_ = callback;
+    settingsPersistenceContext_ = context;
+  }
 
   /// Temporarily unload the active SD font without clearing the saved setting.
   /// Call ensureLoaded() later to restore it before reader rendering.
@@ -84,6 +93,8 @@ class SdCardFontSystem {
   void refreshIfDirty() { ensureRegistry(); }
 
  private:
+  void persistSettingsChange() const;
+
   // Load the active SD family at the built-in UI point sizes and register each
   // as a size-matched CJK fallback for the corresponding UI font, so CJK book
   // titles/list rows render at the same size as the surrounding Latin UI text.
@@ -97,6 +108,8 @@ class SdCardFontSystem {
   std::atomic<bool> registryDirty_{false};
   bool registryLoaded_ = false;
   uint8_t loadedFontPointSize_ = 0;
+  SettingsPersistenceCallback settingsPersistenceCallback_ = nullptr;
+  void* settingsPersistenceContext_ = nullptr;
 };
 
 // Global SD card font system instance (defined in main.cpp).
