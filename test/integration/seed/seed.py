@@ -39,6 +39,8 @@ WITH_HIGHLIGHTS = range(10, 20)  # two highlights each
 WITH_BOOKMARKS = range(20, 25)   # one bookmark each
 IN_COLLECTION = range(40, 45)    # members of the "Integration Shelf" collection
 SEED_EPOCH = 1_756_000_000       # fixed timestamps keep reruns idempotent
+# The account's KOReader file naming template, which catalog downloads must follow.
+NAMING_PATTERN = "Catalog/{authors:first}/{authors:first} - {title}"
 
 
 def main() -> int:
@@ -124,6 +126,12 @@ def main() -> int:
     empty_collection_id = admin.ensure_collection("Zero Shelf", "book", [])
     print(f"Collections {collection_id} (Integration Shelf) and {empty_collection_id} (Zero Shelf) in place")
 
+    # The account's KOReader file naming template. Catalog downloads must follow it,
+    # so it deliberately asks for a folder the SD card does not have yet and for a
+    # name unlike the "Title - Author.epub" this firmware used to hardcode.
+    admin.set_file_naming_pattern(NAMING_PATTERN)
+    print(f"KOReader file naming pattern set to {NAMING_PATTERN}")
+
     peer = KosyncDevice(BASE_URL, KOSYNC["username"], KOSYNC["password"], OTHER_DEVICE_ID)
     peer.auth()
 
@@ -132,7 +140,8 @@ def main() -> int:
                      "progress": [], "highlights": [], "bookmarks": [],
                      "collection": {"id": collection_id, "name": "Integration Shelf",
                                     "books": collection_books},
-                     "empty_collection": {"id": empty_collection_id, "name": "Zero Shelf"}}
+                     "empty_collection": {"id": empty_collection_id, "name": "Zero Shelf"},
+                     "naming_pattern": NAMING_PATTERN}
 
     for i in WITH_PROGRESS:
         book = books[i]

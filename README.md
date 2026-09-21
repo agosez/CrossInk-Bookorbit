@@ -151,16 +151,18 @@ Reach the catalog from **Settings → System → BookOrbit Sync → Browse Catal
 
 The root list contains:
 
-| Entry                                         | What it shows                                                                                          |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| Recently added / Continue reading / All books | Your server's own sections                                                                             |
-| **Authors** / **Series**                      | Paged lists with a book count per entry; pick one to see its books (series are listed in series order) |
-| **Collections**                               | Your server's collections, with a book count per entry; pick one to see its books                      |
-| **Search**                                    | Free-text search of your library                                                                       |
-| **On device**                                 | Every EPUB already in the configured download folder, the SD card root and the `/Read` folder — works offline |
-| **In progress**                               | Recent books you haven't finished yet — works offline                                                  |
+| Entry                                         | What it shows                                                                                                                                       |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Recently added / Continue reading / All books | Your server's own sections                                                                                                                          |
+| **Authors** / **Series**                      | Paged lists with a book count per entry; pick one to see its books (series are listed in series order)                                              |
+| **Collections**                               | Your server's collections, with a book count per entry; pick one to see its books                                                                   |
+| **Search**                                    | Free-text search of your library                                                                                                                    |
+| **On device**                                 | Everything downloaded from the catalog, wherever it was filed, plus every EPUB in the download folder, the SD card root and `/Read` — works offline |
+| **In progress**                               | Recent books you haven't finished yet — works offline                                                                                               |
 
-In a server book list, **Confirm** downloads the book as `Title - Author.epub` into the download folder configured in the BookOrbit settings (the SD card root by default). A download that gets interrupted resumes automatically on retry, and **Back** cancels it. Books already present on the device are marked with a dot at the end of the line, so you can tell at a glance what is worth downloading.
+In a server book list, **Confirm** downloads the book into the download folder configured in the BookOrbit settings (the SD card root by default). A download that gets interrupted resumes automatically on retry, and **Back** cancels it. Books already present on the device are marked with a dot at the end of the line, so you can tell at a glance what is worth downloading.
+
+The file is named by **your server's KOReader file naming template** — BookOrbit's _Settings → Koreader → File Naming_, the same template its own KOReader plugin follows — so a book can land inside a series folder, for instance. BookOrbit resolves the template and tells the device where the file belongs; a per-device override set on the server is honoured too, and any folder it asks for is created under your download folder. If your account has no template, BookOrbit's default applies, which files books under `Series/` and `Standalone/`. Books downloaded before this behaviur existed are left where they are.
 
 In **On device** and **In progress**, Confirm opens the book in the reader instead of downloading it.
 

@@ -147,6 +147,21 @@ void BookOrbitDownloadIndex::record(const int64_t bookId, const std::string& pat
   save();
 }
 
+void BookOrbitDownloadIndex::forEachExisting(void (*visit)(int64_t, const std::string&, void*), void* context) {
+  if (visit == nullptr) return;
+  ensureLoaded();
+  for (const Entry& entry : entries) {
+    const uint32_t size = fileSizeOf(entry.path);
+    if (size == 0 || size != entry.fileSize) continue;
+    visit(entry.bookId, entry.path, context);
+  }
+}
+
+bool BookOrbitDownloadIndex::hasPath(const std::string& path) {
+  ensureLoaded();
+  return std::any_of(entries.begin(), entries.end(), [&path](const Entry& entry) { return entry.path == path; });
+}
+
 void BookOrbitDownloadIndex::unload() {
   std::vector<Entry>().swap(entries);
   loaded = false;

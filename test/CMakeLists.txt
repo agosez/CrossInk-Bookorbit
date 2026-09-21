@@ -74,6 +74,7 @@ add_subdirectory(chapter_html_slim_parser)
 add_subdirectory(input_release_guard)
 add_subdirectory(release_suppression)
 add_subdirectory(bitmap_resample)
+add_subdirectory(bookorbit_device_path)
 
 add_subdirectory(pxc_v2)
 add_subdirectory(memory_policy)

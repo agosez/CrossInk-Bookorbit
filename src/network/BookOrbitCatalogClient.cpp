@@ -319,6 +319,7 @@ bool BookOrbitCatalogClient::fetchBookDetail(const int64_t bookId, BookOrbitBook
   filter["files"][0]["id"] = true;
   filter["files"][0]["format"] = true;
   filter["files"][0]["sizeBytes"] = true;
+  filter["files"][0]["devicePath"] = true;
   JsonDocument doc;
   if (!fetchJson(url, filter, doc)) return false;
 
@@ -335,6 +336,7 @@ bool BookOrbitCatalogClient::fetchBookDetail(const int64_t bookId, BookOrbitBook
     entry.id = file["id"] | 0;
     entry.format = std::string(file["format"] | "");
     entry.sizeBytes = file["sizeBytes"] | 0;
+    entry.devicePath = std::string(file["devicePath"] | "");
     outDetail.files.push_back(std::move(entry));
   }
   return true;
