@@ -13,6 +13,10 @@ Based on CrossInk v1.5.1.
 
 - Catalog downloads now follow the file naming you configured on the server, under Settings > Koreader > File Naming in BookOrbit, instead of always landing flat as `Title - Author.epub`. A per-device override set on the server is honoured too, since the catalog already identifies this reader by name. Two consequences worth knowing: an account that never set a template gets BookOrbit's own default, which files books under `Series/` and `Standalone/` rather than flat, and books downloaded before this version stay where they are — nothing is moved or renamed: Servers too old to send a path keep the previous naming.
 
+### Fixed
+
+- Opening a book from the BookOrbit catalog's "On device" or "In progress" listings now opens it, instead of dropping you on the home screen. Leaving the catalog while Wi-Fi is up reboots the reader to reclaim the memory a network session fragments, and these two listings started the book the ordinary way — so the reboot tore the reader down before it had recorded which book was open, and the restart landed on home. The catalog now saves the book as the one to open and reboots straight into it, the way coming back to a book from the file transfer and Calibre screens already does. Books downloaded from the catalog were never affected.
+
 ## [v1.5.1+bookorbit.1] - 2026-09-14
 
 Based on CrossInk v1.5.1.
