@@ -15,6 +15,7 @@
 #include "./BookOrbitCatalogListCache.h"
 #include "BookOrbitCredentialStore.h"
 #include "BookOrbitDownloadIndex.h"
+#include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
@@ -770,7 +771,12 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       loadLocalBooks(entry.sectionId);
       break;
     case EntryType::LOCAL_BOOK:
-      activityManager.goToReader(entry.path);
+      // Pushing the reader here would never survive: onExit() reboots while the
+      // radio is still up, so the reader is torn down before onEnter() records
+      // the book. Persist the path and let the reboot land on it instead.
+      APP_STATE.openEpubPath = entry.path;
+      APP_STATE.saveToFile();
+      silentRestartToReader();
       break;
     case EntryType::FACET: {
       // Mirror BookOrbit's own plugin: author filters by the entry id; series
