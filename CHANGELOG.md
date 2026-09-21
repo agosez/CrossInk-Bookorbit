@@ -5,6 +5,14 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.5.1.
+
+### Changed
+
+- Catalog downloads now follow the file naming you configured on the server, under Settings > Koreader > File Naming in BookOrbit, instead of always landing flat as `Title - Author.epub`. A per-device override set on the server is honoured too, since the catalog already identifies this reader by name. Two consequences worth knowing: an account that never set a template gets BookOrbit's own default, which files books under `Series/` and `Standalone/` rather than flat, and books downloaded before this version stay where they are — nothing is moved or renamed: Servers too old to send a path keep the previous naming.
+
 ## [v1.5.1+bookorbit.1] - 2026-09-14
 
 Based on CrossInk v1.5.1.

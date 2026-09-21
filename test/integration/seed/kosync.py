@@ -231,6 +231,12 @@ class AdminClient:
                 break
         return found
 
+    def set_file_naming_pattern(self, pattern: str) -> None:
+        """Set the account's KOReader file naming template — the one BookOrbit applies
+        to devices without an override, and which the catalog resolves per file."""
+        request_json("PUT", self.api("/koreader/file-naming-pattern"), self._headers(),
+                     {"pattern": pattern}, ok=(200,))
+
     def ensure_collection(self, name: str, icon: str, book_ids: list[int]) -> int:
         """Create a collection holding ``book_ids``, or return the existing one by name."""
         for collection in request_json("GET", self.api("/collections"), self._headers(), ok=(200,)):
@@ -272,6 +278,17 @@ class KosyncDevice:
 
     def auth(self) -> None:
         request_json("GET", self.api("/users/auth"), self._headers(), ok=(200,))
+
+    def catalog_books(self, sort: str, page: int = 1, size: int = 20) -> dict:
+        """One page of the catalog book listing, exactly as the firmware asks for it."""
+        return request_json("GET", self.api(f"/plugin/catalog/books?page={page}&size={size}&sort={sort}"),
+                            self._headers(), ok=(200,))
+
+    def catalog_book_detail(self, book_id: int) -> dict:
+        """A catalog book's detail, including each file's devicePath — the account's
+        naming template resolved server-side for this device."""
+        return request_json("GET", self.api(f"/plugin/catalog/books/{book_id}?deviceId={self.device_id}"),
+                            self._headers(), ok=(200,))
 
     def get_progress(self, document_hash: str) -> dict:
         return request_json("GET", self.api(f"/syncs/progress/{document_hash}"),

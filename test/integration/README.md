@@ -99,6 +99,7 @@ scenarios, compose down.
 | `catalog_collections_browse` | Scripted UI navigation: home menu → BookOrbit catalog → Collections → the seeded collection; asserted through the browser's list cache. The catalog flow never silent-reboots before exit, so input scripts drive it end to end. |
 | `catalog_empty_listing_back` | Opening the seeded empty collection shows the no-entries error; Back climbs out of it and the next listing still loads (regression: Back reloaded the same empty listing forever). |
 | `catalog_libraries_browse` | Libraries as a browsable root section: its listing carries the seeded library's book count, opening it lists that library's books (cache key carries the library id), and the root's per-section counts (dashboard fetch) are cached. |
+| `catalog_download_naming` | A download lands where the account's KOReader file naming template says, folders created on the way, instead of a flat `Title - Author.epub`. The expected path is the `devicePath` the server itself resolved for the book the browser listed first, so the test never reimplements the template. A second run then proves "On device" still counts the book, which it can only do from the download index. |
 
 ### Repeatability
 

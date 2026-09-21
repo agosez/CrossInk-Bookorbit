@@ -10,7 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstring>
+#include <utility>
 
 #include "./BookOrbitCatalogListCache.h"
 #include "BookOrbitCredentialStore.h"
@@ -31,6 +31,7 @@
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
+#include "util/BookOrbitDevicePath.h"
 #include "util/StringUtils.h"
 
 namespace fui = freeink::ui;
@@ -47,24 +48,40 @@ constexpr unsigned long DOWNLOAD_PROGRESS_MAX_UPDATE_MS = 5000;
 // device. U+2022 bullet: guaranteed by the built-in fonts' default glyph intervals.
 constexpr char ON_DEVICE_MARKER[] = "\xE2\x80\xA2";
 
-// The SD filename (leading slash, no folder) a catalog book downloads to.
+// The SD filename (leading slash, no folder) this firmware falls back to when the
+// server does not say where the file belongs.
 std::string catalogBookFilename(const std::string& title, const std::string& author) {
   const std::string suffix = author.empty() ? "" : (" - " + author);
   return "/" + StringUtils::sanitizeFilename(title + suffix) + ".epub";
 }
 
+// Where a catalog file belongs under the download folder, leading slash included.
+// BookOrbit resolves the account's KOReader file naming template (or this device's
+// override) and returns it as the file's devicePath, so a book lands where the same
+// account's KOReader devices put it — series folders and all. Servers that do not
+// send one keep the title-author name this fork always used.
+std::string catalogBookFilename(const BookOrbitBookDetail& detail, const BookOrbitCatalogFile& file) {
+  const std::string fromServer = BookOrbitDevicePath::sanitizeRelativePath(file.devicePath);
+  if (!fromServer.empty()) return "/" + fromServer;
+  return catalogBookFilename(detail.title, detail.author);
+}
+
 // The full SD path a catalog book downloads to: the configured download folder
-// ("" = SD root) plus the title-author filename.
-std::string catalogBookPath(const std::string& title, const std::string& author) {
-  return BOOKORBIT_STORE.getDownloadFolder() + catalogBookFilename(title, author);
+// ("" = SD root) plus the filename above.
+std::string catalogBookPath(const BookOrbitBookDetail& detail, const BookOrbitCatalogFile& file) {
+  return BOOKORBIT_STORE.getDownloadFolder() + catalogBookFilename(detail, file);
 }
 
 // True when the catalog book already exists locally. The download index knows
-// where past downloads landed, whatever the folder setting was at the time; the
-// fallback filename heuristic covers pre-index downloads in the current download
-// location, the SD root (the old fixed location) and the /Read folder the
-// finished-book move feature uses. Books manually moved or renamed elsewhere are
-// not detected — this is a best-effort convenience marker.
+// where past downloads landed, whatever the folder setting or the server's naming
+// template was at the time; the fallback filename heuristic covers pre-index
+// downloads in the current download location, the SD root (the old fixed location)
+// and the /Read folder the finished-book move feature uses. It cannot cover the
+// server's naming template: only the book detail carries the resolved path, and a
+// listing would need one request per row to know it. Books downloaded under a
+// template but missing from the index (another device, or an index dropped when the
+// server URL changed) are therefore not detected — as with books moved or renamed by
+// hand, this stays a best-effort convenience marker.
 bool bookOnDevice(const int64_t bookId, const std::string& title, const std::string& author) {
   std::string indexedPath;
   if (BookOrbitDownloadIndex::lookup(bookId, indexedPath)) return true;
@@ -74,6 +91,13 @@ bool bookOnDevice(const int64_t bookId, const std::string& title, const std::str
   if (Storage.exists(filename.c_str())) return true;
   const std::string readPath = std::string(READ_FOLDER_PREFIX) + filename;
   return Storage.exists(readPath.c_str());
+}
+
+std::string bookTitleFromPath(const std::string& path) {
+  const size_t slash = path.find_last_of('/');
+  const size_t start = slash == std::string::npos ? 0 : slash + 1;
+  const size_t end = path.size() > start + 5 ? path.size() - 5 : path.size();  // strip ".epub"
+  return path.substr(start, end - start);
 }
 
 bool hasEpubFile(const BookOrbitBookDetail& detail, BookOrbitCatalogFile& outFile) {
@@ -279,35 +303,71 @@ size_t BookOrbitCatalogBrowserActivity::collectLocalBooks(const std::string& kin
       entry.path = book.path;
       sink->push_back(std::move(entry));
     }
+    LOG_DBG("BookOrbit", "Local scan: kind=%s count=%u", kind.c_str(), static_cast<unsigned>(count));
     return count;
   }
 
-  // Every EPUB in the download locations (configured folder and the SD root,
-  // where older firmware downloaded) and the /Read folder, offline.
-  const auto scanDir = [&count, sink](const char* dirPath) {
-    FsFile dir = Storage.open(dirPath);
-    if (!dir || !dir.isDirectory()) return;
+  // This firmware's own catalog downloads come from the index, which recorded where
+  // each one landed. That is what makes the server's file naming template a non-issue
+  // here: however deep it filed a book, the path is known and nothing has to be
+  // walked. A download whose index entry is gone (another device, or an index
+  // discarded when the server URL changed) falls back to the directory scan below,
+  // and is missed when the template filed it in a subfolder.
+  struct LocalBookCollector {
+    size_t* count;
+    std::vector<Entry>* sink;
+  };
+  LocalBookCollector collector{&count, sink};
+  BookOrbitDownloadIndex::forEachExisting(
+      [](const int64_t, const std::string& path, void* context) {
+        auto* out = static_cast<LocalBookCollector*>(context);
+        if (*out->count >= MAX_LOCAL_ENTRIES) return;
+        (*out->count)++;
+        if (out->sink == nullptr) return;
+        Entry entry;
+        entry.type = EntryType::LOCAL_BOOK;
+        entry.title = bookTitleFromPath(path);
+        entry.path = path;
+        out->sink->push_back(std::move(entry));
+      },
+      &collector);
+
+  // Then every other EPUB sitting in the places books arrive: the configured download
+  // folder, the SD root (where older firmware downloaded, and where books copied over
+  // USB land) and the /Read folder the finished-book move uses. Flat on purpose —
+  // descending would walk every folder on the card to find books that, if they came
+  // from the catalog, the index already listed.
+  const auto scanDir = [&count, sink](const std::string& dirPath) {
+    FsFile dir = Storage.open(dirPath.c_str());
+    if (!dir || !dir.isDirectory()) {
+      dir.close();
+      return;
+    }
+    const std::string prefix = dirPath == "/" ? dirPath : dirPath + "/";
     char name[128];
+    std::string path;  // reused: one allocation for the whole directory, not per file
     FsFile file;
     while (count < MAX_LOCAL_ENTRIES && (file = dir.openNextFile())) {
       const size_t nameLen = file.isDirectory() ? 0 : file.getName(name, sizeof(name));
       file.close();
-      if (nameLen > 5 && FsHelpers::hasEpubExtension(std::string_view(name, nameLen))) {
-        count++;
-        if (!sink) continue;
-        Entry entry;
-        entry.type = EntryType::LOCAL_BOOK;
-        entry.title = std::string(name, nameLen - 5);  // strip ".epub"
-        entry.path = (std::strcmp(dirPath, "/") == 0 ? std::string("/") : std::string(dirPath) + "/") + name;
-        sink->push_back(std::move(entry));
-      }
+      if (nameLen <= 5 || !FsHelpers::hasEpubExtension(std::string_view(name, nameLen))) continue;
+      path.assign(prefix).append(name, nameLen);
+      if (BookOrbitDownloadIndex::hasPath(path)) continue;  // already listed from the index
+      count++;
+      if (!sink) continue;
+      Entry entry;
+      entry.type = EntryType::LOCAL_BOOK;
+      entry.title = std::string(name, nameLen - 5);  // strip ".epub"
+      entry.path = path;
+      sink->push_back(std::move(entry));
     }
     dir.close();
   };
   const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
-  if (!folder.empty() && folder != READ_FOLDER_PREFIX) scanDir(folder.c_str());
+  if (!folder.empty() && folder != READ_FOLDER_PREFIX) scanDir(folder);
   scanDir("/");
   scanDir(READ_FOLDER_PREFIX);
+  LOG_DBG("BookOrbit", "Local scan: kind=%s count=%u", kind.c_str(), static_cast<unsigned>(count));
   return count;
 }
 
@@ -547,16 +607,22 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
     return;
   }
 
-  const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
-  if (!folder.empty() && !Storage.exists(folder.c_str()) && !Storage.mkdir(folder.c_str())) {
-    LOG_ERR("BookOrbit", "Could not create download folder %s", folder.c_str());
-    state = BrowserState::ERROR;
-    errorMessage = tr(STR_DOWNLOAD_FAILED);
-    requestUpdate();
-    return;
+  const std::string filename = catalogBookPath(detail, epubFile);
+  // Create the download folder and, when the server's naming template nests the book
+  // ("Sprawl/<book>.epub"), every folder it asks for. mkdir's pFlag creates the
+  // missing parents in one call, so this covers both at once.
+  const size_t lastSlash = filename.find_last_of('/');
+  if (lastSlash > 0 && lastSlash != std::string::npos) {
+    const std::string folder = filename.substr(0, lastSlash);
+    if (!Storage.exists(folder.c_str()) && !Storage.mkdir(folder.c_str())) {
+      LOG_ERR("BookOrbit", "Could not create download folder %s", folder.c_str());
+      state = BrowserState::ERROR;
+      errorMessage = tr(STR_DOWNLOAD_FAILED);
+      requestUpdate();
+      return;
+    }
   }
 
-  const std::string filename = catalogBookPath(detail.title, detail.author);
   LOG_DBG("BookOrbit", "Downloading file %lld -> %s", static_cast<long long>(epubFile.id), filename.c_str());
 
   bool cancelRequested = false;

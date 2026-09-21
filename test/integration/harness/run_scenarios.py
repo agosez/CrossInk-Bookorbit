@@ -254,18 +254,20 @@ def read_bob_store(path: Path) -> tuple[int, list[dict]]:
 class SimFs:
     """One scenario's isolated SD card."""
 
-    def __init__(self, temp_root: Path, kosync_creds: dict):
+    def __init__(self, temp_root: Path, kosync_creds: dict, download_folder: str = ""):
         self.root = temp_root
         self.fs = temp_root / "fs_"
         self.crosspoint = self.fs / ".crosspoint"
         self.crosspoint.mkdir(parents=True)
         (self.fs / "books").mkdir()
+        self.download_folder = download_folder
 
         (self.crosspoint / "bookorbit.json").write_text(json.dumps({
             "username": kosync_creds["username"],
             "password_obf": obfuscate_to_base64(kosync_creds["password"]),
             "serverUrl": BASE_URL,
             "syncBehavior": SYNC_BEHAVIOR_SMART,
+            "downloadFolder": download_folder,
         }))
         (self.crosspoint / "crossink-settings.json").write_text(json.dumps({
             "shortPwrBtn": SHORT_PWRBTN_BOOKORBIT_SYNC,
@@ -758,6 +760,65 @@ def scenario_catalog_libraries_browse(verbose: bool) -> None:
             f"library books total wrong: {scoped[0]['total']} != {len(books)}"
 
 
+def scenario_catalog_download_naming(verbose: bool) -> None:
+    """A catalog download lands where the account's KOReader file naming template
+    says, not under the "Title - Author.epub" this firmware used to hardcode. The
+    server resolves the template per file and ships it as the file's devicePath, so
+    the expected path is asked of the server rather than recomputed here: the test
+    proves the firmware honours the answer, folders included."""
+    manifest, _ = load_seed()
+    sim = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                       manifest["kosync"]["password"], SIM_DEVICE_ID)
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        # A configured download folder: the template's folders hang off it, and
+        # neither it nor they exist on this card yet.
+        fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
+            "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> All books (7th row,
+            "12050:DOWN", "12400:DOWN", "12750:DOWN",     #   after the facet sections)
+            "13100:CONFIRM",
+            "16000:CONFIRM",                              # first book -> download
+            "24000:QUIT",
+        ])
+        run_simulator(fs, input_script=script, choice="apply", timeout_s=90, verbose=verbose)
+
+        # The book that was downloaded is the first row of the listing the browser
+        # cached, so the expectation follows the device's own view of the catalog
+        # instead of assuming how the server ordered it.
+        caches = [json.loads(p.read_text())
+                  for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
+        listings = [c for c in caches if "total" in c and "sections" not in c]
+        assert listings and listings[0]["items"], f"no book listing was cached: {caches}"
+        first = listings[0]["items"][0]
+        epub = next(f for f in sim.catalog_book_detail(first["id"])["files"]
+                    if f["format"].lower() == "epub")
+        device_path = epub["devicePath"]
+        assert "/" in device_path, \
+            f"the seeded naming pattern should nest the book, got {device_path!r}"
+
+        expected = fs.fs / "Downloads" / device_path
+        downloaded = sorted(p.relative_to(fs.fs).as_posix() for p in fs.fs.rglob("*.epub"))
+        assert expected.exists(), \
+            f"{first['title']!r} did not download to {device_path!r}; EPUBs on the card: {downloaded}"
+        assert expected.stat().st_size > 0, "the downloaded file is empty"
+        # The legacy flat name must not appear beside it.
+        assert downloaded == [f"Downloads/{device_path}"], \
+            f"unexpected extra downloads: {downloaded}"
+
+        # Second run on the same card: the offline "On device" category must still
+        # find the book now that the template filed it two folders deep. The catalog
+        # root counts it on entry, which is where the scan reports what it found.
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",  # home menu -> BookOrbit catalog
+            "13000:QUIT",                              # the root counts local books as it builds
+        ])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
+        assert "Local scan: kind=on-device count=1" in output, \
+            "'On device' did not find the downloaded book inside the template's folders"
+
+
 def scenario_bookmark_push(verbose: bool) -> None:
     """A local bookmark (store entry + minted position record) reaches the
     server and is offered to a device that has never seen it."""
@@ -795,6 +856,7 @@ SCENARIOS = {
     "catalog_collections_browse": scenario_catalog_collections_browse,
     "catalog_empty_listing_back": scenario_catalog_empty_listing_back,
     "catalog_libraries_browse": scenario_catalog_libraries_browse,
+    "catalog_download_naming": scenario_catalog_download_naming,
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,
     "highlight_pull": scenario_highlight_pull,

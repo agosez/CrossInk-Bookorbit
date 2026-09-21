@@ -21,6 +21,10 @@ struct BookOrbitCatalogFile {
   int64_t id = 0;
   std::string format;  // e.g. "epub", lowercase
   size_t sizeBytes = 0;
+  // Relative path the server's KOReader file naming template resolves to for this
+  // account and device. Empty on servers that predate the field; the caller then
+  // names the file itself.
+  std::string devicePath;
 };
 
 /** One entry in a BookOrbit book listing. */
