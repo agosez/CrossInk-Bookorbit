@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <numeric>
 #include <vector>
 
 #include "StringUtils.h"
@@ -28,9 +29,9 @@ bool endsWithEpubExtension(const std::string& name) {
 size_t joinedLength(const std::vector<std::string>& segments) {
   if (segments.empty()) return 0;
 
-  size_t length = segments.size() - 1;  // the separators
-  for (const std::string& segment : segments) length += segment.size();
-  return length;
+  // Every segment's bytes, on top of the separators between them.
+  return std::accumulate(segments.begin(), segments.end(), segments.size() - 1,
+                         [](const size_t total, const std::string& segment) { return total + segment.size(); });
 }
 
 std::string join(const std::vector<std::string>& segments) {
