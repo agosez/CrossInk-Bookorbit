@@ -1495,14 +1495,18 @@ void setup() {
   // stores when Home, reader bookkeeping, or sync actually need them.
   if (!isNetworkResume) {
     Dictionary::isValidDictionary();
-  } else if (snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::KOREADER_SYNC) ||
-             snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::KOREADER_AUTH) ||
-             snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::FILE_TRANSFER)) {
-    KOREADER_STORE.loadFromFile();
+  } else {
+    // Network sessions load the stores they read before Wi-Fi claims the heap.
+    if (snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::KOREADER_SYNC) ||
+        snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::KOREADER_AUTH) ||
+        snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::FILE_TRANSFER)) {
+      KOREADER_STORE.loadFromFile();
+    }
+    if (snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SYNC) ||
+        snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::FILE_TRANSFER)) {
+      BOOKORBIT_STORE.loadFromFile();
+    }
   }
-  KOREADER_STORE.loadFromFile();
-  BOOKORBIT_STORE.loadFromFile();
-  OPDS_STORE.loadFromFile();
   UITheme::getInstance().reload();
   ButtonNavigator::setMappedInputManager(mappedInputManager);
   logBootHeap("boot state ready");

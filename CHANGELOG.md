@@ -13,6 +13,10 @@ Based on CrossInk v1.6.0.
 
 - The BookOrbit catalog now shows the server's SmartScopes section, alongside Collections, Libraries, Authors and Series. The section is badged with how many scopes you have, the way the other sections are, and an account with no scopes simply shows an empty section.
 
+### Changed
+
+- BookOrbit settings are now read from the SD card the first time something needs them rather than on every start, the way CrossInk already defers its KOReader and OPDS settings. Waking straight back into a book skips that read entirely.
+
 ### Fixed
 
 - Choosing BookOrbit Sync from the reader menu without an account set up now opens the BookOrbit settings, instead of doing nothing. The shortcut already did this; the menu entry now behaves the same.
