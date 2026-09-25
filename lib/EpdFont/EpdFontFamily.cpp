@@ -39,6 +39,8 @@ void EpdFontFamily::getTextDimensions(const char* string, int* w, int* h, const 
   uint32_t cp;
   uint32_t prevCp = 0;
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&string)))) {
+    if (utf8IsVariationSelector(cp)) continue;
+
     const bool isCombining = utf8IsCombiningMark(cp);
 
     if (!isCombining) {

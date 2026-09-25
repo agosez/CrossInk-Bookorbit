@@ -516,6 +516,23 @@ Then `ERA_HISTORY` (6) correction records of 24 bytes each:
 
 ## `section.bin`
 
+### Version 77
+
+Version 77 keeps the serialized layout unchanged. It was bumped because ordered
+lists now number their items, `list-style-type: none` suppresses markers, and
+`<ul>`/`<ol>` margins and padding contribute to child insets. Complete files use
+byte `77`; suspended partials use the previously unused sentinel `0xF3`.
+The related CSS rule cache uses version `18`; version `17` already occurs in
+local branch history.
+
+### Version 75
+
+Version 75 keeps the serialized layout unchanged but excludes EPUB elements with
+the HTML `hidden` attribute. Complete files use byte `75`; suspended partials use
+`0xF4`. Both older full and partial layouts rebuild automatically.
+Versions 67–74 and partial sentinel 0xF5 already occur in other local branch
+history; using fresh identifiers avoids accepting those experimental caches.
+
 ### Version 66
 
 Version 66 keeps the version 63 serialized layout unchanged. It was bumped
@@ -622,7 +639,7 @@ import std.mem;
 import std.string;
 import std.core;
 
-#define EXPECTED_VERSION 66
+#define EXPECTED_VERSION 77
 #define MAX_STRING_LENGTH 65535
 #define FOOTNOTE_NUMBER_LEN 32
 #define FOOTNOTE_HREF_LEN 96
@@ -966,3 +983,49 @@ with SD font and AA, visit/revisit image pages and sleep, compare portrait and
 landscape output, and record internal free/largest heap blocks and low-water
 marks. Repeat corrupt sidecars, full/read-only SD, interrupted writes and book
 replacement at the same path on X3/X4, Sticky (SPI SD) and X4 Pro (SDMMC).
+
+### CSS rules cache revision 18
+
+Revision 18 adds the serialized `list-style-type` property used to number
+ordered lists and suppress list markers. It also includes the PSRAM streamed
+stylesheet path introduced in revision 16, which admits sources up to 512 KiB
+on PSRAM readers while C3 retains its 128 KiB limit. Existing rule-count and
+internal-memory guards still apply. Rebuilding an invalid CSS cache also
+invalidates section caches through the existing EPUB-load path, so books that
+previously cached zero rules can restore hidden content and layout rules.
+
+## `/.crosspoint/font-catalog.bin`
+
+### Version 1
+
+Disposable font metadata cache, shared by reader, settings and web font controls.
+The 24-byte little-endian header contains magic `0x46434931`, version, a 64-bit
+inventory fingerprint, family count (maximum 128), and a reserved zero field.
+It is followed by 152-byte family summaries: a NUL-terminated 128-byte name,
+32-bit detail offset/byte count/FNV-1a hash, 16-bit file count, minimum/maximum
+point sizes, four reserved zero bytes, and a 32-bit FNV-1a
+checksum of the preceding summary bytes. Detail blocks follow the summaries.
+Each detail is three bytes (point size, style, path length) followed by the
+UTF-8 path bytes. Paths are at most 255 bytes; families contain at most 256
+files. The whole cache is capped at 2 MiB.
+
+Names/range labels load without retaining file paths. Only a requested family
+hydrates its detail vector. Missing, incompatible or malformed summaries rebuild
+the catalog by scanning names first and writing one family's paths at a time;
+invalid detail blocks invalidate the cache for the next request.
+Temporary memory failures preserve the font selection and cache for retry.
+Writers finish and sync `font-catalog.tmp` before replacing the cache. An
+interrupted replacement is safe because no user data is stored here.
+
+On first font metadata access after boot or explicit invalidation, an inventory
+walk checks names, directory kinds and file lengths in both font roots and their
+immediate subdirectories. It reads no font contents on an index hit, and is not
+repeated when catalog RAM is released and reloaded during the same session. This
+detects externally added/removed files and changed lengths after restarting;
+same-length content-only edits outside the firmware are not detectable by that
+check. Firmware upload/delete/move/download paths invalidate explicitly,
+including failed dedicated font uploads; USB Drive invalidates before handing
+the card to the host. Manage Fonts performs a full rescan; alternatively remove
+this cache to force reinspection after external same-length font changes.
+
+EPUB layout cache versions and identities are unchanged by this catalog.

@@ -1,5 +1,6 @@
 #include "SleepActivity.h"
 
+#include <BitmapHelpers.h>
 #include <BoardConfig.h>
 #include <Epub.h>
 #include <FsHelpers.h>
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <new>
 #include <string_view>
 
@@ -81,7 +83,7 @@ void hideOverlayBatteryStrip(const GfxRenderer& renderer) {
 
 // Context passed through PNGdec's decode() user-pointer to the per-scanline draw callback.
 struct PngOverlayCtx {
-  const GfxRenderer* renderer;
+  GfxRenderer* renderer;
   int screenW;
   int screenH;
   int srcWidth;
@@ -199,7 +201,14 @@ int pngOverlayDraw(PNGDRAW* pDraw) {
       }
 
       if (alpha >= 128) {
-        ctx->renderer->drawPixel(outX, destY, gray < 128);  // true = black, false = white
+        const auto mode = ctx->renderer->getRenderMode();
+        if (mode == GfxRenderer::BW) {
+          ctx->renderer->drawPixel(outX, destY, gray < 128);  // true = black, false = white
+        } else {
+          const auto pixel =
+              grayPlanePixel(gray >> 6, mode == GfxRenderer::GRAYSCALE_MSB, ctx->renderer->grayPlanesAreAbsolute());
+          if (pixel.write) ctx->renderer->drawPixel(outX, destY, pixel.black);
+        }
       }
       // alpha < 128: transparent — leave the reader page pixel intact
     }
@@ -716,9 +725,15 @@ bool SleepActivity::renderBitmapSleepScreen(Bitmap& bitmap) const {
     return true;
   }
 
+  // Prefer the Direct waveform where the panel implements it: it folds the B/W
+  // base into the grayscale pass rather than pushing a separate base refresh
+  // first. Keep `absolute` on the Absolute probe alone so it matches what the
+  // callers pass to SleepCoverAssets and the Bitmap dither/level mode; Direct
+  // is only ever an upgrade on top of it, never a substitute.
   const bool absolute = renderer.supportsAbsoluteGrayscale();
+  const bool direct = absolute && renderer.supportsDirectGrayscale();
   if (absolute) {
-    if (!renderer.displayAbsoluteGrayscaleBase()) return false;
+    if (!(direct ? renderer.displayDirectGrayscaleBase() : renderer.displayAbsoluteGrayscaleBase())) return false;
   } else {
     renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
   }
@@ -1009,6 +1024,8 @@ void SleepActivity::renderOverlaySleepScreen() const {
     return OverlayDrawResult::Drawn;
   };
 
+  bool pngOverlayGrayscaleDisplayed = false;
+  bool pngOverlayFallbackMustUseDefault = false;
   auto tryDrawPngOverlay = [&](const std::string& filename) -> OverlayDrawResult {
     if (!Storage.exists(filename.c_str())) {
       LOG_DBG("SLP", "PNG overlay not found: %s", filename.c_str());
@@ -1032,7 +1049,7 @@ void SleepActivity::renderOverlaySleepScreen() const {
               static_cast<unsigned>(MIN_FREE_HEAP), filename.c_str());
       return OverlayDrawResult::Failed;
     }
-    PNG* png = new (std::nothrow) PNG();
+    auto png = std::unique_ptr<PNG>(new (std::nothrow) PNG());
     if (!png) {
       LOG_ERR("SLP", "Failed to allocate PNG overlay decoder for %s", filename.c_str());
       return OverlayDrawResult::Failed;
@@ -1040,7 +1057,6 @@ void SleepActivity::renderOverlaySleepScreen() const {
 
     int rc = png->open(filename.c_str(), pngSleepOpen, pngSleepClose, pngSleepRead, pngSleepSeek, pngOverlayDraw);
     if (rc != PNG_SUCCESS) {
-      delete png;
       LOG_ERR("SLP", "PNG overlay open failed for %s: %d", filename.c_str(), rc);
       return OverlayDrawResult::Failed;
     }
@@ -1067,16 +1083,67 @@ void SleepActivity::renderOverlaySleepScreen() const {
     ctx.yScale = yScale;
     ctx.lastDstY = -1;
     ctx.transparentColor = -2;  // will be resolved on first draw callback (after tRNS is parsed)
-    ctx.pngObj = png;
+    ctx.pngObj = png.get();
 
     LOG_INF("SLP", "Drawing PNG overlay: %s", filename.c_str());
     rc = png->decode(&ctx, 0);
     png->close();
-    delete png;
     if (rc != PNG_SUCCESS) {
       LOG_ERR("SLP", "PNG overlay decode failed for %s: %d", filename.c_str(), rc);
       return OverlayDrawResult::Failed;
     }
+
+    const bool absolute = renderer.supportsAbsoluteGrayscale();
+    if (!absolute) return OverlayDrawResult::Drawn;
+    if (!(renderer.supportsDirectGrayscale() ? renderer.displayDirectGrayscaleBase()
+                                             : renderer.displayAbsoluteGrayscaleBase())) {
+      return OverlayDrawResult::Drawn;
+    }
+
+    // Absolute gray planes preserve the reader page underneath transparent PNG
+    // pixels while rewriting each opaque pixel at its exact four-level tone.
+    bool lsbCopied = false;
+    const auto grayscaleFallback = [&]() {
+      renderer.setRenderMode(GfxRenderer::BW);
+      if (lsbCopied) {
+        renderer.clearScreen();
+        pngOverlayFallbackMustUseDefault = true;
+      }
+      return lsbCopied ? OverlayDrawResult::Failed : OverlayDrawResult::Drawn;
+    };
+    for (const auto mode : {GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+      png.reset();
+      png = std::unique_ptr<PNG>(new (std::nothrow) PNG());
+      if (!png) {
+        LOG_ERR("SLP", "Failed to allocate PNG grayscale decoder for %s", filename.c_str());
+        return grayscaleFallback();
+      }
+      rc = png->open(filename.c_str(), pngSleepOpen, pngSleepClose, pngSleepRead, pngSleepSeek, pngOverlayDraw);
+      if (rc != PNG_SUCCESS) {
+        LOG_ERR("SLP", "PNG grayscale open failed for %s: %d", filename.c_str(), rc);
+        return grayscaleFallback();
+      }
+
+      ctx.pngObj = png.get();
+      ctx.lastDstY = -1;
+      ctx.transparentColor = -2;
+      renderer.setRenderMode(mode);
+      rc = png->decode(&ctx, 0);
+      png->close();
+      if (rc != PNG_SUCCESS) {
+        LOG_ERR("SLP", "PNG grayscale decode failed for %s: %d", filename.c_str(), rc);
+        return grayscaleFallback();
+      }
+      if (mode == GfxRenderer::GRAYSCALE_LSB) {
+        renderer.copyGrayscaleLsbBuffers();
+        lsbCopied = true;
+      } else {
+        renderer.copyGrayscaleMsbBuffers();
+      }
+    }
+    renderer.displayGrayBuffer(TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+    renderer.setRenderMode(GfxRenderer::BW);
+    pngOverlayGrayscaleDisplayed = true;
     return OverlayDrawResult::Drawn;
   };
 
@@ -1093,7 +1160,8 @@ void SleepActivity::renderOverlaySleepScreen() const {
   if (selectPinnedSleepImage(SleepImageMode::Overlay, selection)) {
     trySelectedOverlay(selection);
   }
-  if (!overlayDrawn && selectRandomSleepImage(SleepImageMode::Overlay, selection)) {
+  if (!overlayDrawn && !pngOverlayFallbackMustUseDefault &&
+      selectRandomSleepImage(SleepImageMode::Overlay, selection)) {
     trySelectedOverlay(selection);
   }
 
@@ -1102,19 +1170,19 @@ void SleepActivity::renderOverlaySleepScreen() const {
   // valid PNG can fail on C3 devices. Try another folder image before using
   // the root/default fallback: use BMP-only after a PNG failure, or validate
   // BMP headers after a failed BMP selection.
-  if (!overlayDrawn && overlayCandidateFailed && !selection.path.empty() &&
+  if (!overlayDrawn && !pngOverlayFallbackMustUseDefault && overlayCandidateFailed && !selection.path.empty() &&
       selectRandomSleepImage(SleepImageMode::Overlay, selection,
                              /*validateBmpHeaders=*/!selection.isPng,
                              /*bmpOnly=*/selection.isPng)) {
     trySelectedOverlay(selection);
   }
 
-  if (!overlayDrawn) {
+  if (!overlayDrawn && !pngOverlayFallbackMustUseDefault) {
     const OverlayDrawResult result = tryDrawOverlay("/sleep.bmp");
     overlayDrawn = result == OverlayDrawResult::Drawn;
     overlayCandidateFailed = overlayCandidateFailed || result == OverlayDrawResult::Failed;
   }
-  if (!overlayDrawn) {
+  if (!overlayDrawn && !pngOverlayFallbackMustUseDefault) {
     const OverlayDrawResult result = tryDrawPngOverlay("/sleep.png");
     overlayDrawn = result == OverlayDrawResult::Drawn;
     overlayCandidateFailed = overlayCandidateFailed || result == OverlayDrawResult::Failed;
@@ -1135,6 +1203,7 @@ void SleepActivity::renderOverlaySleepScreen() const {
   }
 
   renderer.setOrientation(savedOrientation);
+  if (pngOverlayGrayscaleDisplayed) return;
   // The grayscale re-render has no mask for the overlay image. If an overlay was
   // drawn, keep the composited BW frame intact instead of painting page glyphs
   // over the sleep image.

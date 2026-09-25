@@ -320,6 +320,14 @@ class GfxRenderer {
   bool grayPlanesAreAbsolute() const { return absoluteGrayPlanes; }
   bool supportsAbsoluteGrayscale() const;
   bool displayAbsoluteGrayscaleBase(HalDisplay::RefreshMode fallback = HalDisplay::HALF_REFRESH) const;
+  // Direct grayscale folds the B/W base into the grayscale pass
+  // (GrayscaleBase::Combined) instead of pushing a separate base refresh first.
+  // It encodes complete planes just like Absolute, and every panel driver that
+  // reports Direct also reports Absolute, so Direct is only ever an upgrade.
+  // The GrayscaleMode enum stays out of this header: the simulator's HalDisplay
+  // does not define it.
+  bool supportsDirectGrayscale() const;
+  bool displayDirectGrayscaleBase(HalDisplay::RefreshMode fallback = HalDisplay::HALF_REFRESH) const;
   RenderMode getRenderMode() const { return renderMode; }
   // Grayscale preconditioning settle pass (no-op on X4). The rect overload
   // takes the gray region in LOGICAL screen coordinates and rotates it to the

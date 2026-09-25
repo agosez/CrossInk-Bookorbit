@@ -20,6 +20,7 @@
 #include "ClipSelectionPaging.h"
 #include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
+#include "DictionaryWordParts.h"
 #include "MappedInputManager.h"
 #include "Memory.h"
 #include "PageWordGeometry.h"
@@ -47,12 +48,6 @@ struct WorkingSetBudget {
   size_t maxSourceWordBytes = 0;
 };
 
-struct WordPartRef {
-  const char* text = nullptr;
-  size_t length = 0;
-  size_t sourceOffset = 0;
-};
-
 template <typename Callback>
 bool forEachPageTextLine(const Page& page, Callback&& callback) {
   using CallbackType = std::remove_reference_t<Callback>;
@@ -60,15 +55,9 @@ bool forEachPageTextLine(const Page& page, Callback&& callback) {
       [](const PageTextLine& line, void* context) { return (*static_cast<CallbackType*>(context))(line); }, &callback);
 }
 
-bool isDashSeparator(const char* text, const size_t length, const size_t offset) {
-  return offset + 2 < length && static_cast<uint8_t>(text[offset]) == 0xE2 &&
-         static_cast<uint8_t>(text[offset + 1]) == 0x80 &&
-         (static_cast<uint8_t>(text[offset + 2]) == 0x93 || static_cast<uint8_t>(text[offset + 2]) == 0x94);
-}
-
-bool containsDashSeparator(const char* text, const size_t length) {
+bool containsDictionaryWordPartSeparator(const char* text, const size_t length) {
   for (size_t i = 0; i < length; ++i) {
-    if (isDashSeparator(text, length, i)) return true;
+    if (dictionaryWordPartSeparatorAt(text, length, i) != DictionaryWordPartSeparator::None) return true;
   }
   return false;
 }
@@ -85,21 +74,6 @@ bool hasVisibleWordText(const char* text) {
     ++cursor;
   }
   return false;
-}
-
-template <typename Sink>
-void forEachWordPart(const char* text, const size_t length, Sink&& sink) {
-  size_t partStart = 0;
-  for (size_t i = 0; i < length;) {
-    if (!isDashSeparator(text, length, i)) {
-      i++;
-      continue;
-    }
-    if (i > partStart) sink(WordPartRef{text + partStart, i - partStart, partStart});
-    i += 3;
-    partStart = i;
-  }
-  if (partStart < length) sink(WordPartRef{text + partStart, length - partStart, partStart});
 }
 
 bool addBudgetBytes(size_t& total, const size_t bytes) {
@@ -390,10 +364,11 @@ bool DictionaryWordSelectActivity::allocateWorkingSet() {
   bool valid = true;
   bool haveRow = false;
   int16_t currentRowY = 0;
-  WordPartRef previousRowLast{};
+  DictionaryWordPart previousRowLast{};
   bool previousRowLastWasTableText = false;
 
-  const auto addMergedBudget = [&](const WordPartRef& first, const WordPartRef& second, const bool stripLeadingSecond) {
+  const auto addMergedBudget = [&](const DictionaryWordPart& first, const DictionaryWordPart& second,
+                                   const bool stripLeadingSecond) {
     if (first.length == 0 || first.text[first.length - 1] != '-' || first.text[0] == '-') return;
     const size_t secondSkip = stripLeadingSecond && second.length > 0 && second.text[0] == '-' ? 1 : 0;
     const size_t mergedLength = first.length - 1 + second.length - secondSkip;
@@ -411,7 +386,7 @@ bool DictionaryWordSelectActivity::allocateWorkingSet() {
       budget.maxSourceWordBytes = std::max(budget.maxSourceWordBytes, wordLength + 1);
       if (wordLength > UINT16_MAX || !utf8ContainsLookupCharacter(word)) continue;
 
-      forEachWordPart(word, wordLength, [&](const WordPartRef& part) {
+      forEachDictionaryWordPart(word, wordLength, [&](const DictionaryWordPart& part) {
         if (!valid || part.length == 0 || part.length > UINT16_MAX || budget.wordCount >= UINT16_MAX) {
           valid = false;
           return;
@@ -441,7 +416,7 @@ bool DictionaryWordSelectActivity::allocateWorkingSet() {
   if (haveRow) budget.rowCount++;
   if (budget.rowCount > static_cast<size_t>(INT16_MAX)) valid = false;
   if (haveRow && !previousRowLastWasTableText && !nextPageFirstWord.empty()) {
-    const WordPartRef next{nextPageFirstWord.c_str(), nextPageFirstWord.size(), 0};
+    const DictionaryWordPart next{nextPageFirstWord.c_str(), nextPageFirstWord.size(), 0};
     addMergedBudget(previousRowLast, next, /*stripLeadingSecond=*/false);
   }
 
@@ -647,7 +622,7 @@ bool DictionaryWordSelectActivity::extractWords() {
         continue;
       }
 
-      if (!containsDashSeparator(wordText, wordLength)) {
+      if (!containsDictionaryWordPartSeparator(wordText, wordLength)) {
         int16_t wordWidth;
         if (focusBoundary > 0 && focusSuffixX > 0) {
           wordWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), wordText, wordLength, wordStyle,
@@ -712,7 +687,12 @@ bool DictionaryWordSelectActivity::extractWords() {
       }
 
       bool partSucceeded = true;
-      forEachWordPart(wordText, wordLength, [&](const WordPartRef& part) {
+      int fullWordWidth = renderer.getTextAdvanceX(SETTINGS.getReaderFontId(), wordText, wordStyle);
+      if (wordIndex + 1 < sourceWordCount && block->wordXpos(wordIndex + 1) > block->wordXpos(wordIndex)) {
+        fullWordWidth =
+            std::min(fullWordWidth, static_cast<int>(block->wordXpos(wordIndex + 1) - block->wordXpos(wordIndex)));
+      }
+      forEachDictionaryWordPart(wordText, wordLength, [&](const DictionaryWordPart& part) {
         if (!partSucceeded || part.length == 0) return;
         int16_t offsetX = 0;
         if (part.sourceOffset > 0) {
@@ -734,8 +714,9 @@ bool DictionaryWordSelectActivity::extractWords() {
         const char* storedPart = textPool + offset;
         const int16_t measuredPartWidth = measureWordAdvanceX(renderer, SETTINGS.getReaderFontId(), storedPart,
                                                               part.length, wordStyle, sanitizeScratch, scratchHalf);
+        const int partOffsetX = dictionaryWordPartVisualOffset(fullWordWidth, offsetX, measuredPartWidth, wordIsRtl);
         const PageWordGeometry partGeometry =
-            clipPageTextRange(line, block->wordXpos(wordIndex) + offsetX, measuredPartWidth);
+            clipPageTextRange(line, block->wordXpos(wordIndex) + partOffsetX, measuredPartWidth);
         if (partGeometry.width <= 0) return;
         WordSelectNavigator::WordInfo word;
         word.textOffset = offset;
@@ -750,6 +731,7 @@ bool DictionaryWordSelectActivity::extractWords() {
         word.style = wordStyle;
         word.fontId = SETTINGS.getReaderFontId();
         word.isRtl = wordIsRtl;
+        word.compoundSeparatorBefore = static_cast<uint8_t>(part.separatorBefore);
         word.isTableText = line.isTableText;
         if (!appendWord(word)) partSucceeded = false;
       });

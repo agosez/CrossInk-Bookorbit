@@ -68,6 +68,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     PROGRESS_BAR_THICK = 2,
     STATUS_BAR_PROGRESS_BAR_THICKNESS_COUNT
   };
+  enum BOOK_PERCENTAGE_FORMAT {
+    BOOK_PERCENTAGE_WHOLE = 0,
+    BOOK_PERCENTAGE_ONE_DECIMAL = 1,
+    BOOK_PERCENTAGE_TWO_DECIMALS = 2,
+    BOOK_PERCENTAGE_FORMAT_COUNT
+  };
   enum STATUS_BAR_TITLE { BOOK_TITLE = 0, CHAPTER_TITLE = 1, HIDE_TITLE = 2, STATUS_BAR_TITLE_COUNT };
   enum STATUS_BAR_TIME_LEFT {
     TIME_LEFT_HIDE = 0,
@@ -430,6 +436,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t statusBar = FULL;
   uint8_t statusBarChapterPageCount = 1;
   uint8_t statusBarBookProgressPercentage = 1;
+  uint8_t statusBarBookPercentageFormat = BOOK_PERCENTAGE_WHOLE;
   uint8_t stablePageNumbers = 0;
   uint8_t statusBarProgressBar = HIDE_PROGRESS;
   uint8_t statusBarProgressBarThickness = PROGRESS_BAR_NORMAL;
@@ -475,6 +482,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t disableReaderTouchscreen = 0;
   // Available only on multi-touch hardware; defaults on for pinch font resizing.
   uint8_t pinchFontResizeEnabled = 1;
+  // Two-finger twist rotates the reader screen. Multi-touch hardware only.
+  uint8_t twoFingerRotationEnabled = 1;
   // Configurable two-finger swipes. A non-empty action may be assigned to one direction only.
   uint8_t twoFingerSwipeUp = TWO_FINGER_SWIPE_NOT_SET;
   uint8_t twoFingerSwipeDown = TWO_FINGER_SWIPE_NOT_SET;
@@ -716,7 +725,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   bool loadFromFile();
   static const char* getFilePath() { return "/.crosspoint/crossink-settings.json"; }
   void toJson(JsonDocument& doc) const;
-  bool fromJson(JsonVariantConst doc);
+  bool fromJson(JsonVariantConst doc, bool importingCrossPoint = false);
 
   struct StatusBarSpec {
     bool showChapterPageCount = false;

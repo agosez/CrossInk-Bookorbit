@@ -202,7 +202,7 @@ void FontDownloadActivity::onExit() {
     WiFi.disconnect(false);
     delay(30);
     if (fontsChanged_) {
-      silentRestartAfterNetwork();
+      silentRestart();
     } else {
       WiFi.mode(WIFI_OFF);
     }
@@ -503,7 +503,7 @@ bool FontDownloadActivity::fetchAndParseManifest() {
 
 const SdCardFontFamilyInfo* FontDownloadActivity::findInstalledFamilyCandidate(const char* familyName) const {
   const auto& registry = sdFontSystem.registry();
-  const SdCardFontFamilyInfo* exact = registry.findFamily(familyName);
+  const SdCardFontFamilyInfo* exact = registry.findSummary(familyName);
   if (exact) return exact;
 
   const std::string target = normalizedFontFamilyName(familyName);
@@ -934,6 +934,7 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
     if (Storage.exists(backupPath)) {
       Storage.remove(backupPath);
     }
+    sdFontSystem.markRegistryDirty();
     if (hadExistingFile && !Storage.rename(destPath, backupPath)) {
       LOG_ERR("FONT", "Failed to back up existing font file: %s", destPath);
       Storage.remove(tempPath);

@@ -12,11 +12,14 @@ size_t utf8RemoveLastChar(std::string& str);
 // Truncate string by removing N UTF-8 codepoints from the end.
 void utf8TruncateChars(std::string& str, size_t numChars);
 
-// Canonical composition (NFC) for the Latin / Vietnamese range: precomposes a
-// base letter followed by combining diacritical mark(s) into a single codepoint.
-// Needed because the device fonts have no combining-mark positioning, so text
-// stored in NFD (e.g. some EPUB chapter titles) otherwise renders broken.
+// Canonical composition (NFC) for Latin / Vietnamese combining marks and modern
+// Hangul jamo. Needed because the device fonts have no combining-mark positioning
+// or decomposed Hangul glyphs, so NFD text otherwise renders broken or blank.
 std::string utf8ComposeNfc(const std::string& in);
+
+// Compose a null-terminated display buffer without allocating or growing it.
+// Uncomposed bytes (including malformed UTF-8) are preserved unchanged.
+void utf8ComposeNfcInPlace(char* buffer);
 
 // Returns true when text contains at least one Unicode letter/number-like
 // codepoint that can be sent to dictionary lookup. Punctuation, symbols,
@@ -108,4 +111,12 @@ inline bool utf8IsCombiningMark(const uint32_t cp) {
          || (cp >= 0x1DC0 && cp <= 0x1DFF)   // Combining Diacritical Marks Supplement
          || (cp >= 0x20D0 && cp <= 0x20FF)   // Combining Diacritical Marks for Symbols
          || (cp >= 0xFE20 && cp <= 0xFE2F);  // Combining Half Marks
+}
+
+// Variation selectors modify the preceding glyph's presentation. The bitmap
+// font pipeline has no variation-selector lookup, so they must not fall back
+// to a visible replacement glyph or consume layout width on their own.
+inline bool utf8IsVariationSelector(const uint32_t cp) {
+  return (cp >= 0x180B && cp <= 0x180D) || cp == 0x180F || (cp >= 0xFE00 && cp <= 0xFE0F) ||
+         (cp >= 0xE0100 && cp <= 0xE01EF);
 }

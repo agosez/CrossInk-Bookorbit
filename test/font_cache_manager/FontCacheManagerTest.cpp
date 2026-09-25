@@ -58,6 +58,24 @@ TEST(FontCacheManagerTest, PrewarmScopeBatchesEachFontAndResolvedStyleSeparately
   EXPECT_EQ(0x01, fallbackFont.prewarmCalls[0].styleMask);
 }
 
+TEST(FontCacheManagerTest, ReleasesEveryRebuildableFontCacheBeforeMemoryHeavyWork) {
+  SdCardFont readerFont;
+  SdCardFont fallbackFont;
+  FontDecompressor decompressor;
+  const std::map<int, EpdFontFamily> noBuiltinFonts;
+  const std::map<int, SdCardFont*> sdFonts{{-17, &readerFont}, {23, &fallbackFont}};
+  FontCacheManager manager(noBuiltinFonts, sdFonts);
+  manager.setFontDecompressor(&decompressor);
+
+  manager.releaseSdFontCaches();
+
+  EXPECT_EQ(1, decompressor.clearCacheCallCount);
+  EXPECT_EQ(1, readerFont.releaseForLowMemoryCallCount);
+  EXPECT_FALSE(readerFont.lastPreserveAdvanceTable);
+  EXPECT_EQ(1, fallbackFont.releaseForLowMemoryCallCount);
+  EXPECT_FALSE(fallbackFont.lastPreserveAdvanceTable);
+}
+
 TEST(FontCacheManagerTest, PrewarmScopeMergesStylesThatResolveToTheSameSdFontData) {
   SdCardFont font;
   font.resolvedStyles[EpdFontFamily::BOLD] = EpdFontFamily::REGULAR;

@@ -1,0 +1,8 @@
+# Keyboard controls. Regenerate with:
+# python3 scripts/generate_icons.py --library lucide \
+#   --manifest src/components/icons/keyboardIcons.manifest \
+#   --sizes 28 --out src/components/icons/keyboardIcons.h
+#
+# The source icon is named "delete" by Lucide, but it represents a backspace
+# key in this UI.
+backspace = delete

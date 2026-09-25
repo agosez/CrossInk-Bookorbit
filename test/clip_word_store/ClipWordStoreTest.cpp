@@ -2,10 +2,12 @@
 
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #include "ClippingStore.h"
 #include "Epub/Epub/ReaderRenderSpec.h"
 #include "activities/reader/ClipSelectionPaging.h"
+#include "activities/reader/FocusReadingText.h"
 #include "activities/reader/WordRef.h"
 #include "clippings/ClipTextBuilder.h"
 #include "clippings/ClippingHighlightGeometry.h"
@@ -262,6 +264,69 @@ TEST(ClippingHighlightGeometry, KeepsTextFallbackInTheMatchedTableColumn) {
   EXPECT_FALSE(ClippingHighlightGeometry::matchesTableColumn(rightColumn, 8, 8));
 }
 
+TEST(FocusReadingText, DrawsClippingPrefixWithThePrewarmedBoldStyle) {
+  struct Run {
+    int x;
+    std::string text;
+    EpdFontFamily::Style style;
+  };
+  std::vector<Run> runs;
+
+  ASSERT_TRUE(FocusReadingText::drawSplitRuns(
+      "reader", 6, 2, 100, 18, EpdFontFamily::REGULAR, false,
+      [&runs](const int x, const char* text, const EpdFontFamily::Style style) { runs.push_back({x, text, style}); }));
+
+  ASSERT_EQ(runs.size(), 2U);
+  EXPECT_EQ(runs[0].x, 100);
+  EXPECT_EQ(runs[0].text, "re");
+  EXPECT_EQ(runs[0].style, EpdFontFamily::BOLD);
+  EXPECT_EQ(runs[1].x, 118);
+  EXPECT_EQ(runs[1].text, "ader");
+  EXPECT_EQ(runs[1].style, EpdFontFamily::REGULAR);
+}
+
+TEST(FocusReadingText, DrawsTheRegularSuffixFirstForRtlClippings) {
+  struct Run {
+    int x;
+    std::string text;
+    EpdFontFamily::Style style;
+  };
+  std::vector<Run> runs;
+
+  ASSERT_TRUE(FocusReadingText::drawSplitRuns(
+      "reader", 6, 2, 100, 18, EpdFontFamily::REGULAR, true,
+      [&runs](const int x, const char* text, const EpdFontFamily::Style style) { runs.push_back({x, text, style}); }));
+
+  ASSERT_EQ(runs.size(), 2U);
+  EXPECT_EQ(runs[0].x, 100);
+  EXPECT_EQ(runs[0].text, "ader");
+  EXPECT_EQ(runs[0].style, EpdFontFamily::REGULAR);
+  EXPECT_EQ(runs[1].x, 118);
+  EXPECT_EQ(runs[1].text, "re");
+  EXPECT_EQ(runs[1].style, EpdFontFamily::BOLD);
+}
+
+TEST(FocusReadingText, PreservesAnEndBoundaryAsABoldRun) {
+  struct Run {
+    int x;
+    std::string text;
+    EpdFontFamily::Style style;
+  };
+  std::vector<Run> runs;
+
+  ASSERT_TRUE(FocusReadingText::drawSplitRuns(
+      "reader", 6, 6, 100, 18, EpdFontFamily::REGULAR, false,
+      [&runs](const int x, const char* text, const EpdFontFamily::Style style) { runs.push_back({x, text, style}); }));
+
+  ASSERT_EQ(runs.size(), 2U);
+  EXPECT_EQ(runs[0].x, 100);
+  EXPECT_EQ(runs[0].text, "reader");
+  EXPECT_EQ(runs[0].style, EpdFontFamily::BOLD);
+  EXPECT_EQ(runs[1].x, 118);
+  EXPECT_EQ(runs[1].text, "");
+  EXPECT_EQ(runs[1].style, EpdFontFamily::REGULAR);
+}
+
 TEST(ClippingTextMatcher, RejectsAuthoredHyphensAndMismatchedInsertedSuffixes) {
   constexpr char token[] = "correctly";
   constexpr char authoredHyphenToken[] = "wellknown";
@@ -376,4 +441,23 @@ TEST(ClippingMatchTracker, TreatsDuplicateCandidatesForTheSameRangeAsUnique) {
   EXPECT_TRUE(matches.record(4, 6));
   EXPECT_FALSE(matches.record(4, 6));
   EXPECT_TRUE(matches.unique());
+}
+
+TEST(ClippingTextMatcher, RejectsCoincidentalShortPageBoundaryRuns) {
+  // Issue #720: a page ends in "and", matching only the start of a longer clipping.
+  EXPECT_FALSE(ClippingTextMatcher::isReliableRun(0, false, 1, 3));
+  EXPECT_FALSE(ClippingTextMatcher::isReliableRun(0, false, 2, 3));
+  // The inverse coincidence at the top of a page must not match a clipping tail.
+  EXPECT_FALSE(ClippingTextMatcher::isReliableRun(5, true, 1, 3));
+  EXPECT_FALSE(ClippingTextMatcher::isReliableRun(4, true, 2, 3));
+  EXPECT_FALSE(ClippingTextMatcher::isReliableRun(2, false, 1, 3));
+}
+
+TEST(ClippingTextMatcher, PreservesCompleteShortClippingsAndLongerRelayoutRuns) {
+  EXPECT_TRUE(ClippingTextMatcher::isReliableRun(0, true, 1, 1));
+  EXPECT_TRUE(ClippingTextMatcher::isReliableRun(0, true, 2, 2));
+  EXPECT_TRUE(ClippingTextMatcher::isReliableRun(0, false, 3, 3));
+  EXPECT_TRUE(ClippingTextMatcher::isReliableRun(4, true, 3, 3));
+  EXPECT_TRUE(ClippingTextMatcher::isReliableRun(4, false, 3, 3));
+  EXPECT_FALSE(ClippingTextMatcher::isReliableRun(0, false, 0, 3));
 }

@@ -21,6 +21,7 @@
 #include <string_view>
 #include <utility>
 
+#include "Epub/ReferencePageNavigation.h"
 #include "Epub/image/OptimizerCachePublish.h"
 #include "Epub/image/OptimizerIndex.h"
 #include "Epub/parsers/ContainerParser.h"
@@ -722,9 +723,7 @@ void Epub::releaseCssFileList() {
 }
 
 Epub::CssParseStatus Epub::parseCssFiles(const bool forceRebuild) const {
-  // Maximum CSS file size we'll attempt to parse (uncompressed)
-  // Larger files risk memory exhaustion on ESP32
-  constexpr size_t MAX_CSS_FILE_SIZE = 128 * 1024;  // 128KB
+  const size_t maxCssFileSize = CssParser::maxSourceBytes();
   // Minimum heap required before attempting CSS parsing
   constexpr size_t MIN_HEAP_FOR_CSS_PARSING = 64 * 1024;  // 64KB
 
@@ -816,8 +815,8 @@ Epub::CssParseStatus Epub::parseCssFiles(const bool forceRebuild) const {
     // Check CSS file size before decompressing - skip files that are too large
     size_t cssFileSize = 0;
     if (getItemSize(cssPath, &cssFileSize)) {
-      if (cssFileSize > MAX_CSS_FILE_SIZE) {
-        LOG_ERR("EBP", "CSS file too large (%zu bytes > %zu max), skipping: %s", cssFileSize, MAX_CSS_FILE_SIZE,
+      if (cssFileSize > maxCssFileSize) {
+        LOG_ERR("EBP", "CSS file too large (%zu bytes > %zu max), skipping: %s", cssFileSize, maxCssFileSize,
                 cssPath.c_str());
         continue;
       }
@@ -1443,9 +1442,15 @@ bool Epub::extractItemToFile(const std::string& itemHref, const std::string& des
     return false;
   }
 
+  const uint32_t start = millis();
   const bool success = readItemContentsToStream(itemHref, out, chunkSize);
+  const uint32_t written = millis();
+  const size_t bytes = out.size();
   out.flush();
   out.close();
+  LOG_DBG("EBP", "Extracted %s: ok=%d bytes=%u stream=%ums flush/close=%ums chunk=%u", itemHref.c_str(), success,
+          static_cast<unsigned>(bytes), static_cast<unsigned>(written - start),
+          static_cast<unsigned>(millis() - written), static_cast<unsigned>(chunkSize));
   if (!success) {
     Storage.remove(destPath.c_str());
   }
@@ -1698,6 +1703,7 @@ bool Epub::loadXLocations() {
   totalWords = 0;
   wordsPerReferencePage = 0;
   totalReferencePages = 0;
+  referencePagesUseCharacters = false;
   xLocationsLoaded = false;
 
   if (!bookMetadataCache || !bookMetadataCache->isLoaded()) {
@@ -1805,6 +1811,7 @@ bool Epub::loadXLocations() {
   totalWords = parsedReferenceUnits;
   wordsPerReferencePage =
       parsedReferenceUnitsPerPage > 0 ? parsedReferenceUnitsPerPage : kDefaultReferenceCharactersPerPage;
+  referencePagesUseCharacters = useCharacterReferencePages;
   totalReferencePages = parsedTotalReferencePages;
   if (totalReferencePages == 0 && totalWords > 0 && wordsPerReferencePage > 0) {
     totalReferencePages = (totalWords + wordsPerReferencePage - 1) / wordsPerReferencePage;
@@ -2141,19 +2148,19 @@ float Epub::calculateProgress(const int currentSpineIndex, const float currentSp
   return clampUnit((completedBeforeSpine + completedInSpine) / static_cast<float>(totalLocations));
 }
 
-bool Epub::resolveLocationPercentToSpineProgress(const int percent, int& spineIndex, float& spineProgress) const {
+bool Epub::resolveLocationPercentToSpineProgress(const float percent, int& spineIndex, float& spineProgress) const {
   if (!xLocationsLoaded || totalLocations == 0 || locationSpineCount == 0) {
     return false;
   }
 
-  const int clampedPercent = std::max(0, std::min(100, percent));
-  if (clampedPercent <= 0) {
+  const float clampedPercent = std::max(0.0f, std::min(100.0f, percent));
+  if (clampedPercent <= 0.0f) {
     spineIndex = 0;
     spineProgress = 0.0f;
     return true;
   }
 
-  if (clampedPercent >= 100) {
+  if (clampedPercent >= 100.0f) {
     for (int i = static_cast<int>(locationSpineCount) - 1; i >= 0; i--) {
       const LocationSpineEntry& entry = locationSpine[static_cast<size_t>(i)];
       if (entry.startLocation > 0 && entry.endLocation >= entry.startLocation) {
@@ -2165,8 +2172,7 @@ bool Epub::resolveLocationPercentToSpineProgress(const int percent, int& spineIn
     return false;
   }
 
-  const float targetCompletedLocations =
-      static_cast<float>(totalLocations) * static_cast<float>(clampedPercent) / 100.0f;
+  const float targetCompletedLocations = static_cast<float>(totalLocations) * clampedPercent / 100.0f;
   for (size_t i = 0; i < locationSpineCount; i++) {
     const LocationSpineEntry& entry = locationSpine[i];
     if (entry.startLocation == 0 || entry.endLocation < entry.startLocation) {
@@ -2208,6 +2214,28 @@ bool Epub::resolveReferencePage(const int currentSpineIndex, const float current
   currentPage = std::min<uint32_t>(completedWords / wordsPerReferencePage + 1, totalReferencePages);
   pageCount = totalReferencePages;
   return true;
+}
+
+bool Epub::hasStablePageNumbers() const {
+  return xLocationsLoaded && wordsPerReferencePage > 0 && totalReferencePages > 0 &&
+         EpubNavigation::hasResolvableReferencePageRanges(totalWords, locationSpine.get(), locationSpineCount);
+}
+
+bool Epub::resolveReferencePageToSpineProgress(const uint32_t page, int& spineIndex, float& spineProgress) const {
+  if (!hasStablePageNumbers()) return false;
+  return EpubNavigation::resolveReferencePageToSpineProgress(page, totalReferencePages, totalWords,
+                                                             wordsPerReferencePage, locationSpine.get(),
+                                                             locationSpineCount, spineIndex, spineProgress);
+}
+
+bool Epub::resolveReferencePageTarget(const uint32_t page, int& spineIndex, float& spineProgress,
+                                      uint32_t& spineUnitOffset, uint32_t& spineUnitCount, bool& usesCharacters) const {
+  if (!hasStablePageNumbers()) return false;
+  const bool resolved = EpubNavigation::resolveReferencePageToSpineProgress(
+      page, totalReferencePages, totalWords, wordsPerReferencePage, locationSpine.get(), locationSpineCount, spineIndex,
+      spineProgress, &spineUnitOffset, &spineUnitCount);
+  usesCharacters = referencePagesUseCharacters;
+  return resolved;
 }
 
 int Epub::resolveHrefToSpineIndex(const std::string& href) const {

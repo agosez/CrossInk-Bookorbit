@@ -69,8 +69,8 @@ constexpr size_t MAX_SELECTOR_LENGTH = 256;
 constexpr size_t CSS_LENGTH_FIELD_COUNT = 11;
 constexpr size_t CSS_LENGTH_BYTES = sizeof(float) + sizeof(uint8_t);
 constexpr size_t CSS_FIXED_STYLE_BYTES = 5 * sizeof(uint8_t) + (CSS_LENGTH_FIELD_COUNT * CSS_LENGTH_BYTES) +
-                                         4 * sizeof(uint8_t) + 2 * sizeof(uint8_t) + sizeof(uint32_t);
-static_assert(CSS_FIXED_STYLE_BYTES == 70,
+                                         4 * sizeof(uint8_t) + 3 * sizeof(uint8_t) + sizeof(uint32_t);
+static_assert(CSS_FIXED_STYLE_BYTES == 71,
               "CssStyle cache payload changed; update read/writeCssStylePayload and bump CSS_CACHE_VERSION");
 
 // Check if character is CSS whitespace
@@ -520,6 +520,10 @@ void CssParser::parseDeclarationIntoStyle(std::string_view decl, CssStyle& style
       style.verticalAlign = CssVerticalAlign::Sub;
       style.defined.verticalAlign = 1;
     }
+  } else if (iequalsAscii(name, "list-style-type")) {
+    const std::string_view listStyleValue = stripTrailingImportant(value);
+    style.listStyleType = iequalsAscii(listStyleValue, "none") ? CssListStyleType::None : CssListStyleType::Disc;
+    style.defined.listStyleType = 1;
   } else if (iequalsAscii(name, "page-break-before") || iequalsAscii(name, "break-before")) {
     bool pageBreakBefore = false;
     if (tryInterpretCssPageBreak(value, pageBreakBefore)) {
@@ -576,6 +580,43 @@ bool CssParser::selectorMatchesElement(std::string_view selector, std::string_vi
 
 // Rule processing
 
+CssParser::ParsedRule* CssParser::findPsramParsedRule(const std::string_view selector) const {
+  if (!parsedRuleBuckets_) return nullptr;
+  const size_t bucket = SvHash{}(selector) % PARSED_RULE_BUCKETS;
+  for (auto* rule = parsedRuleBuckets_[bucket]; rule; rule = rule->bucketNext) {
+    if (SvEqual{}(rule->selector, selector)) return rule;
+  }
+  return nullptr;
+}
+
+bool CssParser::addPsramParsedRule(const std::string_view selector, const CssStyle& style) {
+  if (!parsedRuleBuckets_) {
+    if (!parsedRuleArena_.init(4096)) return false;  // Arena logs fallible allocation failures.
+    parsedRuleBuckets_ = arenaNewArray<ParsedRule*>(parsedRuleArena_, PARSED_RULE_BUCKETS);
+    if (!parsedRuleBuckets_) {
+      LOG_ERR("CSS", "Failed to allocate PSRAM rule buckets");
+      return false;
+    }
+  }
+  const auto checkpoint = parsedRuleArena_.save();
+  auto* key = static_cast<char*>(parsedRuleArena_.alloc(selector.size(), alignof(char)));
+  auto* rule = arenaNew<ParsedRule>(parsedRuleArena_);
+  if (!key || !rule) {
+    parsedRuleArena_.restore(checkpoint);
+    LOG_ERR("CSS", "Failed to allocate PSRAM CSS rule (%u existing)", static_cast<unsigned>(psramParsedRuleCount_));
+    return false;
+  }
+  memcpy(key, selector.data(), selector.size());
+  rule->selector = {key, selector.size()};
+  rule->style = style;
+  const size_t bucket = SvHash{}(selector) % PARSED_RULE_BUCKETS;
+  rule->bucketNext = parsedRuleBuckets_[bucket];
+  rule->next = parsedRuleHead_;
+  parsedRuleBuckets_[bucket] = parsedRuleHead_ = rule;
+  ++psramParsedRuleCount_;
+  return true;
+}
+
 bool CssParser::processRuleBlockWithStyle(std::string_view selectorGroup, const CssStyle& style) {
   // Skip rules that don't define any supported properties to save RAM.
   if (!style.defined.anySet()) {
@@ -583,7 +624,7 @@ bool CssParser::processRuleBlockWithStyle(std::string_view selectorGroup, const 
   }
 
   // Check if we've reached the rule limit before processing
-  if (rulesBySelector_.size() >= MAX_RULES) {
+  if (parsedRuleCount() >= MAX_RULES) {
     LOG_ERR("CSS", "Reached max rules limit (%zu), treating CSS parse as incomplete", MAX_RULES);
     return false;
   }
@@ -601,7 +642,7 @@ bool CssParser::processRuleBlockWithStyle(std::string_view selectorGroup, const 
     }
     LOG_ERR("CSS", "Stopping CSS parse before rule allocation (free=%u maxAlloc=%u rules=%u)",
             static_cast<unsigned>(freeHeap), static_cast<unsigned>(largestBlock),
-            static_cast<unsigned>(rulesBySelector_.size()));
+            static_cast<unsigned>(parsedRuleCount()));
     return false;
   };
   forEachDelimitedToken(
@@ -655,7 +696,7 @@ bool CssParser::processRuleBlockWithStyle(std::string_view selectorGroup, const 
         }
 
         // Skip if this would exceed the rule limit
-        if (rulesBySelector_.size() >= MAX_RULES) {
+        if (parsedRuleCount() >= MAX_RULES) {
           LOG_ERR("CSS", "Reached max rules limit, treating CSS parse as incomplete");
           limitReached = true;
           return;
@@ -663,6 +704,14 @@ bool CssParser::processRuleBlockWithStyle(std::string_view selectorGroup, const 
 
         // Store or merge with existing. Hash/equal are case-insensitive, so two
         // selectors that differ only in ASCII case collide on insert and merge.
+        if (usePsramParsedRules_) {
+          if (auto* existing = findPsramParsedRule(sel)) {
+            existing->style.applyOver(style);
+          } else if (!hasHeapForRuleGrowth() || !addPsramParsedRule(sel, style)) {
+            limitReached = true;
+          }
+          return;
+        }
         auto it = rulesBySelector_.find(sel);
         if (it != rulesBySelector_.end()) {
           it->second.applyOver(style);
@@ -821,7 +870,7 @@ bool CssParser::loadFromStream(FsFile& source) {
 
   if (stopParsing) {
     LOG_ERR("CSS", "CSS parse stopped after %zu bytes with %zu selector rules and %zu descendant rules loaded",
-            totalRead, rulesBySelector_.size(), descendantRules_.size());
+            totalRead, parsedRuleCount(), descendantRules_.size());
     return false;
   }
 
@@ -940,7 +989,8 @@ bool CssParser::writeCssStylePayload(FsFile& file, const CssStyle& style) {
       !writeByte(static_cast<uint8_t>(style.backgroundBlack ? 1 : 0)) ||
       !writeByte(static_cast<uint8_t>(style.verticalAlign)) || !writeByte(static_cast<uint8_t>(style.direction)) ||
       !writeByte(static_cast<uint8_t>(style.pageBreakBefore ? 1 : 0)) ||
-      !writeByte(static_cast<uint8_t>(style.pageBreakAfter ? 1 : 0))) {
+      !writeByte(static_cast<uint8_t>(style.pageBreakAfter ? 1 : 0)) ||
+      !writeByte(static_cast<uint8_t>(style.listStyleType))) {
     return false;
   }
 
@@ -964,6 +1014,7 @@ bool CssParser::writeCssStylePayload(FsFile& file, const CssStyle& style) {
   if (style.defined.backgroundBlack) definedBits |= 1 << 16;
   if (style.defined.verticalAlign) definedBits |= 1 << 17;
   if (style.defined.direction) definedBits |= 1 << 18;
+  if (style.defined.listStyleType) definedBits |= 1 << 19;
   if (style.defined.pageBreakBefore) definedBits |= 1 << 20;
   if (style.defined.pageBreakAfter) definedBits |= 1 << 21;
   if (style.defined.fontVariantCaps) definedBits |= 1 << 22;
@@ -1013,6 +1064,11 @@ bool CssParser::readCssStylePayload(FsFile& file, CssStyle& style) {
   style.pageBreakBefore = pageBreakVal != 0;
   if (file.read(&pageBreakVal, 1) != 1) return false;
   style.pageBreakAfter = pageBreakVal != 0;
+  uint8_t listStyleTypeVal = 0;
+  if (file.read(&listStyleTypeVal, 1) != 1 || listStyleTypeVal > static_cast<uint8_t>(CssListStyleType::None)) {
+    return false;
+  }
+  style.listStyleType = static_cast<CssListStyleType>(listStyleTypeVal);
 
   uint32_t definedBits = 0;
   if (file.read(&definedBits, sizeof(definedBits)) != sizeof(definedBits)) return false;
@@ -1035,6 +1091,7 @@ bool CssParser::readCssStylePayload(FsFile& file, CssStyle& style) {
   style.defined.backgroundBlack = (definedBits & 1 << 16) != 0;
   style.defined.verticalAlign = (definedBits & 1 << 17) != 0;
   style.defined.direction = (definedBits & 1 << 18) != 0;
+  style.defined.listStyleType = (definedBits & 1 << 19) != 0;
   style.defined.pageBreakBefore = (definedBits & 1 << 20) != 0;
   style.defined.pageBreakAfter = (definedBits & 1 << 21) != 0;
   style.defined.fontVariantCaps = (definedBits & 1 << 22) != 0;
@@ -1079,6 +1136,10 @@ bool CssParser::lookupArenaRule(std::string_view selector, CssStyle& outStyle) c
 }
 
 bool CssParser::lookupRule(std::string_view selector, CssStyle& outStyle) const {
+  if (const auto* rule = findPsramParsedRule(selector)) {
+    outStyle = rule->style;
+    return true;
+  }
   if (auto it = rulesBySelector_.find(selector); it != rulesBySelector_.end()) {
     outStyle = it->second;
     return true;
@@ -1210,7 +1271,7 @@ bool CssParser::saveToCache(const bool complete) const {
   writeByte(static_cast<uint8_t>(complete ? 0 : CSS_CACHE_FLAG_PARTIAL));
 
   // Write rule count
-  const auto ruleCount = static_cast<uint16_t>(rulesBySelector_.size());
+  const auto ruleCount = static_cast<uint16_t>(parsedRuleCount());
   writeBytes(&ruleCount, sizeof(ruleCount));
 
   Arena indexArena;
@@ -1233,18 +1294,24 @@ bool CssParser::saveToCache(const bool complete) const {
   }
 
   // Write each simple rule: selector string + CssStyle fields
-  for (const auto& pair : rulesBySelector_) {
+  auto writeRule = [&](const std::string_view selector, const CssStyle& style) {
     const uint32_t ruleOffset = file.position();
-    const auto selectorLen = static_cast<uint16_t>(pair.first.size());
-    if (!writeBytes(&selectorLen, sizeof(selectorLen)) || !writeBytes(pair.first.data(), selectorLen) ||
-        !writeCssStylePayload(file, pair.second)) {
+    const auto selectorLen = static_cast<uint16_t>(selector.size());
+    if (!writeBytes(&selectorLen, sizeof(selectorLen)) || !writeBytes(selector.data(), selectorLen) ||
+        !writeCssStylePayload(file, style)) {
       writeOk = false;
-      break;
+      return;
     }
-    if (!indexEntries.push_back({selectorHash(pair.first), ruleOffset})) {
+    if (!indexEntries.push_back({selectorHash(selector), ruleOffset})) {
       writeOk = false;
-      break;
     }
+  };
+  for (const auto& pair : rulesBySelector_) {
+    writeRule(pair.first, pair.second);
+    if (!writeOk) break;
+  }
+  for (const auto* rule = parsedRuleHead_; rule && writeOk; rule = rule->next) {
+    writeRule(rule->selector, rule->style);
   }
 
   // Write descendant rules: count, then (ancestorSelector, subjectSelector, CssStyle) per entry

@@ -52,6 +52,7 @@ class HalStorage {
   bool disconnectUsbDriveHost();
   void endUsbDrive();
   UsbDriveState usbDriveState() const;
+  bool usbDriveHostSuspended() const;
 
   HalFile open(const char* path, const oflag_t oflag = O_RDONLY);
   bool mkdir(const char* path, const bool pFlag = true);
@@ -128,6 +129,9 @@ class HalFile : public Print {
   int read(void* buf, size_t count);
   int read();  // read a single byte
   size_t write(const void* buf, size_t count);
+  // Print's default bulk writer calls write(uint8_t) once per byte. Preserve
+  // chunked ZIP/file transfers when this handle is passed through Print&.
+  size_t write(const uint8_t* buf, size_t count) override { return write(static_cast<const void*>(buf), count); }
   size_t write(uint8_t b) override;
   bool sync();
   bool rename(const char* newPath);

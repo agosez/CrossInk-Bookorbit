@@ -1,4 +1,6 @@
 #pragma once
+#include <HalDisplay.h>
+
 #include <array>
 #include <functional>
 #include <optional>
@@ -37,9 +39,9 @@ class HomeActivity final : public Activity {
   bool recentsLoading = false;
   bool recentsLoaded = false;
   bool firstRenderDone = false;
-  // Silent restarts keep the panel's previous frame. The first Home paint must
-  // use a clean waveform so X4 panels do not diff against a WiFi screen.
-  bool initialFullRefresh = false;
+  // Silent restarts keep the panel's previous frame. The first Home paint may
+  // need a clean waveform so X4 panels do not diff against a WiFi screen.
+  HalDisplay::RefreshMode initialRefreshMode = HalDisplay::FAST_REFRESH;
   bool hasReadingStats = false;
   bool hasBookmarks = false;
   bool hasClippings = false;
@@ -128,10 +130,11 @@ class HomeActivity final : public Activity {
 
  public:
   explicit HomeActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                        HomeMenuItem initialMenuItemValue = HomeMenuItem::NONE, bool initialFullRefreshValue = false,
+                        HomeMenuItem initialMenuItemValue = HomeMenuItem::NONE,
+                        HalDisplay::RefreshMode initialRefreshModeValue = HalDisplay::FAST_REFRESH,
                         std::string initialBookPathValue = {})
       : Activity("Home", renderer, mappedInput),
-        initialFullRefresh(initialFullRefreshValue),
+        initialRefreshMode(initialRefreshModeValue),
         initialMenuItem(initialMenuItemValue),
         initialBookPath(std::move(initialBookPathValue)) {}
   void onEnter() override;

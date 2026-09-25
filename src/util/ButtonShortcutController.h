@@ -137,14 +137,6 @@ class ButtonShortcutController {
     toggleQuickLock(nowMs, trigger);
     return true;
   }
-  void restoreQuickLock(uint32_t nowMs, QuickLockTrigger trigger) {
-    if (!quickLockState_.isLocked()) {
-      // Older state files did not retain the activating shortcut. Keep their
-      // established Power-release escape route for this one migration wake.
-      toggleQuickLock(nowMs, trigger == QuickLockTrigger::None ? QuickLockTrigger::ShortPower : trigger,
-                      trigger == QuickLockTrigger::LongPower);
-    }
-  }
   bool shouldQuickLockSleep(uint32_t nowMs, uint32_t timeoutMs) const {
     return quickLockState_.shouldSleep(nowMs, timeoutMs);
   }

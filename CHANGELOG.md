@@ -7,11 +7,20 @@ on; for everything inherited from upstream, see the
 
 ## [Unreleased]
 
-Based on CrossInk v1.5.1.
+Based on CrossInk v1.6.0.
 
 ### Added
 
 - The BookOrbit catalog now shows the server's SmartScopes section, alongside Collections, Libraries, Authors and Series. The section is badged with how many scopes you have, the way the other sections are, and an account with no scopes simply shows an empty section.
+
+### Fixed
+
+- Choosing BookOrbit Sync from the reader menu without an account set up now opens the BookOrbit settings, instead of doing nothing. The shortcut already did this; the menu entry now behaves the same.
+- Bookmarks and highlights sent to BookOrbit now point at the exact character they start on. The position written for the server was one character past it, and a bookmark on the very first character of a paragraph fell back to the whole paragraph.
+
+### Security
+
+- The BookOrbit login is no longer sent to another server when a BookOrbit request is redirected. The catalog authenticates with its own headers rather than a password prompt, and those headers used to follow a redirect wherever it led; they now stay with your BookOrbit server, while the redirect itself is still followed.
 
 ## [v1.5.1+bookorbit.2] - 2026-09-21
 

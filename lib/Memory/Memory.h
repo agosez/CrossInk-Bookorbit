@@ -167,6 +167,53 @@ inline HeapByteBuffer makeAlignedByteBufferNoThrow(const size_t count, const Mem
 #endif
 }
 
+// Own one naturally aligned C++ object in an explicit ESP32 heap capability.
+// The object may be too large for the stack and its selected heap allocation is
+// fallible, while the backing buffer keeps matching heap_caps_free cleanup on
+// every return path. This owner intentionally does not call any object-specific
+// shutdown method; callers retain that lifecycle policy.
+template <typename T>
+class HeapObject final {
+ public:
+  HeapObject() = default;
+  HeapObject(const HeapObject&) = delete;
+  HeapObject& operator=(const HeapObject&) = delete;
+
+  ~HeapObject() { reset(); }
+
+  bool init(const MemoryPool pool) {
+    if (object || alignof(T) > alignof(std::max_align_t)) return false;
+
+    storage = makeAlignedByteBufferNoThrow(sizeof(T), pool);
+    if (!storage) return false;
+
+    // Placement new constructs in the capability-specific backing storage; it
+    // performs no allocation and is safe because storage has max alignment.
+    object = ::new (static_cast<void*>(storage.get())) T();
+    return true;
+  }
+
+  T* get() { return object; }
+  const T* get() const { return object; }
+  T* operator->() { return object; }
+  const T* operator->() const { return object; }
+  explicit operator bool() const { return object != nullptr; }
+
+  MemoryPool pool() const { return byteBufferPool(storage.get()); }
+
+  void reset() {
+    if (object) {
+      object->~T();
+      object = nullptr;
+    }
+    storage.reset();
+  }
+
+ private:
+  HeapByteBuffer storage;
+  T* object{nullptr};
+};
+
 // Helper struct to call a cleanup function on exit from any scope.
 // Use with a lambda to avoid unnecessary allocations from std::function/std::bind:
 // Example:

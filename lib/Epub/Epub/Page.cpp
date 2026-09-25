@@ -486,14 +486,14 @@ void Page::renderImages(GfxRenderer& renderer, const int fontId, const int xOffs
 }
 
 void Page::renderWithImagePlaceholders(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset,
-                                       const bool foregroundBlack) const {
+                                       const bool foregroundBlack, const bool renderCachedImages) const {
   renderText(renderer, fontId, xOffset, yOffset, foregroundBlack);
   for (const auto& element : elements) {
     if (element->getTag() != TAG_PageImage) {
       continue;
     }
     auto& pageImage = static_cast<PageImage&>(*element);
-    if (pageImage.getImageBlock().needsDecode()) {
+    if (!renderCachedImages || pageImage.getImageBlock().needsDecode()) {
       pageImage.renderPlaceholder(renderer, xOffset, yOffset, foregroundBlack);
     } else {
       pageImage.render(renderer, fontId, xOffset, yOffset, foregroundBlack);

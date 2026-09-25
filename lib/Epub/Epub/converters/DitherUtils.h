@@ -10,6 +10,9 @@ inline const uint8_t bayer4x4[4][4] = {
     {15, 7, 13, 5},
 };
 
+// Divide the full 8-bit range into four equally sized display levels.
+inline uint8_t quantizeGrayTo4Level(uint8_t gray) { return gray >> 6; }
+
 // Apply Bayer dithering and quantize to 4 levels (0-3)
 // Stateless - works correctly with any pixel processing order
 inline uint8_t applyBayerDither4Level(uint8_t gray, int x, int y) {

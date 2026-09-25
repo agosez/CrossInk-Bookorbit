@@ -175,3 +175,18 @@ TEST(TouchReaderPreviewModel, NextCaptureReleasesPreviousSourceBlocks) {
   model.renderSource(renderer, 1, true);
   EXPECT_TRUE(renderer.drawCalls.empty());
 }
+
+TEST(TouchReaderPreviewModel, KeepsBoundedPreviewWhenPageHasMoreLinesThanSnapshot) {
+  Page page;
+  for (size_t i = 0; i < TouchReaderPreviewModel::LINE_CAPACITY + 1; ++i) {
+    page.elements.push_back(std::make_unique<PageLine>(makeLine({"word"}), 0, static_cast<int16_t>(i * 10)));
+  }
+
+  GfxRenderer renderer;
+  TouchReaderPreviewModel model;
+  ASSERT_TRUE(model.capture(page, renderer, 1, 100));
+
+  model.renderText(renderer, 2, 0, 0, 40, 100, 0, static_cast<uint8_t>(CssTextAlign::Right), false, false, true);
+  EXPECT_EQ(renderer.drawCalls.size(), TouchReaderPreviewModel::LINE_CAPACITY);
+  EXPECT_GT(renderer.drawCalls.back().x, 0);
+}

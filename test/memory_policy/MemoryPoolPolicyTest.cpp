@@ -1,4 +1,5 @@
 #include <Memory.h>
+#include <MemoryBudget.h>
 #include <PoolBudget.h>
 #include <gtest/gtest.h>
 
@@ -33,6 +34,101 @@ TEST_F(MemoryPoolPolicyTest, AdmissionDoesNotGuaranteeAllocation) {
   EXPECT_FALSE(MemoryBudget::canAllocatePsram(1));
   EXPECT_FALSE(makePsramByteBufferNoThrow(1));
   EXPECT_FALSE(makeInternalByteBufferNoThrow(0));
+}
+
+TEST_F(MemoryPoolPolicyTest, JpegDecoderPrefersPsramWhileRetainingInternalReserve) {
+  constexpr size_t decoderBytes = MemoryBudget::JPEG_DECODER_APPROX_BYTES;
+  fakeheap::internal.free = MemoryBudget::IMAGE_DECODER_HEADROOM;
+  fakeheap::internal.largest = 1;
+  fakeheap::external.free = MemoryBudget::EPUB_PSRAM_RESERVE + decoderBytes;
+  fakeheap::external.largest = decoderBytes;
+
+  EXPECT_EQ(MemoryBudget::jpegDecoderPool(decoderBytes), MemoryPool::Psram);
+}
+
+TEST_F(MemoryPoolPolicyTest, JpegDecoderRejectsPsramThatWouldConsumeInternalReserve) {
+  constexpr size_t decoderBytes = MemoryBudget::JPEG_DECODER_APPROX_BYTES;
+  fakeheap::internal.free = MemoryBudget::IMAGE_DECODER_HEADROOM - 1;
+  fakeheap::internal.largest = 1;
+  fakeheap::external.free = MemoryBudget::EPUB_PSRAM_RESERVE + decoderBytes;
+  fakeheap::external.largest = decoderBytes;
+
+  EXPECT_EQ(MemoryBudget::jpegDecoderPool(decoderBytes), MemoryPool::None);
+}
+
+TEST_F(MemoryPoolPolicyTest, JpegDecoderUsesUnchangedInternalThresholdWhenPsramIsUnavailable) {
+  constexpr size_t decoderBytes = MemoryBudget::JPEG_DECODER_APPROX_BYTES;
+  fakeheap::reset(false);
+  fakeheap::internal.free = MemoryBudget::EPUB_INLINE_JPEG_MIN_FREE;
+  fakeheap::internal.largest = MemoryBudget::EPUB_INLINE_JPEG_MIN_MAX_ALLOC;
+
+  EXPECT_EQ(MemoryBudget::jpegDecoderPool(decoderBytes), MemoryPool::Internal);
+  fakeheap::internal.largest = MemoryBudget::EPUB_INLINE_JPEG_MIN_MAX_ALLOC - 1;
+  EXPECT_EQ(MemoryBudget::jpegDecoderPool(decoderBytes), MemoryPool::None);
+}
+
+TEST_F(MemoryPoolPolicyTest, JpegDecoderRejectsFragmentedPsramAndSafelyFallsBackToInternal) {
+  constexpr size_t decoderBytes = MemoryBudget::JPEG_DECODER_APPROX_BYTES;
+  fakeheap::internal.free = MemoryBudget::EPUB_INLINE_JPEG_MIN_FREE;
+  fakeheap::internal.largest = MemoryBudget::EPUB_INLINE_JPEG_MIN_MAX_ALLOC;
+  fakeheap::external.free = MemoryBudget::EPUB_PSRAM_RESERVE + decoderBytes;
+  fakeheap::external.largest = decoderBytes - 1;
+
+  EXPECT_EQ(MemoryBudget::jpegDecoderPool(decoderBytes), MemoryPool::Internal);
+}
+
+TEST_F(MemoryPoolPolicyTest, InlineImageAdmissionUsesPsramOnlyForJpeg) {
+  fakeheap::internal.free = MemoryBudget::IMAGE_DECODER_HEADROOM;
+  fakeheap::internal.largest = 1;
+  fakeheap::external.free = MemoryBudget::EPUB_PSRAM_RESERVE + MemoryBudget::JPEG_DECODER_APPROX_BYTES;
+  fakeheap::external.largest = MemoryBudget::JPEG_DECODER_APPROX_BYTES;
+
+  EXPECT_TRUE(MemoryBudget::hasHeapForEpubInlineImage("TEST", "image.jpg"));
+  EXPECT_TRUE(MemoryBudget::hasHeapForEpubInlineImage("TEST", "image.JPEG"));
+  EXPECT_FALSE(MemoryBudget::hasHeapForEpubInlineImage("TEST", "image.png"));
+
+  fakeheap::internal.free = MemoryBudget::EPUB_INLINE_IMAGE_MIN_FREE;
+  fakeheap::internal.largest = MemoryBudget::EPUB_INLINE_IMAGE_MIN_MAX_ALLOC;
+  EXPECT_TRUE(MemoryBudget::hasHeapForEpubInlineImage("TEST", "image.png"));
+
+  fakeheap::internal.free = MemoryBudget::EPUB_OPTIMIZER_PXC_MIN_FREE - 1;
+  fakeheap::internal.largest = MemoryBudget::EPUB_OPTIMIZER_PXC_MIN_MAX_ALLOC;
+  EXPECT_FALSE(MemoryBudget::hasHeapForOptimizerPxcImage("TEST", "image.pxc"));
+  fakeheap::internal.free = MemoryBudget::EPUB_OPTIMIZER_PXC_MIN_FREE;
+  EXPECT_TRUE(MemoryBudget::hasHeapForOptimizerPxcImage("TEST", "image.pxc"));
+}
+
+namespace {
+struct DecoderOwnerProbe {
+  static inline int destructed = 0;
+  ~DecoderOwnerProbe() { ++destructed; }
+};
+}  // namespace
+
+TEST_F(MemoryPoolPolicyTest, CapabilityObjectOwnerDestroysAndFreesItsPsramObject) {
+  DecoderOwnerProbe::destructed = 0;
+  {
+    HeapObject<DecoderOwnerProbe> decoder;
+    ASSERT_TRUE(decoder.init(MemoryPool::Psram));
+    EXPECT_EQ(decoder.pool(), MemoryPool::Psram);
+    EXPECT_EQ(fakeheap::live.size(), 1u);
+  }
+  EXPECT_EQ(DecoderOwnerProbe::destructed, 1);
+}
+
+TEST_F(MemoryPoolPolicyTest, FailedPsramObjectAllocationLeavesSafeInternalFallbackAvailable) {
+  DecoderOwnerProbe::destructed = 0;
+  fakeheap::internal.free = MemoryBudget::EPUB_INLINE_JPEG_MIN_FREE;
+  fakeheap::internal.largest = MemoryBudget::EPUB_INLINE_JPEG_MIN_MAX_ALLOC;
+  fakeheap::external.fail = 1;
+  {
+    HeapObject<DecoderOwnerProbe> decoder;
+    EXPECT_FALSE(decoder.init(MemoryPool::Psram));
+    EXPECT_TRUE(MemoryBudget::canUseInternalHeapForJpegDecoder(byteHeapSnapshot(MemoryPool::Internal)));
+    ASSERT_TRUE(decoder.init(MemoryPool::Internal));
+    EXPECT_EQ(decoder.pool(), MemoryPool::Internal);
+  }
+  EXPECT_EQ(DecoderOwnerProbe::destructed, 1);
 }
 
 #include <Arena.h>

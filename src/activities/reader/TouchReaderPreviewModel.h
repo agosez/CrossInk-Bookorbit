@@ -28,17 +28,17 @@ class TouchReaderPreviewModel {
         previousElementWasLine = false;
         continue;
       }
-      if (lineCount >= lines.size()) {
-        clear();
-        return false;
-      }
+      if (lineCount >= lines.size()) break;
       const auto& pageLine = static_cast<const PageLine&>(*element);
       const auto& block = pageLine.getBlock();
       if (!block) continue;
-      if (wordCount + block->wordCount() > words.size()) {
-        clear();
-        return false;
+      if (wordCount + block->wordCount() > words.size()) break;
+
+      size_t blockTextSize = 0;
+      for (uint16_t i = 0; i < block->wordCount(); ++i) {
+        blockTextSize += static_cast<size_t>(block->wordTextLen(i)) + 1U;
       }
+      if (blockTextSize > text.size() - textSize) break;
 
       Line& line = lines[lineCount++];
       line.x = pageLine.xPos;
@@ -56,10 +56,6 @@ class TouchReaderPreviewModel {
 
       for (uint16_t i = 0; i < block->wordCount(); ++i) {
         const uint16_t textLength = block->wordTextLen(i);
-        if (textSize + textLength + 1U > text.size()) {
-          clear();
-          return false;
-        }
         Word& word = words[wordCount++];
         word.textOffset = textSize;
         word.x = block->wordXpos(i);

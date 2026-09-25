@@ -22,11 +22,9 @@ constexpr bool hasCompleteWindow(const bool enabled, const uint16_t startTimeOfD
          startTimeOfDay != endTimeOfDay;
 }
 
-// Network transitions are silent restarts for memory recovery, but their
-// frontlight should still follow the user's wake preference.
-constexpr bool shouldPreserveLightAcrossRestart(const bool isSilentReboot, const bool followsWakeLightPolicy) {
-  return isSilentReboot && !followsWakeLightPolicy;
-}
+// A silent restart is an internal recovery step, so it must preserve the
+// current frontlight state instead of applying wake or schedule policy.
+constexpr bool shouldPreserveLightAcrossRestart(const bool isSilentReboot) { return isSilentReboot; }
 
 constexpr bool shouldRestoreLightOnStart(const bool preserveLightAcrossRestart, const bool restoreOnWake,
                                          const bool wasLightOnBeforeSleep) {

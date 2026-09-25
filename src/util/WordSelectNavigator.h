@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "activities/reader/DictionaryWordParts.h"
+
 class GfxRenderer;
 class MappedInputManager;
 
@@ -45,19 +47,20 @@ class WordSelectNavigator {
     EpdFontFamily::Style style = EpdFontFamily::REGULAR;
     bool isIpa = false;
     int fontId = 0;  // resolved at extraction time; used by renderHighlight()
-    // Pack the display/lookup flags into the byte that already preceded
-    // focusBoundary so WordInfo remains 36 bytes on 32-bit targets.
-    bool isRtl : 1;
+    // Pack display and compound-separator metadata into the byte that already
+    // preceded focusBoundary so WordInfo remains 36 bytes on 32-bit targets.
+    uint8_t isRtl : 1;
     // The source layout placed this token directly beside the previous
     // selectable token without whitespace (for example adjacent CJK glyphs).
-    bool joinWithoutSpaceBefore : 1;
+    uint8_t joinWithoutSpaceBefore : 1;
     // Table rows interleave cells in visual order, so their line endings must
     // not participate in the body-text hyphen continuation heuristic.
-    bool isTableText : 1;
+    uint8_t isTableText : 1;
+    uint8_t compoundSeparatorBefore : 2;
     uint8_t focusBoundary = 0;
     uint16_t focusSuffixX = 0;
 
-    WordInfo() : isRtl(false), joinWithoutSpaceBefore(false), isTableText(false) {}
+    WordInfo() : isRtl(0), joinWithoutSpaceBefore(0), isTableText(0), compoundSeparatorBefore(0) {}
   };
 
   struct Row {

@@ -67,6 +67,8 @@ def emit_header(path, ident, data, *, original_len=None):
             row = ", ".join(f"0x{b:02x}" for b in data[i:i+16])
             h.write(f"  {row},\n")
         h.write("};\n\n")
+        etag = hashlib.sha256(data).hexdigest()
+        h.write(f'constexpr char {ident}ETag[] = "\\\"{etag}\\\"";\n')
         if original_len is None:
             h.write(f"constexpr size_t {ident}Size = {len(data)};\n")
         else:
@@ -88,7 +90,7 @@ def emit_gzip(path, ident, text):
     except ImportError:
         print("build_web: zopfli not installed, falling back to gzip -9 "
               "(+~2.7 KB firmware; pip install zopfli)")
-        gz = gzip.compress(raw, compresslevel=9)
+        gz = gzip.compress(raw, compresslevel=9, mtime=0)
     emit_header(path, ident, gz, original_len=len(text))
     return len(text), len(gz)
 

@@ -14,8 +14,19 @@ struct SdCardFontFileInfo {
 };
 
 struct SdCardFontFamilyInfo {
+  // Names/range summaries do not hydrate paths. Detail consumers call this once.
+  bool ensureDetails() const;
+  // Drop paths loaded from the persistent index while retaining the family
+  // summary. This lets streaming consumers bound RAM to one family at a time.
+  void releaseDetails() const;
+  uint8_t firstSize = 0, lastSize = 0;
+  uint32_t indexOffset = 0, indexBytes = 0, indexHash = 0;
+  uint16_t indexCount = 0;
+  // Rebuild-only source marker. It is not serialized and is irrelevant after
+  // the index has been loaded.
+  bool sourceVisibleRoot = false;
   std::string name;  // directory name, e.g. "NotoSansCJK"
-  std::vector<SdCardFontFileInfo> files;
+  mutable std::vector<SdCardFontFileInfo> files;
 
   const SdCardFontFileInfo* findFile(uint8_t size, uint8_t style = 0) const;
   const SdCardFontFileInfo* findClosestFile(uint8_t targetSize, uint8_t style = 0) const;
@@ -44,6 +55,12 @@ class SdCardFontRegistry {
   // Use lastDiscoveryFailed() to distinguish an empty card from an incomplete
   // scan caused by a recoverable directory-entry allocation failure.
   bool discover();
+  // Validate directory names/file sizes, then load names only from the index.
+  // A missing/stale index is rebuilt once; font contents are not probed on hits.
+  bool loadNames(bool checkInventory = false);
+  static void invalidateIndex();
+  bool needsRefresh() const;
+  uint32_t revision() const { return revision_; }
   bool lastDiscoveryFailed() const { return discoveryFailed_; }
   void clear();
 
@@ -53,13 +70,19 @@ class SdCardFontRegistry {
 
   const std::vector<SdCardFontFamilyInfo>& getFamilies() const { return families_; }
   const SdCardFontFamilyInfo* findFamily(const std::string& name) const;
+  const SdCardFontFamilyInfo* findSummary(const std::string& name) const;
   int getFamilyCount() const { return static_cast<int>(families_.size()); }
 
  private:
   std::vector<SdCardFontFamilyInfo> families_;  // sorted alphabetically
   bool discoveryFailed_ = false;
+  uint32_t revision_ = 0;
+  uint32_t inventoryGeneration_ = 0;
+  uint64_t inventoryFingerprint_ = 0;
+  bool inventoryKnown_ = false;
+  bool readIndex(uint64_t fingerprint);
 
-  static bool scanDirectory(const char* dirPath, SdCardFontFamilyInfo& family);
-  // Scan one root (e.g. "/.fonts"), append families to `out`, dedup by name.
-  static bool scanRoot(const char* rootPath, std::vector<SdCardFontFamilyInfo>& out);
+  // Rebuild the cache while retaining only family summaries and one directory
+  // entry at a time. Full paths are written straight to the cache file.
+  bool rebuildIndex(uint64_t fingerprint, uint32_t generation);
 };

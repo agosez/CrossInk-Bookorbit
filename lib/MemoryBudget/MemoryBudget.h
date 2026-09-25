@@ -138,6 +138,42 @@ inline bool isJpegSource(const char* source) {
   return endsWithIgnoreCase(source, ".jpg") || endsWithIgnoreCase(source, ".jpeg");
 }
 
+// JPEGDEC is a single transient object. On PSRAM devices its decoder buffers
+// can live externally, provided 16 KB of internal heap remains for parsing and
+// callbacks and 128 KB of PSRAM remains after the object. C3 retains the
+// established 36 KB free / 20 KB contiguous internal-heap gate.
+inline bool canUseInternalHeapForJpegDecoder(const ByteHeapSnapshot& internal) {
+  return admits(internal, {0, EPUB_INLINE_JPEG_MIN_MAX_ALLOC, EPUB_INLINE_JPEG_MIN_FREE});
+}
+
+inline MemoryPool jpegDecoderPoolForHeap(const size_t decoderBytes, const ByteHeapSnapshot& internal,
+                                         const ByteHeapSnapshot& psram) {
+  if (psram.total != 0 && admits(internal, {0, 0, IMAGE_DECODER_HEADROOM}) &&
+      admits(psram, {decoderBytes, decoderBytes, EPUB_PSRAM_RESERVE})) {
+    return MemoryPool::Psram;
+  }
+  return canUseInternalHeapForJpegDecoder(internal) ? MemoryPool::Internal : MemoryPool::None;
+}
+
+inline MemoryPool jpegDecoderPool(const size_t decoderBytes) {
+  return jpegDecoderPoolForHeap(decoderBytes, byteHeapSnapshot(MemoryPool::Internal),
+                                byteHeapSnapshot(MemoryPool::Psram));
+}
+
+inline bool hasHeapForJpegDecoder(const char* tag, const size_t decoderBytes, const char* source = nullptr) {
+  const auto internal = byteHeapSnapshot(MemoryPool::Internal);
+  const auto psram = byteHeapSnapshot(MemoryPool::Psram);
+  if (jpegDecoderPoolForHeap(decoderBytes, internal, psram) != MemoryPool::None) return true;
+
+  LOG_ERR(tag,
+          "Low heap for JPEG decoder (internal free=%u max=%u, psram free=%u max=%u, need internal %u or psram "
+          "%u + reserve %u); suppressing %s",
+          static_cast<unsigned>(internal.free), static_cast<unsigned>(internal.largest),
+          static_cast<unsigned>(psram.free), static_cast<unsigned>(psram.largest), EPUB_INLINE_JPEG_MIN_FREE,
+          static_cast<unsigned>(decoderBytes), static_cast<unsigned>(EPUB_PSRAM_RESERVE), source ? source : "");
+  return false;
+}
+
 inline HeapRequirement epubInlineImageRequirementForSource(const char* source) {
   if (isJpegSource(source)) {
     return {EPUB_INLINE_JPEG_MIN_FREE, EPUB_INLINE_JPEG_MIN_MAX_ALLOC};
@@ -150,6 +186,8 @@ inline bool shouldReleaseSdFontCachesForEpubInlineImage(const HeapSnapshot heap)
 }
 
 inline bool hasHeapForEpubInlineImage(const char* tag, const char* source) {
+  if (isJpegSource(source)) return hasHeapForJpegDecoder(tag, JPEG_DECODER_APPROX_BYTES, source);
+
   const auto heap = snapshot();
   const auto requirement = epubInlineImageRequirementForSource(source);
   if (hasHeap(heap, requirement.minFree, requirement.minMaxAlloc)) {

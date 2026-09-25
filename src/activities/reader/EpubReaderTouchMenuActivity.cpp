@@ -4,6 +4,7 @@
 
 #include <Epub/Page.h>
 #include <FontCacheManager.h>
+#include <FreeInkUIIcon.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
@@ -12,7 +13,9 @@
 #include <SdCardFontSystem.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 
@@ -21,6 +24,7 @@
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
 #include "SettingsList.h"
+#include "StablePageSelectionModel.h"
 #include "activities/reader/ControlsOptionsActivity.h"
 #include "activities/settings/StatusBarSettingsActivity.h"
 #include "components/DrawerHandle.h"
@@ -28,6 +32,7 @@
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
+#include "components/icons/keyboardIcons.h"
 #include "components/icons/listIcons.h"
 #include "components/icons/touchHeaderIcons.h"
 #include "util/Dictionary.h"
@@ -53,6 +58,11 @@ constexpr int16_t BACK_ICON_VISIBLE_LEFT_INSET = 7;
 constexpr int16_t BACK_ICON_SIZE = 32;
 constexpr int16_t BACK_CARET_HIT_WIDTH = 64;
 constexpr int LANDSCAPE_ROOT_ROWS = 4;
+// Sentinel ACTION_KEYPAD_KEY values for the grid's two non-digit keys; digits use
+// their own 0-9 value. Backspace is a separate button (ACTION_KEYPAD_BACKSPACE),
+// not a grid key, so it does not need a sentinel here.
+constexpr int16_t KEYPAD_DOT = -1;
+constexpr int16_t KEYPAD_OK = -2;
 constexpr uint8_t PORTRAIT_DRAWER_HEIGHT_PERCENT = 50;
 // Non-root landscape panes retain a little more room than portrait. Root
 // height is calculated from four actual theme rows in buildDrawer().
@@ -288,10 +298,10 @@ int indexForRaw(const std::array<uint8_t, N>& rawValues, const uint8_t value) {
 
 EpubReaderTouchMenuActivity::EpubReaderTouchMenuActivity(
     GfxRenderer& renderer, MappedInputManager& mappedInput, std::shared_ptr<Epub> epub,
-    const TouchReaderPreviewModel* previewModel, const int bookProgressPercent, const bool hasFootnotes,
+    const TouchReaderPreviewModel* previewModel, const float bookProgressPercent, const bool hasFootnotes,
     const bool hasDictionary, const bool hasBookmarks, const bool hasClippings, const bool isCurrentPageBookmarked,
-    const bool isBookCompleted, const bool showReadingPaceReset, const bool stablePageNumbersAvailable,
-    const uint16_t autoPageTurnIntervalSeconds, const bool automaticPageTurnActive,
+    const bool isBookCompleted, const bool showReadingPaceReset, const uint32_t stableCurrentPage,
+    const uint32_t stablePageCount, const uint16_t autoPageTurnIntervalSeconds, const bool automaticPageTurnActive,
     ReaderOptionsActivity::SaveSettingsCallback saveReaderSettingsCallback, void* saveReaderSettingsContext,
     ReaderOptionsActivity::SaveGlobalSettingsCallback saveGlobalSettingsCallback, void* saveGlobalSettingsContext,
     ReaderOptionsActivity::GlobalSettingsEditCallback beginGlobalSettingsEditCallback,
@@ -303,7 +313,14 @@ EpubReaderTouchMenuActivity::EpubReaderTouchMenuActivity(
     : Activity("EpubReaderTouchMenu", renderer, mappedInput),
       epub(std::move(epub)),
       previewModel(previewModel),
-      percent(std::clamp(bookProgressPercent, 0, 100)),
+      // Round to the nearest whole percent, not the nearest centipercent, so the pane
+      // opens on a clean number (e.g. "43.00%") rather than the book's exact fractional
+      // position; the keypad is how the user reaches a decimal destination.
+      percent(static_cast<int>(std::lround(std::clamp(bookProgressPercent, 0.0f, 100.0f))) * 100),
+      stablePage(clampStablePage(stableCurrentPage, stablePageCount)),
+      stablePageCount(stablePageCount),
+      percentSeed(percent),
+      stablePageSeed(stablePage),
       hasFootnotes(hasFootnotes),
       hasDictionary(hasDictionary),
       hasBookmarks(hasBookmarks),
@@ -311,7 +328,6 @@ EpubReaderTouchMenuActivity::EpubReaderTouchMenuActivity(
       isCurrentPageBookmarked(isCurrentPageBookmarked),
       isBookCompleted(isBookCompleted),
       showReadingPaceReset(showReadingPaceReset),
-      stablePageNumbersAvailable(stablePageNumbersAvailable),
       automaticPageTurnActive(automaticPageTurnActive),
       autoPageTurnIntervalSeconds(std::clamp(autoPageTurnIntervalSeconds, READER_AUTO_PAGE_TURN_MIN_SECONDS,
                                              READER_AUTO_PAGE_TURN_MAX_SECONDS)),
@@ -341,16 +357,16 @@ void EpubReaderTouchMenuActivity::onEnter() {
   Activity::onEnter();
   mappedInput.setReaderTouchscreenOverride(true);
 
-  const ReaderDrawerCatalog catalog =
-      makeReaderDrawerCatalog({hasFootnotes, hasDictionary, hasBookmarks, hasClippings, showReadingPaceReset});
+  const ReaderDrawerCatalog catalog = makeReaderDrawerCatalog(
+      {hasFootnotes, hasDictionary, hasBookmarks, hasClippings, showReadingPaceReset, stablePageCount > 0});
   for (size_t tab = 0; tab < rootRows.size(); ++tab) {
     rootRows[tab].reserve(catalog[tab].count);
     rootRows[tab].assign(catalog[tab].items.begin(), catalog[tab].items.begin() + catalog[tab].count);
   }
 
   paneRows.reserve(4);
-  discoverFonts();
   discoverDictionaries();
+
   applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &EpubReaderTouchMenuActivity::onRowEvent, this);
   app.on(ACTION_TAB, &EpubReaderTouchMenuActivity::onTabEvent, this);
@@ -361,6 +377,11 @@ void EpubReaderTouchMenuActivity::onEnter() {
   app.on(ACTION_SLIDER + 3, &EpubReaderTouchMenuActivity::onSliderEvent, this);
   app.on(ACTION_STEP + 3, &EpubReaderTouchMenuActivity::onStepEvent, this);
   app.on(ACTION_CONFIRM, &EpubReaderTouchMenuActivity::onConfirmEvent, this);
+  app.on(ACTION_KEYPAD_KEY, &EpubReaderTouchMenuActivity::onKeypadKeyEvent, this);
+  app.on(ACTION_KEYPAD_BACKSPACE, &EpubReaderTouchMenuActivity::onKeypadBackspaceEvent, this);
+  if (app.handlerOverflowed()) {
+    LOG_ERR("ERDM", "Touch menu handler table overflowed; a control's action is silently dead");
+  }
   app.setScreen(&EpubReaderTouchMenuActivity::drawerScreen, this);
   requestUpdate();
 }
@@ -374,7 +395,7 @@ void EpubReaderTouchMenuActivity::onExit() {
 }
 
 void EpubReaderTouchMenuActivity::discoverFonts() {
-  sdFontSystem.ensureRegistry();
+  sdFontSystem.refreshIfDirty();
   const auto& families = sdFontSystem.registry().getFamilies();
   fontLabels.clear();
   fontSettingIndexes.clear();
@@ -555,10 +576,6 @@ void EpubReaderTouchMenuActivity::onSliderEvent(const fui::ActionEvent& event, v
     target = tapValue(
         percentToByte(event.dragPermille, CrossPointSettings::MIN_SCREEN_MARGIN, CrossPointSettings::MAX_SCREEN_MARGIN),
         CrossPointSettings::MIN_SCREEN_MARGIN, CrossPointSettings::MAX_SCREEN_MARGIN);
-  } else if (self->state.pane == ReaderDrawerPane::Percent) {
-    self->percent = tapValue(percentToByte(event.dragPermille, 0, 100), 0, 100);
-    self->requestUpdate();
-    return;
   } else if (self->state.pane == ReaderDrawerPane::AutoPageTurn) {
     self->autoPageTurnIntervalSeconds = static_cast<uint16_t>(tapValue(
         percentToByte(event.dragPermille, READER_AUTO_PAGE_TURN_MIN_SECONDS, READER_AUTO_PAGE_TURN_MAX_SECONDS),
@@ -607,6 +624,10 @@ void EpubReaderTouchMenuActivity::onConfirmEvent(const fui::ActionEvent&, void* 
   self->buttonFocusActive = false;
   if (self->state.pane == ReaderDrawerPane::Percent) {
     self->completePercentSelection();
+    return;
+  }
+  if (self->state.pane == ReaderDrawerPane::StablePage) {
+    self->completeStablePageSelection();
     return;
   }
   if (self->state.pane == ReaderDrawerPane::AutoPageTurn) {
@@ -666,6 +687,9 @@ void EpubReaderTouchMenuActivity::buildDrawer(UiApp::ScreenType& screen) {
       break;
     case ReaderDrawerPane::Percent:
       buildPercentPane(screen);
+      break;
+    case ReaderDrawerPane::StablePage:
+      buildStablePagePane(screen);
       break;
     case ReaderDrawerPane::AutoPageTurn:
       buildAutoPageTurnPane(screen);
@@ -873,20 +897,94 @@ void EpubReaderTouchMenuActivity::buildMarginsPane(UiApp::ScreenType& screen) {
 
 void EpubReaderTouchMenuActivity::buildPercentPane(UiApp::ScreenType& screen) {
   buildPaneHeader(screen);
-  buildConfirmButton(screen);
   char value[16];
-  std::snprintf(value, sizeof(value), "%d%%", percent);
-  ReaderSliderRowProps slider;
-  slider.value = value;
-  slider.sliderValue = percent * 10;
-  slider.max = 1000;
-  slider.sliderAction = ACTION_SLIDER;
-  slider.decrement = ACTION_STEP;
-  slider.increment = ACTION_STEP;
-  configureReaderSliderScale(slider, "0%", "100%");
-  const int16_t top = centeredReaderSliderControlTop(screen, slider);
-  screen.spacer(top);
-  drawReaderSliderRow(screen, slider);
+  // Nothing typed yet: show the actual value the OK key would use (the position the
+  // pane opened with), not a placeholder that would misrepresent what confirming does.
+  if (entryLen > 0) {
+    std::snprintf(value, sizeof(value), "%s%%", entryText);
+  } else {
+    std::snprintf(value, sizeof(value), "%d.%02d%%", percent / 100, percent % 100);
+  }
+  buildDrawerKeypad(screen, /*allowDecimal=*/true, value);
+}
+
+void EpubReaderTouchMenuActivity::buildStablePagePane(UiApp::ScreenType& screen) {
+  buildPaneHeader(screen);
+  char value[32];
+  if (entryLen > 0) {
+    std::snprintf(value, sizeof(value), "%s / %lu", entryText, static_cast<unsigned long>(stablePageCount));
+  } else {
+    std::snprintf(value, sizeof(value), "%lu / %lu", static_cast<unsigned long>(stablePage),
+                  static_cast<unsigned long>(stablePageCount));
+  }
+  buildDrawerKeypad(screen, /*allowDecimal=*/false, value);
+}
+
+// Shared by the Percent and StablePage panes: a live readout with a backspace icon,
+// and a 4x3 grid (1-9 / 0, ., OK). There is no separate Confirm button here (unlike
+// every other pane) - the drawer sheet's height budget only has room for the grid
+// itself once the header and readout are accounted for, so OK lives in the grid
+// instead, matching EpubReaderPercentSelectionActivity's non-touch keypad. The
+// pane's existing hardware-Confirm handling in loop() still works unchanged.
+void EpubReaderTouchMenuActivity::buildDrawerKeypad(UiApp::ScreenType& screen, const bool allowDecimal,
+                                                    const char* value) {
+  const auto& theme = screen.theme();
+  fui::TextStyle readout = theme.titleText;
+  readout.align = fui::TextAlign::Center;
+  const int16_t readoutLh = screen.target().lineHeight(readout.font);
+  const int16_t readoutRowH = std::max<int16_t>(theme.rowHeight, static_cast<int16_t>(readoutLh + 16));
+  const fui::Rect readoutRow = screen.takeTop(readoutRowH, theme.spaceLg);
+  const int16_t iconSize = readoutRow.height;
+  const fui::Rect iconRect{static_cast<int16_t>(readoutRow.right() - iconSize), readoutRow.y, iconSize,
+                           readoutRow.height};
+  // The icon sits in unused space at the row's edge; keep the readout centered
+  // in the full row instead of shifting it left when the icon appears.
+  screen.target().text(readoutRow, value, readout);
+
+  if (entryLen > 0) {
+    fui::ButtonProps backspaceBtn;
+    backspaceBtn.icon = fui::bitmapFromIcon(icon_backspace_28);
+    backspaceBtn.action = ACTION_KEYPAD_BACKSPACE;
+    backspaceBtn.inputMask = fui::InputTouch;
+    screen.button(backspaceBtn, iconRect);
+  }
+
+  fui::Rect gridArea = screen.body().inset(fui::Insets{0, theme.spaceLg, theme.spaceLg, theme.spaceLg});
+  gridArea.height = std::max<int16_t>(0, gridArea.height);
+
+  static const char* const kDigitLabels[10] = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"};
+  for (int i = 0; i < 9; ++i) {
+    keypadKeys[static_cast<size_t>(i)].label = kDigitLabels[i + 1];
+    keypadKeys[static_cast<size_t>(i)].value = static_cast<int16_t>(i + 1);
+  }
+  keypadKeys[9].label = kDigitLabels[0];
+  keypadKeys[9].value = 0;
+  keypadKeys[10].label = ".";
+  keypadKeys[10].value = KEYPAD_DOT;
+  keypadKeys[10].enabled = allowDecimal;
+  keypadKeys[11].label = tr(STR_OK);
+  keypadKeys[11].value = KEYPAD_OK;
+
+  fui::KeyGridProps gridProps;
+  gridProps.keys = keypadKeys.data();
+  gridProps.rows = 4;
+  gridProps.cols = 3;
+  gridProps.action = ACTION_KEYPAD_KEY;
+  gridProps.inputMask = fui::InputTouch;
+  gridProps.labelText = theme.bodyText;
+  gridProps.labelText.align = fui::TextAlign::Center;
+  gridProps.gap = theme.spaceSm;
+  // Let cells shrink below the theme's usual touch minimum rather than let
+  // ensureMinTouchRect() inflate a hit rect into overlapping a neighboring row or
+  // column, which would route a tap to the wrong key. Derived from whichever axis is
+  // tighter; on this 800-wide panel it is always the 4-row height, not the 3-column
+  // width, but deriving from both keeps the invariant true regardless of orientation.
+  const int16_t cellH = static_cast<int16_t>((gridArea.height - gridProps.gap * 3) / 4);
+  const int16_t cellW = static_cast<int16_t>((gridArea.width - gridProps.gap * 2) / 3);
+  const int16_t tightestCell = std::min<int16_t>(cellH, cellW);
+  gridProps.minTouchSize = std::min<int16_t>(theme.minTouchSize, std::max<int16_t>(1, tightestCell));
+  gridProps.radius = 3;
+  fui::keyGrid(screen.frame(), gridArea, gridProps);
 }
 
 void EpubReaderTouchMenuActivity::buildAutoPageTurnPane(UiApp::ScreenType& screen) {
@@ -1035,6 +1133,7 @@ void EpubReaderTouchMenuActivity::openPane(const ReaderDrawerPane pane) {
   state.pane = pane;
   state.paneTopIndex = 0;
   state.selectedIndex = 0;
+  if (pane == ReaderDrawerPane::Percent || pane == ReaderDrawerPane::StablePage) resetKeypadEntry();
   paneRows.clear();
   if (pane == ReaderDrawerPane::ReaderFont) paneRows = {RowId::FontFamily, RowId::FontSize};
   if (pane == ReaderDrawerPane::DictionaryFont) {
@@ -1129,6 +1228,7 @@ void EpubReaderTouchMenuActivity::activateRow(const RowId row) {
       openPane(ReaderDrawerPane::ReaderFont);
       return;
     case RowId::FontFamily:
+      discoverFonts();
       openPane(ReaderDrawerPane::FontFamily);
       return;
     case RowId::FontSize:
@@ -1157,6 +1257,9 @@ void EpubReaderTouchMenuActivity::activateRow(const RowId row) {
     case RowId::GoToPercent:
       openPane(ReaderDrawerPane::Percent);
       return;
+    case RowId::GoToStablePage:
+      openPane(ReaderDrawerPane::StablePage);
+      return;
     case RowId::AutoPageTurn:
       openPane(ReaderDrawerPane::AutoPageTurn);
       return;
@@ -1169,7 +1272,7 @@ void EpubReaderTouchMenuActivity::activateRow(const RowId row) {
     case RowId::StatusBar:
       commitSettings();
       if (auto statusBar =
-              makeUniqueNoThrow<StatusBarSettingsActivity>(renderer, mappedInput, true, stablePageNumbersAvailable)) {
+              makeUniqueNoThrow<StatusBarSettingsActivity>(renderer, mappedInput, true, stablePageCount > 0)) {
         if (beginGlobalSettingsEditCallback) beginGlobalSettingsEditCallback(beginGlobalSettingsEditContext);
         startActivityForResult(std::move(statusBar), [this](const ActivityResult&) {
           if (saveGlobalSettingsCallback) saveGlobalSettingsCallback(saveGlobalSettingsContext);
@@ -1296,6 +1399,7 @@ void EpubReaderTouchMenuActivity::toggleSetting(const RowId row) {
 }
 
 void EpubReaderTouchMenuActivity::showEnumOptions(const RowId row) {
+  if (row == RowId::DictionaryFontFamily || row == RowId::DictionaryFontSize) sdFontSystem.refreshIfDirty();
   std::vector<std::string> labels;
   std::vector<uint8_t> raw;
   StrId title = StrId::STR_NONE_OPT;
@@ -1303,6 +1407,7 @@ void EpubReaderTouchMenuActivity::showEnumOptions(const RowId row) {
 
   if (row == RowId::FontSize) {
     if (draft.sdFontFamilyName[0] != '\0') {
+      sdFontSystem.refreshIfDirty();
       if (const auto* family = sdFontSystem.registry().findFamily(draft.sdFontFamilyName.data())) {
         raw = family->availableSizes();
       }
@@ -1359,7 +1464,7 @@ void EpubReaderTouchMenuActivity::showEnumOptions(const RowId row) {
         raw.push_back(static_cast<uint8_t>(i + 1));
       }
       if (hasDictionaryFontOverride && dictionaryFontFamilyName[0] != '\0' &&
-          sdFontSystem.registry().findFamily(dictionaryFontFamilyName) == nullptr) {
+          sdFontSystem.registry().findSummary(dictionaryFontFamilyName) == nullptr) {
         labels.push_back(std::string(dictionaryFontFamilyName) + " (" + tr(STR_UNAVAILABLE) + ")");
         raw.push_back(0);
       }
@@ -1398,7 +1503,7 @@ void EpubReaderTouchMenuActivity::showEnumOptions(const RowId row) {
   }
   int current = 0;
   if (row == RowId::DictionaryFontFamily && hasDictionaryFontOverride && dictionaryFontFamilyName[0] != '\0' &&
-      sdFontSystem.registry().findFamily(dictionaryFontFamilyName) == nullptr) {
+      sdFontSystem.registry().findSummary(dictionaryFontFamilyName) == nullptr) {
     current = static_cast<int>(labels.size()) - 1;
   } else {
     const auto rawIt = std::find(raw.begin(), raw.end(), currentRaw);
@@ -1514,13 +1619,124 @@ void EpubReaderTouchMenuActivity::selectEnumOption(const int index) {
   requestUpdate();
 }
 
+void EpubReaderTouchMenuActivity::resetKeypadEntry() {
+  entryLen = 0;
+  entryText[0] = 0;
+  // Discard anything typed on a previous visit to this pane along with the buffer,
+  // so the readout goes back to the book's actual position rather than a value the
+  // user backspaced away from or left without confirming.
+  percent = percentSeed;
+  stablePage = stablePageSeed;
+  requestUpdate();
+}
+
+void EpubReaderTouchMenuActivity::appendKeypadDigit(const char digit) {
+  if (entryLen >= sizeof(entryText) - 1) return;
+  // Reject a digit that would push the typed value out of range, rather than let the
+  // readout show a number Confirm would silently clamp to something else.
+  char candidate[sizeof(entryText)];
+  std::memcpy(candidate, entryText, entryLen);
+  candidate[entryLen] = digit;
+  candidate[entryLen + 1] = 0;
+  if (state.pane == ReaderDrawerPane::Percent) {
+    // Cap at two decimal places: the readout and the stored value both round to
+    // hundredths, so a third digit would type something the confirmed value silently
+    // rounds away.
+    const char* dot = static_cast<const char*>(std::memchr(entryText, '.', entryLen));
+    if (dot != nullptr && (entryText + entryLen) - (dot + 1) >= 2) return;
+    if (std::strtof(candidate, nullptr) > 100.0f) return;
+  } else if (state.pane == ReaderDrawerPane::StablePage) {
+    // Page 0 does not exist; clampStablePage() would silently round it up to 1.
+    const unsigned long candidateValue = std::strtoul(candidate, nullptr, 10);
+    if (candidateValue == 0 || candidateValue > stablePageCount) return;
+  }
+  entryText[entryLen++] = digit;
+  entryText[entryLen] = 0;
+  syncKeypadValue();
+  requestUpdate();
+}
+
+void EpubReaderTouchMenuActivity::appendKeypadDecimalPoint() {
+  if (state.pane != ReaderDrawerPane::Percent) return;
+  // Require a leading digit ("0." rather than bare "."): otherwise the readout
+  // would show "." while OK silently confirms 0%.
+  if (entryLen == 0) return;
+  for (uint8_t i = 0; i < entryLen; ++i) {
+    if (entryText[i] == '.') return;  // one decimal point at most
+  }
+  if (entryLen >= sizeof(entryText) - 1) return;
+  entryText[entryLen++] = '.';
+  entryText[entryLen] = 0;
+  syncKeypadValue();
+  requestUpdate();
+}
+
+void EpubReaderTouchMenuActivity::backspaceKeypadEntry() {
+  if (entryLen == 0) return;
+  entryText[--entryLen] = 0;
+  if (entryLen == 0) {
+    // Nothing left to parse: go back to the book's actual position rather than
+    // leaving the last successfully-parsed (now abandoned) value in place.
+    percent = percentSeed;
+    stablePage = stablePageSeed;
+  } else {
+    syncKeypadValue();
+  }
+  requestUpdate();
+}
+
+void EpubReaderTouchMenuActivity::syncKeypadValue() {
+  if (entryLen == 0) return;
+  if (state.pane == ReaderDrawerPane::StablePage) {
+    stablePage = clampStablePage(static_cast<uint32_t>(std::strtoul(entryText, nullptr, 10)), stablePageCount);
+  } else if (state.pane == ReaderDrawerPane::Percent) {
+    const float parsed = std::strtof(entryText, nullptr);
+    percent = static_cast<int>(std::lround(std::clamp(parsed, 0.0f, 100.0f) * 100.0f));
+  }
+}
+
+void EpubReaderTouchMenuActivity::onKeypadKeyEvent(const fui::ActionEvent& event, void* user) {
+  auto* self = static_cast<EpubReaderTouchMenuActivity*>(user);
+  self->buttonFocusActive = false;
+  const int16_t value = event.value;
+  if (value == KEYPAD_OK) {
+    if (self->state.pane == ReaderDrawerPane::Percent) {
+      self->completePercentSelection();
+    } else if (self->state.pane == ReaderDrawerPane::StablePage) {
+      self->completeStablePageSelection();
+    }
+  } else if (value == KEYPAD_DOT) {
+    self->appendKeypadDecimalPoint();
+  } else {
+    self->appendKeypadDigit(static_cast<char>('0' + value));
+  }
+}
+
+void EpubReaderTouchMenuActivity::onKeypadBackspaceEvent(const fui::ActionEvent&, void* user) {
+  auto* self = static_cast<EpubReaderTouchMenuActivity*>(user);
+  self->buttonFocusActive = false;
+  self->backspaceKeypadEntry();
+}
+
 void EpubReaderTouchMenuActivity::completePercentSelection() {
   const bool changed = didChangeSettings;
   commitSettings();
   MenuResult menu{static_cast<int>(EpubReaderMenuAction::GO_TO_PERCENT), draft.orientation, changed};
   menu.drawerState = state;
   menu.changeMask = changeMask;
+  // Centipercent (0-10000); the receiving jumpToPercent() divides back to 0.0-100.0.
   menu.drawerValue = static_cast<int16_t>(percent);
+  setResult(std::move(menu));
+  finish();
+}
+
+void EpubReaderTouchMenuActivity::completeStablePageSelection() {
+  const bool changed = didChangeSettings;
+  commitSettings();
+  MenuResult menu{static_cast<int>(EpubReaderMenuAction::GO_TO_STABLE_PAGE), draft.orientation, changed};
+  menu.drawerState = state;
+  menu.changeMask = changeMask;
+  menu.drawerPage = stablePage;
   setResult(std::move(menu));
   finish();
 }
@@ -1545,8 +1761,6 @@ void EpubReaderTouchMenuActivity::adjustActiveSlider(const int delta) {
     draft.screenMarginVertical =
         std::clamp<int>(draft.screenMarginVertical + delta, CrossPointSettings::MIN_SCREEN_MARGIN,
                         CrossPointSettings::MAX_SCREEN_MARGIN);
-  } else if (state.pane == ReaderDrawerPane::Percent) {
-    percent = std::clamp(percent + delta, 0, 100);
   } else if (state.pane == ReaderDrawerPane::AutoPageTurn) {
     autoPageTurnIntervalSeconds = static_cast<uint16_t>(std::clamp<int>(
         autoPageTurnIntervalSeconds + delta, READER_AUTO_PAGE_TURN_MIN_SECONDS, READER_AUTO_PAGE_TURN_MAX_SECONDS));
@@ -1713,10 +1927,11 @@ void EpubReaderTouchMenuActivity::loop() {
   fui::InputSnapshot snap{};
   if (uiReady) {
     snap = touchSnapshotFrom(mappedInput);
-    // List rows activate on release. Do not route their touch-down edge,
-    // otherwise a swipe briefly paints the row where the finger landed as
-    // pressed even though it never activates that row.
-    if (!readerDrawerStepChangesSettings(state.pane) && state.pane != ReaderDrawerPane::Percent) {
+    // List rows (and the Percent/StablePage keypad, which is buttons only, not a
+    // slider) activate on release. Do not route their touch-down edge, otherwise a
+    // swipe briefly paints the row where the finger landed as pressed even though it
+    // never activates that row.
+    if (!readerDrawerStepChangesSettings(state.pane)) {
       snap.touchPressed = false;
     }
     if (snap.touchPressed || snap.touchHeld || snap.touchReleased) {
@@ -1770,6 +1985,10 @@ void EpubReaderTouchMenuActivity::loop() {
       completePercentSelection();
       return;
     }
+    if (state.pane == ReaderDrawerPane::StablePage) {
+      completeStablePageSelection();
+      return;
+    }
     if (state.pane == ReaderDrawerPane::AutoPageTurn) {
       completeAutoPageTurnSelection();
       return;
@@ -1788,16 +2007,17 @@ void EpubReaderTouchMenuActivity::render(RenderLock&&) {
     previewDirty = true;
   }
   previousDrawerTop = drawerTop;
-  if (renderPreview()) {
-    previewHasAntiAliasing = draft.textAntiAliasing && ReaderUtils::readerForegroundBlack();
-  }
+  const bool previewRendered = renderPreview();
   uiReady = false;
   app.setDevice(uiTarget.deviceContext());
   app.render();
   uiReady = true;
   if (optionPopup.isActive()) optionPopup.render(renderer);
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-  if (previewHasAntiAliasing) renderPreviewWithAntiAliasing();
+  if (shouldRenderReaderDrawerAntiAliasing(previewRendered, draft.textAntiAliasing,
+                                           ReaderUtils::readerForegroundBlack())) {
+    renderPreviewWithAntiAliasing();
+  }
 }
 
 const char* EpubReaderTouchMenuActivity::paneTitle() const {
@@ -1814,6 +2034,8 @@ const char* EpubReaderTouchMenuActivity::paneTitle() const {
       return tr(STR_SCREEN_MARGIN);
     case ReaderDrawerPane::Percent:
       return tr(STR_GO_TO_PERCENT);
+    case ReaderDrawerPane::StablePage:
+      return tr(STR_GO_TO_STABLE_PAGE);
     case ReaderDrawerPane::AutoPageTurn:
       return tr(STR_AUTO_TURN_INTERVAL_SECONDS);
     case ReaderDrawerPane::Dictionary:
@@ -1864,6 +2086,8 @@ const char* EpubReaderTouchMenuActivity::rowLabel(const RowId row) const {
       return tr(STR_SELECT_CHAPTER);
     case RowId::GoToPercent:
       return tr(STR_GO_TO_PERCENT);
+    case RowId::GoToStablePage:
+      return tr(STR_GO_TO_STABLE_PAGE);
     case RowId::BookmarkToggle:
       return isCurrentPageBookmarked ? tr(STR_REMOVE_BOOKMARK) : tr(STR_ADD_BOOKMARK);
     case RowId::ViewBookmarks:

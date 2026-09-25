@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -51,13 +52,18 @@ class HttpDownloader {
     Transport transport;
 
     // Extra request headers, for APIs that authenticate with them (BookOrbit's
-    // x-auth-user/x-auth-key).
+    // x-auth-user/x-auth-key). Treated as credentials: see authorizationOrigin.
     HeaderList extraHeaders;
 
     // esp_http_client's own RX buffer (0 = its default). Worth shrinking for TLS servers on
     // a fragmented heap: body bytes arriving with the headers are cached via realloc in
     // steps of this size, competing with the TLS record buffer for the largest free block.
     size_t clientRxBufferSize = 0;
+
+    // Borrowed only for this synchronous request. Credentials -- Basic auth and
+    // extraHeaders alike -- are sent only to this origin; empty keeps the request
+    // URL as the credential origin, so a redirect to another host never sees them.
+    std::string_view authorizationOrigin;
   };
 
   /**

@@ -81,8 +81,9 @@ void ReaderOptionsActivity::rebuildSettingsList() {
   fontSettings.clear();
   pageLayoutSettings.clear();
   screenMarginSettings.clear();
-  sdFontSystem.refreshIfDirty();
-  const auto allSettings = getSettingsList(&sdFontSystem.registry());
+  const bool needsFonts = activeSubmenu == SettingAction::ReaderFontOptions;
+  if (needsFonts) sdFontSystem.refreshIfDirty();
+  const auto allSettings = getSettingsList(needsFonts ? &sdFontSystem.registry() : nullptr);
   settings = buildBookReaderSettingsParentList(allSettings);
   const auto indexingMethod = std::find_if(settings.begin(), settings.end(), [](const SettingInfo& setting) {
     return setting.nameId == StrId::STR_INDEXING_METHOD;
@@ -106,7 +107,7 @@ void ReaderOptionsActivity::rebuildSettingsList() {
   DictionaryRegistry installedDictionaryRegistry;
   const bool hasInstalledDictionaries = installedDictionaryRegistry.discover();
   installedDictionaryRegistry.clear();
-  if (!hasInstalledDictionaries) {
+  if (!hasInstalledDictionaries || !needsFonts) {
     setCurrentSettings();
     selectedIndex = 0;
     return;
@@ -234,6 +235,7 @@ StrId ReaderOptionsActivity::activeSubmenuTitleId() const {
 void ReaderOptionsActivity::openSubmenu(SettingAction action) {
   parentSubmenu = activeSubmenu;
   activeSubmenu = action;
+  if (action == SettingAction::ReaderFontOptions) rebuildSettingsList();
   setCurrentSettings();
   selectedIndex = 0;
   topIndex = 0;

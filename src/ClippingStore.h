@@ -65,6 +65,14 @@ class ClippingStore {
     SaveFailed,
   };
 
+  struct RenameMigration {
+    std::string sourcePath;
+    std::string destinationPath;
+    std::string destinationBackupPath;
+    bool destinationBackedUp = false;
+    bool active = false;
+  };
+
   static ClippingStore& getInstance() { return instance; }
 
   bool loadForBook(const std::string& filePath, const std::string& title, const std::string& author,
@@ -101,6 +109,11 @@ class ClippingStore {
   static void deleteForFilePath(const std::string& filePath, const std::string& bookType);
   static bool migrateForFilePath(const std::string& oldFilePath, const std::string& newFilePath,
                                  const std::string& title, const std::string& author, const std::string& bookType);
+  static bool beginRenameMigration(const std::string& oldFilePath, const std::string& newFilePath,
+                                   const std::string& title, const std::string& author, const std::string& bookType,
+                                   RenameMigration& migration);
+  static bool commitRenameMigration(RenameMigration& migration);
+  static bool rollbackRenameMigration(RenameMigration& migration);
 
  private:
   static ClippingStore instance;
@@ -115,7 +128,8 @@ class ClippingStore {
   bool readTextSpan(const Clipping& clipping, uint16_t length, std::string& out) const;
   bool readFromFile();
   bool readFromFile(const std::string& path, std::vector<Clipping>& out) const;
-  bool writeToFile(const std::string* replacementText = nullptr, size_t replacementIndex = SIZE_MAX);
+  bool writeToFile(const std::string* replacementText = nullptr, size_t replacementIndex = SIZE_MAX,
+                   const std::string* sourcePathOverride = nullptr);
 };
 
 inline bool clippingStoredRangeMatchesLayout(const Clipping& clipping, const uint16_t currentPageCount,

@@ -56,7 +56,12 @@ class CssParser {
 
   // Bump when CSS cache format or rules change; section caches are invalidated when this changes
   static constexpr uint32_t CSS_CACHE_MAGIC = 0x435843FF;  // bytes: 0xFF, "CXC"
-  static constexpr uint8_t CSS_CACHE_VERSION = 15;
+  static constexpr uint8_t CSS_CACHE_VERSION = 18;
+
+  // Source text is streamed, never loaded as one allocation. PSRAM readers
+  // can admit larger publisher stylesheets; rule-count and internal-heap
+  // guards still bound the transient selector map on every device.
+  static size_t maxSourceBytes() { return psramHeapAvailable() ? 512U * 1024U : 128U * 1024U; }
 
   static constexpr size_t MAX_DESCENDANT_RULES = 100;
   static constexpr size_t CSS_INDEX_BYTES_PER_RULE = 8;
@@ -99,15 +104,13 @@ class CssParser {
    * Check if any rules have been loaded
    */
   [[nodiscard]] bool empty() const {
-    return rulesBySelector_.empty() && cacheRuleOffsets_.empty() && descendantRules_.empty();
+    return parsedRuleCount() == 0 && cacheRuleOffsets_.empty() && descendantRules_.empty();
   }
 
   /**
    * Get count of loaded rule sets
    */
-  [[nodiscard]] size_t ruleCount() const {
-    return rulesBySelector_.empty() ? cachedRuleCount_ : rulesBySelector_.size();
-  }
+  [[nodiscard]] size_t ruleCount() const { return parsedRuleCount() == 0 ? cachedRuleCount_ : parsedRuleCount(); }
 
   /**
    * Clear all loaded rules
@@ -117,6 +120,10 @@ class CssParser {
     // vectors so the capacity is released back to the heap, matching the old
     // post-index cleanup behavior callers relied on.
     decltype(rulesBySelector_){}.swap(rulesBySelector_);
+    parsedRuleArena_.release();
+    parsedRuleBuckets_ = nullptr;
+    parsedRuleHead_ = nullptr;
+    psramParsedRuleCount_ = 0;
     decltype(descendantRules_){}.swap(descendantRules_);
     decltype(cacheRuleOffsets_){}.swap(cacheRuleOffsets_);
     cachedRuleArena_.release();
@@ -203,6 +210,24 @@ class CssParser {
 
   // Storage: maps selector -> style properties. Hash/equal are case-insensitive.
   std::unordered_map<std::string, CssStyle, SvHash, SvEqual> rulesBySelector_;
+  // Simple rules dominate publisher CSS. A fallible PSRAM arena avoids one
+  // internal allocation per map node/key; C3 keeps the existing guarded map.
+  // At most 1500 rules and 256 bytes per selector are admitted by the parser.
+  struct ParsedRule {
+    ParsedRule* bucketNext = nullptr;
+    ParsedRule* next = nullptr;
+    std::string_view selector;
+    CssStyle style;
+  };
+  static constexpr size_t PARSED_RULE_BUCKETS = 256;
+  const bool usePsramParsedRules_ = psramHeapAvailable();
+  Arena parsedRuleArena_{ArenaBacking::PsramOnly};
+  ParsedRule** parsedRuleBuckets_ = nullptr;
+  ParsedRule* parsedRuleHead_ = nullptr;
+  size_t psramParsedRuleCount_ = 0;
+  size_t parsedRuleCount() const { return rulesBySelector_.size() + psramParsedRuleCount_; }
+  ParsedRule* findPsramParsedRule(std::string_view selector) const;
+  bool addPsramParsedRule(std::string_view selector, const CssStyle& style);
   std::vector<DescendantRule> descendantRules_;
 
   std::string cachePath;

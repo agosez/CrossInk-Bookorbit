@@ -7,6 +7,7 @@
 
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
 inline std::string stripPrefix(const XML_Char* name) {
@@ -50,7 +51,7 @@ inline std::string buildParagraphXPath(const int spineIndex, const std::vector<P
   for (const auto& segment : path) {
     xpath += "/" + segment.name + "[" + std::to_string(segment.index) + "]";
   }
-  if (textNodeIndex > 0 && charOffset > 0) {
+  if (textNodeIndex > 0) {
     xpath += "/text()[" + std::to_string(textNodeIndex) + "]." + std::to_string(charOffset);
   }
   return xpath;
@@ -69,6 +70,16 @@ inline std::string buildTextXPointer(const int spineIndex, const std::vector<Pat
   return xpath;
 }
 
-inline bool isNonVisibleTextTag(const std::string& name) {
-  return name == "head" || name == "style" || name == "script" || name == "title" || name == "rp" || name == "rt";
+inline bool equalsTag(const std::string_view name, const std::string_view tag) {
+  if (name.size() != tag.size()) return false;
+  for (size_t i = 0; i < name.size(); i++) {
+    const char c = name[i] >= 'A' && name[i] <= 'Z' ? static_cast<char>(name[i] + ('a' - 'A')) : name[i];
+    if (c != tag[i]) return false;
+  }
+  return true;
+}
+
+inline bool isNonVisibleTextTag(const std::string_view name) {
+  return equalsTag(name, "head") || equalsTag(name, "style") || equalsTag(name, "script") || equalsTag(name, "title") ||
+         equalsTag(name, "rp") || equalsTag(name, "rt");
 }

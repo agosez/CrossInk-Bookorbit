@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that a locked wake finishes reader navigation before locking input."""
+"""Check that a Quick Lock timeout wake resumes the reader unlocked."""
 
 import argparse
 import json
@@ -28,7 +28,7 @@ def check_resume(program: Path, suffix: str, activity: str, orientation: int) ->
             "lastSleepFromReader": True,
             "showBootScreen": False,
             "quickLockResumePending": True,
-            "quickLockResumeTrigger": 2,
+            "quickLockRestoreFrontlight": True,
         }))
         env = os.environ.copy()
         for key in list(env):
@@ -39,13 +39,13 @@ def check_resume(program: Path, suffix: str, activity: str, orientation: int) ->
         result = subprocess.run([str(program)], cwd=work, env=env, capture_output=True, text=True, timeout=20)
         output = result.stdout + result.stderr
         entered = output.find(f"Entering activity: {activity}")
-        locked = output.find("Quick Lock enabled")
-        if result.returncode or entered < 0 or locked <= entered:
-            raise AssertionError(f"{suffix} orientation={orientation}: reader did not resume before lock\n{output}")
+        if result.returncode or entered < 0 or "Quick Lock enabled" in output:
+            raise AssertionError(f"{suffix} orientation={orientation}: Quick Lock remained active after wake\n{output}")
         state = json.loads((state_dir / "state.json").read_text())
-        if state.get("openEpubPath") != f"/book.{suffix}" or state.get("quickLockResumePending", False):
-            raise AssertionError(f"{suffix}: reader resume did not restore saved book state: {state}")
-        print(f"PASS: {suffix} orientation={orientation} resumes before Quick Lock")
+        if (state.get("openEpubPath") != f"/book.{suffix}" or state.get("quickLockResumePending", False)
+                or state.get("quickLockRestoreFrontlight", False)):
+            raise AssertionError(f"{suffix}: wake did not clear transient Quick Lock state: {state}")
+        print(f"PASS: {suffix} orientation={orientation} resumes without Quick Lock")
 
 
 def main() -> None:

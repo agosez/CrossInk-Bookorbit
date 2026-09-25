@@ -34,3 +34,12 @@ target_include_directories(EpubTextGrayscaleTest PRIVATE raster_stubs
 target_compile_definitions(EpubTextGrayscaleTest PRIVATE ARDUINO_ARCH_ESP32=1 CROSSINK_MEMORY_TEST=1)
 target_link_libraries(EpubTextGrayscaleTest PRIVATE crosspoint_test_common GTest::gtest_main)
 gtest_discover_tests(EpubTextGrayscaleTest PROPERTIES ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1")
+
+add_executable(RetainedPxcCacheTest RetainedPxcCacheTest.cpp
+  ${REPO_ROOT}/src/activities/reader/EpubGrayscale.cpp)
+target_include_directories(RetainedPxcCacheTest PRIVATE stubs ../memory_policy/stubs
+  ${REPO_ROOT}/lib/Epub ${REPO_ROOT}/lib/Memory ${REPO_ROOT}/lib/MemoryBudget
+  ${REPO_ROOT}/lib/Serialization ${REPO_ROOT}/src/activities/reader)
+target_compile_definitions(RetainedPxcCacheTest PRIVATE ARDUINO_ARCH_ESP32=1 CROSSINK_MEMORY_TEST=1)
+target_link_libraries(RetainedPxcCacheTest PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(RetainedPxcCacheTest PROPERTIES ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1")

@@ -131,7 +131,8 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   // Track whether we just re-discovered so we can force a reload below even
   // when the wanted family/size still maps to the same point size — the file
   // contents on disk may have changed (e.g. user re-uploaded a new build).
-  const bool registryWasDirty = registryDirty_.load(std::memory_order_acquire);
+  bool registryWasDirty = registryDirty_.load(std::memory_order_acquire) || fontReloadPending_ ||
+                          loadedRegistryRevision_ != registry_.revision();
 
   const char* wantedFamily = SETTINGS.sdFontFamilyName;
   const std::string& currentFamily = manager_.currentFamilyName();
@@ -151,8 +152,11 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   }
 
   ensureRegistry();
+  if (registry_.lastDiscoveryFailed()) return;
+  registryWasDirty = registryWasDirty || fontReloadPending_ || loadedRegistryRevision_ != registry_.revision();
 
   const auto* family = registry_.findFamily(wantedFamily);
+  if (family && !family->ensureDetails()) return;
   if (family && SETTINGS.legacySdFontSizeStep != UINT8_MAX) {
     const auto sizes = family->availableSizes();
     if (!sizes.empty()) {
@@ -191,6 +195,8 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   if (family) {
     if (manager_.loadFamilyClosest(*family, renderer, targetPointSize)) {
       loadedFontPointSize_ = targetPointSize;
+      fontReloadPending_ = false;
+      loadedRegistryRevision_ = registry_.revision();
       setupUiFallbacks(renderer);
       LOG_DBG("SDFS", "Loaded SD font family: %s", wantedFamily);
     } else {
@@ -217,9 +223,10 @@ void SdCardFontSystem::releaseLoadedFont(GfxRenderer& renderer) {
 
 void SdCardFontSystem::ensureRegistry() {
   const bool dirty = registryDirty_.exchange(false, std::memory_order_acq_rel);
-  if (registryLoaded_ && !dirty) return;
+  if (dirty) fontReloadPending_ = true;
+  if (registryLoaded_ && !dirty && !registry_.needsRefresh()) return;
   if (dirty) LOG_DBG("SDFS", "Registry dirty — re-discovering fonts");
-  registry_.discover();
+  registry_.loadNames();
   if (registry_.lastDiscoveryFailed()) {
     LOG_ERR("SDFS", "SD font registry scan ran out of memory (free=%u maxAlloc=%u)", ESP.getFreeHeap(),
             ESP.getMaxAllocHeap());
@@ -311,11 +318,12 @@ int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t /*pointSize*
 }
 
 bool SdCardFontSystem::changeReaderFontSize(const bool larger, const FontSizeStepMode mode) {
-  refreshIfDirty();
-
   if (SETTINGS.sdFontFamilyName[0] != '\0') {
+    refreshIfDirty();
+    if (registry_.lastDiscoveryFailed()) return false;
     const auto* family = registry_.findFamily(SETTINGS.sdFontFamilyName);
     if (family) {
+      if (!family->ensureDetails()) return false;
       const auto sizes = family->availableSizes();
       if (changeReaderFontSizeStep(sizes.data(), sizes.size(), SETTINGS.readerFontPointSize, larger, mode)) return true;
       if (sizes.size() > 0) return false;
@@ -465,4 +473,15 @@ int SdCardFontSystem::restoreReaderFont(GfxRenderer& renderer) {
   const int fontId = manager_.getFontId(manager_.currentFamilyName());
   MemoryBudget::logHeapShape("dict.font_after_restore");
   return fontId != 0 ? fontId : SETTINGS.getBuiltInReaderFontId();
+}
+
+void SdCardFontSystem::markRegistryDirtyForPath(const char* path) {
+  if (!path) return;
+  for (const char* root : {SdCardFontRegistry::FONTS_DIR_HIDDEN, SdCardFontRegistry::FONTS_DIR_VISIBLE}) {
+    const size_t length = std::strlen(root);
+    if (strncasecmp(path, root, length) == 0 && (path[length] == '/' || path[length] == '\0')) {
+      markRegistryDirty();
+      return;
+    }
+  }
 }

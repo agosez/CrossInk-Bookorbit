@@ -11,7 +11,9 @@
 #include "CrossInkHalFrontlight.h"
 #include "CrossPointSettings.h"
 #include "EpubReaderClippingListActivity.h"
+#include "EpubReaderPercentSelectionActivity.h"
 #include "MappedInputManager.h"
+#include "Memory.h"
 #include "ReaderUtils.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/TouchRegistry.h"
@@ -44,11 +46,13 @@ int readerMenuTabBarHeight(const int baseTabBarHeight, const bool hasTouch) {
   return baseTabBarHeight * (hasTouch ? touchReaderMenuTabBarHeightScale : 1);
 }
 
+#if CROSSINK_APP_CAP_TOUCH
 bool readerMenuTabsAtBottom(const MappedInputManager& mappedInput) {
   // Frontlight boards reserve the top-edge down-swipe for the quick panel, so
   // the reader menu opens from the bottom and its tabs should stay thumb-close.
   return mappedInput.hasTouch() && Frontlight.present();
 }
+#endif
 
 Rect readerMenuHeaderRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
   const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, !mappedInput.hasTouch(), false);
@@ -191,14 +195,14 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(
     const bool showReadingPaceReset, ReaderOptionsActivity::SaveSettingsCallback saveReaderSettingsCallback,
     void* saveReaderSettingsContext, ReaderOptionsActivity::SaveGlobalSettingsCallback saveGlobalSettingsCallback,
     void* saveGlobalSettingsContext, ReaderOptionsActivity::GlobalSettingsEditCallback beginGlobalSettingsEditCallback,
-    void* beginGlobalSettingsEditContext, const bool stablePageNumbersAvailable,
+    void* beginGlobalSettingsEditContext, const uint32_t stableCurrentPage, const uint32_t stablePageCount,
     ReaderOptionsActivity::GlobalSettingsEditCallback endGlobalSettingsEditCallback, void* endGlobalSettingsEditContext,
     const char* dictionaryFontFamilyName, const uint8_t dictionaryFontPointSize, const bool hasDictionaryFontOverride,
     ReaderOptionsActivity::DictionaryFontChangedCallback dictionaryFontChangedCallback,
     void* dictionaryFontChangedContext)
     : Activity("EpubReaderMenu", renderer, mappedInput),
       menuItems(buildMenuItems(hasFootnotes, hasBookmarks, hasClippings, isCurrentPageBookmarked, isBookCompleted,
-                               showReadingPaceReset, hasDictionary)),
+                               showReadingPaceReset, hasDictionary, stablePageCount > 0)),
       title(title),
       pendingOrientation(currentOrientation),
       currentPage(currentPage),
@@ -212,7 +216,8 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(
       saveGlobalSettingsContext(saveGlobalSettingsContext),
       beginGlobalSettingsEditCallback(beginGlobalSettingsEditCallback),
       beginGlobalSettingsEditContext(beginGlobalSettingsEditContext),
-      stablePageNumbersAvailable(stablePageNumbersAvailable),
+      stableCurrentPage(stableCurrentPage),
+      stablePageCount(stablePageCount),
       endGlobalSettingsEditCallback(endGlobalSettingsEditCallback),
       endGlobalSettingsEditContext(endGlobalSettingsEditContext),
       dictionaryFontPointSize(dictionaryFontPointSize),
@@ -228,7 +233,7 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(
 
 EpubReaderMenuActivity::TabMenuItems EpubReaderMenuActivity::buildMenuItems(
     bool hasFootnotes, bool hasBookmarks, bool hasClippings, bool isCurrentPageBookmarked, bool isBookCompleted,
-    bool showReadingPaceReset, bool hasDictionary) {
+    bool showReadingPaceReset, bool hasDictionary, bool hasStablePageNumbers) {
   TabMenuItems items;
   auto& mainItems = items[MAIN_TAB_INDEX];
   auto& bookmarkItems = items[BOOKMARKS_TAB_INDEX];
@@ -247,6 +252,9 @@ EpubReaderMenuActivity::TabMenuItems EpubReaderMenuActivity::buildMenuItems(
   }
   mainItems.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
   mainItems.push_back({MenuAction::GO_TO_PERCENT, StrId::STR_GO_TO_PERCENT});
+  if (hasStablePageNumbers) {
+    mainItems.push_back({MenuAction::GO_TO_STABLE_PAGE, StrId::STR_GO_TO_STABLE_PAGE});
+  }
   mainItems.push_back({MenuAction::AUTO_PAGE_TURN, StrId::STR_AUTO_TURN_INTERVAL_SECONDS});
   mainItems.push_back({MenuAction::READING_STATS, StrId::STR_READING_STATS});
   mainItems.push_back({MenuAction::READER_OPTIONS, StrId::STR_READER_OPTIONS});
@@ -369,26 +377,25 @@ bool EpubReaderMenuActivity::activateSelectedItem() {
 
   if (selectedAction == MenuAction::READER_OPTIONS) {
     const auto before = captureReaderLayoutSettings();
-    startActivityForResult(std::make_unique<ReaderOptionsActivity>(
-                               renderer, mappedInput, saveReaderSettingsCallback, saveReaderSettingsContext,
-                               saveGlobalSettingsCallback, saveGlobalSettingsContext, beginGlobalSettingsEditCallback,
-                               beginGlobalSettingsEditContext, endGlobalSettingsEditCallback,
-                               endGlobalSettingsEditContext, stablePageNumbersAvailable, dictionaryFontFamilyName,
-                               dictionaryFontPointSize, hasDictionaryFontOverride, dictionaryFontChangedForMenu, this),
-                           [this, before](const ActivityResult& result) {
-                             const ReaderSettingsChangeMask changed =
-                                 classifyReaderSettingsChange(before, captureReaderLayoutSettings());
-                             if (changed != ReaderSettingsChangeMask::None) {
-                               settingsChanged = true;
-                               changeMask = changeMask | changed;
-                             }
-                             pendingOrientation = SETTINGS.orientation;  // sync in case orientation changed
-                             if (result.isCancelled) {
-                               finishCancelled();
-                               return;
-                             }
-                             requestUpdate();
-                           });
+    startActivityForResult(
+        std::make_unique<ReaderOptionsActivity>(
+            renderer, mappedInput, saveReaderSettingsCallback, saveReaderSettingsContext, saveGlobalSettingsCallback,
+            saveGlobalSettingsContext, beginGlobalSettingsEditCallback, beginGlobalSettingsEditContext,
+            endGlobalSettingsEditCallback, endGlobalSettingsEditContext, stablePageCount > 0, dictionaryFontFamilyName,
+            dictionaryFontPointSize, hasDictionaryFontOverride, dictionaryFontChangedForMenu, this),
+        [this, before](const ActivityResult& result) {
+          const ReaderSettingsChangeMask changed = classifyReaderSettingsChange(before, captureReaderLayoutSettings());
+          if (changed != ReaderSettingsChangeMask::None) {
+            settingsChanged = true;
+            changeMask = changeMask | changed;
+          }
+          pendingOrientation = SETTINGS.orientation;  // sync in case orientation changed
+          if (result.isCancelled) {
+            finishCancelled();
+            return;
+          }
+          requestUpdate();
+        });
     return true;
   }
 
@@ -404,6 +411,27 @@ bool EpubReaderMenuActivity::activateSelectedItem() {
                              setResult(std::move(result));
                              finish();
                            });
+    return true;
+  }
+
+  if (selectedAction == MenuAction::GO_TO_STABLE_PAGE) {
+    auto selector = makeUniqueNoThrow<EpubReaderPercentSelectionActivity>(renderer, mappedInput, stableCurrentPage,
+                                                                          stablePageCount);
+    if (!selector) {
+      LOG_ERR("ERM", "Could not allocate stable page selector");
+      requestUpdate();
+      return true;
+    }
+    startActivityForResult(std::move(selector), [this](const ActivityResult& result) {
+      if (result.isCancelled) {
+        requestUpdate();
+        return;
+      }
+      MenuResult menu = makeMenuResult(static_cast<int>(MenuAction::GO_TO_STABLE_PAGE));
+      menu.drawerPage = std::get<PageResult>(result.data).page;
+      setResult(std::move(menu));
+      finish();
+    });
     return true;
   }
 
@@ -629,11 +657,22 @@ void EpubReaderMenuActivity::buildMenuScreen(UiApp::ScreenType& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, !mappedInput.hasTouch(), false);
   const int tabBarHeight = readerMenuTabBarHeight(metrics.tabBarHeight, mappedInput.hasTouch());
+#if CROSSINK_APP_CAP_TOUCH
   const bool tabsAtBottom = readerMenuTabsAtBottom(mappedInput);
+  // Sticky has touch but no frontlight, so this is compile-time false there;
+  // X4 Pro still evaluates the runtime placement check.
   const int contentTop = safe.y + metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) +
-                         metrics.tabBarHeight + (tabsAtBottom ? 0 : tabBarHeight) + metrics.verticalSpacing;
-  const int contentBottom =
-      renderer.getScreenHeight() - (safe.y + safe.height) + (tabsAtBottom ? tabBarHeight + metrics.verticalSpacing : 0);
+                         metrics.tabBarHeight +
+                         // cppcheck-suppress knownConditionTrueFalse
+                         (tabsAtBottom ? 0 : tabBarHeight) + metrics.verticalSpacing;
+  const int contentBottom = renderer.getScreenHeight() - (safe.y + safe.height) +
+                            // cppcheck-suppress knownConditionTrueFalse
+                            (tabsAtBottom ? tabBarHeight + metrics.verticalSpacing : 0);
+#else
+  const int contentTop = safe.y + metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) +
+                         metrics.tabBarHeight + tabBarHeight + metrics.verticalSpacing;
+  const int contentBottom = renderer.getScreenHeight() - (safe.y + safe.height);
+#endif
   // The legacy header, progress band, and icon tabs remain outside the app;
   // FreeInkUI owns the scalable list between them.
   screen.setContentMargin(fui::Insets{static_cast<int16_t>(contentTop),
@@ -683,7 +722,9 @@ void EpubReaderMenuActivity::render(RenderLock&&) {
   const bool hasTouch = mappedInput.hasTouch();
   Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, !hasTouch, false);
   const int tabBarHeight = readerMenuTabBarHeight(metrics.tabBarHeight, hasTouch);
+#if CROSSINK_APP_CAP_TOUCH
   const bool tabsAtBottom = readerMenuTabsAtBottom(mappedInput);
+#endif
 
   // The menu is a system screen, not reading content: its status indicators
   // stay visible unless their setting is Hide Always.
@@ -712,11 +753,20 @@ void EpubReaderMenuActivity::render(RenderLock&&) {
                          screen.width, metrics.tabBarHeight},
                     progressLine.c_str());
 
-  const int tabBarY = tabsAtBottom ? screen.y + screen.height - tabBarHeight
-                                   : screen.y + metrics.topPadding +
-                                         TouchHeaderBackButton::height(metrics, mappedInput) + metrics.tabBarHeight;
+  const int topTabBarY =
+      screen.y + metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.tabBarHeight;
+#if CROSSINK_APP_CAP_TOUCH
+  // cppcheck-suppress knownConditionTrueFalse
+  const int tabBarY = tabsAtBottom ? screen.y + screen.height - tabBarHeight : topTabBarY;
+#else
+  const int tabBarY = topTabBarY;
+#endif
   const Rect tabRect{screen.x, tabBarY, screen.width, tabBarHeight};
+#if CROSSINK_APP_CAP_TOUCH
   drawIconTabBar(tabRect, !tabsAtBottom);
+#else
+  drawIconTabBar(tabRect, true);
+#endif
 
   uiReady = false;
   app.render();

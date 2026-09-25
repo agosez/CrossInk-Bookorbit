@@ -74,19 +74,28 @@ TEST(ReaderDrawerModel, CatalogOrderAndConditionalRowsMatchTouchDesign) {
   EXPECT_EQ(minimalMore.items[0], ReaderDrawerCatalogItem::SelectChapter);
   EXPECT_EQ(minimalMore.items[2], ReaderDrawerCatalogItem::AutoPageTurn);
 
+  ReaderDrawerAvailability stableAvailable{};
+  stableAvailable.hasStablePageNumbers = true;
+  const ReaderDrawerCatalog stableCatalog = makeReaderDrawerCatalog(stableAvailable);
+  const auto& stableMore = stableCatalog[static_cast<size_t>(ReaderDrawerTab::More)];
+  EXPECT_EQ(stableMore.count, 4);
+  EXPECT_EQ(stableMore.items[1], ReaderDrawerCatalogItem::GoToPercent);
+  EXPECT_EQ(stableMore.items[2], ReaderDrawerCatalogItem::GoToStablePage);
+
   const auto& minimalLocation = minimal[static_cast<size_t>(ReaderDrawerTab::Location)];
   EXPECT_EQ(minimalLocation.count, 4);
   EXPECT_EQ(minimalLocation.items[0], ReaderDrawerCatalogItem::BookmarkToggle);
   EXPECT_EQ(minimalLocation.items[3], ReaderDrawerCatalogItem::DisplayQr);
 
-  const ReaderDrawerCatalog complete = makeReaderDrawerCatalog({true, true, true, true, true});
+  const ReaderDrawerCatalog complete = makeReaderDrawerCatalog({true, true, true, true, true, true});
   const auto& more = complete[static_cast<size_t>(ReaderDrawerTab::More)];
-  EXPECT_EQ(more.count, 6);
+  EXPECT_EQ(more.count, 7);
   EXPECT_EQ(more.items[0], ReaderDrawerCatalogItem::Lookup);
   EXPECT_EQ(more.items[1], ReaderDrawerCatalogItem::LookupHistory);
   EXPECT_EQ(more.items[2], ReaderDrawerCatalogItem::SelectChapter);
   EXPECT_EQ(more.items[3], ReaderDrawerCatalogItem::GoToPercent);
-  EXPECT_EQ(more.items[4], ReaderDrawerCatalogItem::AutoPageTurn);
+  EXPECT_EQ(more.items[4], ReaderDrawerCatalogItem::GoToStablePage);
+  EXPECT_EQ(more.items[5], ReaderDrawerCatalogItem::AutoPageTurn);
 
   const auto& location = complete[static_cast<size_t>(ReaderDrawerTab::Location)];
   EXPECT_EQ(location.count, 7);
@@ -156,6 +165,15 @@ TEST(ReaderDrawerModel, PercentStepsDoNotBecomeSettingsChanges) {
   EXPECT_TRUE(readerDrawerSliderPreviewsText(ReaderDrawerPane::Spacing));
   EXPECT_TRUE(readerDrawerSliderPreviewsText(ReaderDrawerPane::Margins));
   EXPECT_FALSE(readerDrawerSliderPreviewsText(ReaderDrawerPane::AutoPageTurn));
+  EXPECT_FALSE(readerDrawerSliderPreviewsText(ReaderDrawerPane::Percent));
+  EXPECT_FALSE(readerDrawerSliderPreviewsText(ReaderDrawerPane::StablePage));
+}
+
+TEST(ReaderDrawerModel, AntiAliasingOnlyRunsWhenTheReaderPreviewWasRedrawn) {
+  EXPECT_TRUE(shouldRenderReaderDrawerAntiAliasing(true, true, true));
+  EXPECT_FALSE(shouldRenderReaderDrawerAntiAliasing(false, true, true));
+  EXPECT_FALSE(shouldRenderReaderDrawerAntiAliasing(true, false, true));
+  EXPECT_FALSE(shouldRenderReaderDrawerAntiAliasing(true, true, false));
 }
 
 TEST(ReaderDrawerModel, TouchModeDoesNotRenderPhysicalButtonFocus) {
@@ -173,11 +191,12 @@ TEST(ReaderDrawerModel, LandscapeRootHeightReservesFourRealRows) {
   EXPECT_EQ(readerDrawerListHeightForRows(4, 52, 8), 232);
 }
 
-TEST(ReaderDrawerModel, OnlyDualSliderPanesUseTheTallLandscapeSheet) {
+TEST(ReaderDrawerModel, TallLandscapeSheetCoversDualSlidersAndTheKeypadPanes) {
   EXPECT_TRUE(readerDrawerNeedsTallLandscapeSheet(ReaderDrawerPane::Spacing));
   EXPECT_TRUE(readerDrawerNeedsTallLandscapeSheet(ReaderDrawerPane::Margins));
+  EXPECT_TRUE(readerDrawerNeedsTallLandscapeSheet(ReaderDrawerPane::Percent));
+  EXPECT_TRUE(readerDrawerNeedsTallLandscapeSheet(ReaderDrawerPane::StablePage));
   EXPECT_FALSE(readerDrawerNeedsTallLandscapeSheet(ReaderDrawerPane::Root));
-  EXPECT_FALSE(readerDrawerNeedsTallLandscapeSheet(ReaderDrawerPane::Percent));
   EXPECT_FALSE(readerDrawerNeedsTallLandscapeSheet(ReaderDrawerPane::AutoPageTurn));
 }
 

@@ -8,8 +8,7 @@
 #include <Memory.h>
 #include <MemoryBudget.h>
 
-#include <cstdlib>
-#include <new>
+#include <cstddef>
 
 #include "DirectPixelWriter.h"
 #include "DitherUtils.h"
@@ -93,9 +92,68 @@ int32_t jpegSeek(JPEGFILE* pFile, int32_t pos) {
   return pos;
 }
 
-// JPEGDEC object is ~17 KB due to internal decode buffers.
-// Heap-allocate on demand so memory is only used during active decode.
-constexpr uint32_t JPEG_DECODER_APPROX_SIZE = 20U * 1024U;
+// The parser uses this conservative admission budget before extracting an
+// image. Keep it in sync with the actual pinned JPEGDEC object below.
+static_assert(sizeof(JPEGDEC) <= MemoryBudget::JPEG_DECODER_APPROX_BYTES, "JPEGDEC exceeded its shared memory budget");
+static_assert(alignof(JPEGDEC) <= alignof(std::max_align_t), "JPEGDEC needs unsupported heap alignment");
+
+bool initJpegDecoder(HeapObject<JPEGDEC>& decoder, const char* imagePath) {
+  const MemoryPool preferredPool = MemoryBudget::jpegDecoderPool(sizeof(JPEGDEC));
+  if (preferredPool == MemoryPool::None) {
+    MemoryBudget::hasHeapForJpegDecoder("JPG", sizeof(JPEGDEC), imagePath);
+    return false;
+  }
+
+  if (decoder.init(preferredPool)) {
+    const auto internal = byteHeapSnapshot(MemoryPool::Internal);
+    const auto psram = byteHeapSnapshot(MemoryPool::Psram);
+    LOG_DBG("JPG", "JPEG decoder pool=%s bytes=%u; internal free=%u max=%u; psram free=%u max=%u",
+            memoryPoolName(decoder.pool()), static_cast<unsigned>(sizeof(JPEGDEC)),
+            static_cast<unsigned>(internal.free), static_cast<unsigned>(internal.largest),
+            static_cast<unsigned>(psram.free), static_cast<unsigned>(psram.largest));
+    return true;
+  }
+
+  if (preferredPool != MemoryPool::Psram) {
+    const auto internal = byteHeapSnapshot(MemoryPool::Internal);
+    const auto psram = byteHeapSnapshot(MemoryPool::Psram);
+    LOG_ERR("JPG",
+            "Failed to allocate JPEG decoder in internal heap (%u bytes; internal free=%u max=%u; psram free=%u "
+            "max=%u)",
+            static_cast<unsigned>(sizeof(JPEGDEC)), static_cast<unsigned>(internal.free),
+            static_cast<unsigned>(internal.largest), static_cast<unsigned>(psram.free),
+            static_cast<unsigned>(psram.largest));
+    return false;
+  }
+
+  // A pool snapshot is only a preflight. If PSRAM changed before allocation,
+  // take a fresh snapshot and use the established internal route only when it
+  // remains safe; never weaken the C3 threshold as a fallback.
+  const auto internal = byteHeapSnapshot(MemoryPool::Internal);
+  const auto psram = byteHeapSnapshot(MemoryPool::Psram);
+  LOG_ERR("JPG",
+          "Failed to allocate JPEG decoder in PSRAM (%u bytes; internal free=%u max=%u; psram free=%u max=%u); "
+          "checking internal fallback",
+          static_cast<unsigned>(sizeof(JPEGDEC)), static_cast<unsigned>(internal.free),
+          static_cast<unsigned>(internal.largest), static_cast<unsigned>(psram.free),
+          static_cast<unsigned>(psram.largest));
+  if (!MemoryBudget::canUseInternalHeapForJpegDecoder(internal)) {
+    MemoryBudget::hasHeapForJpegDecoder("JPG", sizeof(JPEGDEC), imagePath);
+    return false;
+  }
+  if (!decoder.init(MemoryPool::Internal)) {
+    LOG_ERR("JPG", "Failed to allocate JPEG decoder in safe internal fallback (%u bytes)",
+            static_cast<unsigned>(sizeof(JPEGDEC)));
+    return false;
+  }
+
+  LOG_DBG("JPG", "JPEG decoder pool=internal fallback bytes=%u; internal free=%u max=%u; psram free=%u max=%u",
+          static_cast<unsigned>(sizeof(JPEGDEC)), static_cast<unsigned>(byteHeapSnapshot(MemoryPool::Internal).free),
+          static_cast<unsigned>(byteHeapSnapshot(MemoryPool::Internal).largest),
+          static_cast<unsigned>(byteHeapSnapshot(MemoryPool::Psram).free),
+          static_cast<unsigned>(byteHeapSnapshot(MemoryPool::Psram).largest));
+  return true;
+}
 
 // Choose JPEGDEC's built-in scale factor for coarse downscaling.
 // Returns the scale denominator (1, 2, 4, or 8) and sets jpegScaleOption.
@@ -360,39 +418,31 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
 }  // namespace
 
 bool JpegToFramebufferConverter::getDimensionsStatic(const std::string& imagePath, ImageDimensions& out) {
-  if (!MemoryBudget::hasHeapForImageDecoder("JPG", "JPEG", JPEG_DECODER_APPROX_SIZE)) {
-    return false;
-  }
-
-  JPEGDEC* jpeg = new (std::nothrow) JPEGDEC();
-  if (!jpeg) {
+  HeapObject<JPEGDEC> jpeg;
+  if (!initJpegDecoder(jpeg, imagePath.c_str())) {
     LOG_ERR("JPG", "Failed to allocate JPEG decoder for dimensions");
     return false;
   }
 
+  // JPEGDEC does not close a file when JPEGInit rejects a malformed header,
+  // and close() is not idempotent. Keep exactly one close after every attempt.
+  const auto closeJpeg = ScopedCleanup{[&jpeg] { jpeg->close(); }};
   int rc = jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, nullptr);
   if (rc != 1) {
     LOG_ERR("JPG", "Failed to open JPEG for dimensions (err=%d): %s", jpeg->getLastError(), imagePath.c_str());
-    delete jpeg;
     return false;
   }
 
   out.width = jpeg->getWidth();
   out.height = jpeg->getHeight();
 
-  jpeg->close();
-  delete jpeg;
   return true;
 }
 
 bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath, GfxRenderer& renderer,
                                                      const RenderConfig& config) {
-  if (!MemoryBudget::hasHeapForImageDecoder("JPG", "JPEG", JPEG_DECODER_APPROX_SIZE)) {
-    return false;
-  }
-
-  JPEGDEC* jpeg = new (std::nothrow) JPEGDEC();
-  if (!jpeg) {
+  HeapObject<JPEGDEC> jpeg;
+  if (!initJpegDecoder(jpeg, imagePath.c_str())) {
     LOG_ERR("JPG", "Failed to allocate JPEG decoder");
     return false;
   }
@@ -403,10 +453,12 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   ctx.screenWidth = renderer.getScreenWidth();
   ctx.screenHeight = renderer.getScreenHeight();
 
+  // Keep exactly one close after every attempted open, including malformed
+  // JPEGs where JPEGDEC returns from JPEGInit without closing its file handle.
+  const auto closeJpeg = ScopedCleanup{[&jpeg] { jpeg->close(); }};
   int rc = jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDrawCallback);
   if (rc != 1) {
     LOG_ERR("JPG", "Failed to open JPEG (err=%d): %s", jpeg->getLastError(), imagePath.c_str());
-    delete jpeg;
     return false;
   }
 
@@ -415,14 +467,10 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
 
   if (srcWidth <= 0 || srcHeight <= 0) {
     LOG_ERR("JPG", "Invalid JPEG dimensions: %dx%d", srcWidth, srcHeight);
-    jpeg->close();
-    delete jpeg;
     return false;
   }
 
   if (!validateImageDimensions(srcWidth, srcHeight, "JPEG", MAX_JPEG_SOURCE_WIDTH)) {
-    jpeg->close();
-    delete jpeg;
     return false;
   }
 
@@ -465,8 +513,6 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   if (destWidth <= 0 || destHeight <= 0) {
     LOG_ERR("JPG", "Degenerate output dimensions %dx%d for %s, skipping render", destWidth, destHeight,
             imagePath.c_str());
-    jpeg->close();
-    delete jpeg;
     return false;
   }
 
@@ -477,8 +523,6 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   if (ctx.scaledSrcWidth <= 0 || ctx.scaledSrcHeight <= 0) {
     LOG_ERR("JPG", "Invalid scaled JPEG dimensions: src=%dx%d scaled=%dx%d dst=%dx%d", srcWidth, srcHeight,
             ctx.scaledSrcWidth, ctx.scaledSrcHeight, destWidth, destHeight);
-    jpeg->close();
-    delete jpeg;
     return false;
   }
 
@@ -504,18 +548,16 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   }
 
   ctx.lastYieldMs = millis();
+  const uint32_t decodeStarted = millis();
   rc = jpeg->decode(0, 0, jpegScaleOption);
+  LOG_DBG("JPG", "Decoded %s: ok=%d time=%ums", imagePath.c_str(), rc == 1,
+          static_cast<unsigned>(millis() - decodeStarted));
 
   if (rc != 1) {
     LOG_ERR("JPG", "Decode failed (rc=%d, lastError=%d)", rc, jpeg->getLastError());
     if (ctx.caching) ctx.cache.abort();
-    jpeg->close();
-    delete jpeg;
     return false;
   }
-
-  jpeg->close();
-  delete jpeg;
 
   // Finalize the streamed cache file. Note: a flush failure mid-decode clears
   // ctx.caching (the partial file is dropped), so re-read the flag here.

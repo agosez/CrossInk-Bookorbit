@@ -6,6 +6,7 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <SdCardFontSystem.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -514,6 +515,7 @@ bool NearbyBookTransferActivity::finishReceivedFile(const uint64_t expectedBytes
   }
   if (replacing) Storage.remove(backupPath_.c_str());
   ImageFolderIndex::invalidateForPath(finalPath_.c_str());
+  sdFontSystem.markRegistryDirtyForPath(finalPath_.c_str());
   return true;
 }
 

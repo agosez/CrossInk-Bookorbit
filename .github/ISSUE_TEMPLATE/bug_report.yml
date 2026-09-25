@@ -18,6 +18,7 @@ body:
         - X4
         - X3
         - X4 Pro
+        - X4 Classic
         - Seeed Sticky
     validations:
       required: true

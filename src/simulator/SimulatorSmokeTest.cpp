@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "CrossPointSettings.h"
+#include "DeviceCapabilities.h"
 #include "MappedInputManager.h"
 #include "SettingsList.h"
 #include "activities/ActivityManager.h"
@@ -182,6 +183,10 @@ class SimulatorSmokeTest {
   }
 
   static void verifyReaderControlsSettings() {
+    const auto& base = getBaseSettingsList();
+    if (base.size() > BASE_SETTINGS_CAPACITY || base.capacity() < BASE_SETTINGS_CAPACITY) {
+      fail("Base settings allocation mismatch: size=%zu capacity=%zu", base.size(), base.capacity());
+    }
     const auto all = getSettingsList();
     const auto gestures = buildControlsTapsGesturesSettingsList(all);
     if (gpio.hasTouch()) {
@@ -189,8 +194,11 @@ class SimulatorSmokeTest {
           gestures[1].nameId != StrId::STR_PREV_PAGE || gestures[0].enumValues != gestures[1].enumValues) {
         fail("Page gesture settings order/options mismatch");
       }
-      const size_t statusIndex = gpio.supportsMultiTouch() ? 3 : 2;
-      if (gestures[statusIndex].nameId != StrId::STR_TAP_HIDE_STATUS_BAR) {
+      if (gpio.supportsMultiTouch() && (gestures.size() < 4 || gestures[3].nameId != StrId::STR_TWO_FINGER_ROTATION)) {
+        fail("Two-finger rotation gesture setting order mismatch");
+      }
+      const size_t statusIndex = gpio.supportsMultiTouch() ? 4 : 2;
+      if (gestures.size() <= statusIndex || gestures[statusIndex].nameId != StrId::STR_TAP_HIDE_STATUS_BAR) {
         fail("Status bar gesture setting order mismatch");
       }
     } else if (!gestures.empty()) {
@@ -210,6 +218,43 @@ class SimulatorSmokeTest {
       if (SETTINGS.pageTurnGesture != mode || SETTINGS.previousPageGesture != mode) {
         fail("Legacy page gesture migration mismatch");
       }
+    }
+    constexpr uint8_t importedGestures[] = {CrossPointSettings::TAP_AND_SWIPE, CrossPointSettings::TAP_ONLY,
+                                            CrossPointSettings::SWIPE_ONLY, CrossPointSettings::INVERTED_TAP};
+    for (uint8_t mode = 0; mode < 4; ++mode) {
+      JsonDocument crosspoint;
+      crosspoint["touchReaderControls"] = mode;
+      crosspoint["disableReaderTouchscreen"] = 1;
+      SETTINGS.fromJson(crosspoint.as<JsonVariantConst>(), true);
+      if (SETTINGS.disableReaderTouchscreen || SETTINGS.touchReaderControls != (mode != 0) ||
+          SETTINGS.pageTurnGesture != importedGestures[mode] ||
+          SETTINGS.previousPageGesture != importedGestures[mode]) {
+        fail("CrossPoint touch settings migration mismatch");
+      }
+      JsonDocument migrated;
+      SETTINGS.toJson(migrated);
+      SETTINGS.disableReaderTouchscreen = 1;
+      SETTINGS.pageTurnGesture = CrossPointSettings::PAGE_TURN_GESTURE_DISABLED;
+      SETTINGS.previousPageGesture = CrossPointSettings::PAGE_TURN_GESTURE_DISABLED;
+      SETTINGS.fromJson(migrated.as<JsonVariantConst>());
+      if (SETTINGS.disableReaderTouchscreen || SETTINGS.touchReaderControls != (mode != 0) ||
+          SETTINGS.pageTurnGesture != importedGestures[mode] ||
+          SETTINGS.previousPageGesture != importedGestures[mode]) {
+        fail("Migrated CrossPoint touch settings did not survive reload");
+      }
+    }
+    // The namespaced file must preserve intentional locks, including older files without gesture keys.
+    JsonDocument locked;
+    locked["touchReaderControls"] = 1;
+    locked["disableReaderTouchscreen"] = 1;
+    SETTINGS.fromJson(locked.as<JsonVariantConst>());
+    if (!SETTINGS.disableReaderTouchscreen) fail("CrossInk touch lock was lost");
+    locked["pageTurnGesture"] = CrossPointSettings::TAP_ONLY;
+    locked["previousPageGesture"] = CrossPointSettings::PAGE_TURN_GESTURE_DISABLED;
+    SETTINGS.fromJson(locked.as<JsonVariantConst>(), true);
+    if (!SETTINGS.disableReaderTouchscreen || SETTINGS.pageTurnGesture != CrossPointSettings::TAP_ONLY ||
+        SETTINGS.previousPageGesture != CrossPointSettings::PAGE_TURN_GESTURE_DISABLED) {
+      fail("Legacy CrossInk gesture settings were treated as CrossPoint");
     }
     SETTINGS.previousPageGesture = CrossPointSettings::SWIPE_ONLY;
     SETTINGS.pageTurnGesture = CrossPointSettings::TAP_ONLY;
@@ -235,12 +280,45 @@ class SimulatorSmokeTest {
     const bool hasSideButtonChord =
         std::any_of(sideButtonSettings.begin(), sideButtonSettings.end(),
                     [](const SettingInfo& setting) { return setting.nameId == StrId::STR_SIDE_BUTTON_CHORD; });
-    if (hasSideButtonChord != gpio.hasTouch()) {
-      fail("Side-button chord availability does not match touch capability");
+    if (hasSideButtonChord != deviceSupportsSideButtonChord(gpio)) {
+      fail("Side-button chord availability does not match device controls");
     }
 
-    if (QuickActionsActivityTest::isTriggerAvailable(QuickActions::Trigger::UpDown) != gpio.hasTouch()) {
-      fail("Quick Actions Up + Down availability does not match touch capability");
+    if (QuickActionsActivityTest::isTriggerAvailable(QuickActions::Trigger::UpDown) !=
+        deviceSupportsSideButtonChord(gpio)) {
+      fail("Quick Actions Up + Down availability does not match device controls");
+    }
+
+    const auto chordSetting = std::find_if(allSettings.begin(), allSettings.end(), [](const SettingInfo& setting) {
+      return settingKeyIs(setting, "powerChordAction");
+    });
+    if (chordSetting == allSettings.end()) fail("Power chord setting is missing");
+    if (std::find(chordSetting->enumRawValues.begin(), chordSetting->enumRawValues.end(),
+                  CrossPointSettings::CHORD_SLEEP) != chordSetting->enumRawValues.end()) {
+      fail("Sleep is still offered for a chord that cannot wake the device");
+    }
+    if (std::find(chordSetting->enumRawValues.begin(), chordSetting->enumRawValues.end(),
+                  CrossPointSettings::CHORD_QUICK_ACTIONS) == chordSetting->enumRawValues.end()) {
+      fail("Quick Actions is missing from the Power + Up chord setting");
+    }
+    if (!gpio.hasHomeKey() &&
+        std::find(chordSetting->enumRawValues.begin(), chordSetting->enumRawValues.end(),
+                  CrossPointSettings::CHORD_TOGGLE_HOME_BUTTON) != chordSetting->enumRawValues.end()) {
+      fail("Toggle Home Button is still offered without a Home key");
+    }
+    if (std::find(chordSetting->enumRawValues.begin(), chordSetting->enumRawValues.end(),
+                  CrossPointSettings::CHORD_PREVIOUS_PAGE) == chordSetting->enumRawValues.end()) {
+      fail("Previous Page was removed by an unrelated power-button action ID");
+    }
+    if (!gpio.hasTouch() &&
+        std::find(chordSetting->enumRawValues.begin(), chordSetting->enumRawValues.end(),
+                  CrossPointSettings::CHORD_TOGGLE_TOUCHSCREEN) != chordSetting->enumRawValues.end()) {
+      fail("Toggle Touchscreen is still offered without touch hardware");
+    }
+    if (!Frontlight.present() &&
+        std::find(chordSetting->enumRawValues.begin(), chordSetting->enumRawValues.end(),
+                  CrossPointSettings::CHORD_TOGGLE_FRONTLIGHT) != chordSetting->enumRawValues.end()) {
+      fail("Toggle Frontlight is still offered without a frontlight");
     }
   }
 
