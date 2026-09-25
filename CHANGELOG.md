@@ -19,6 +19,7 @@ Based on CrossInk v1.6.0.
 
 ### Fixed
 
+- The BookOrbit catalog no longer lists books that have no EPUB, such as audiobook-only records, in browsing and search. They looked the same as the ebook of the same title and failed with "No EPUB format available" once chosen. Books that come in both formats are still listed. The "All books", "Recently added" and "Continue reading" counts on the catalog's first screen now count only those EPUBs.
 - The BookOrbit catalog's "Continue reading" now lists only the books you are reading, as its count says. It used to list the whole library, most recently read first.
 - Choosing BookOrbit Sync from the reader menu without an account set up now opens the BookOrbit settings, instead of doing nothing. The shortcut already did this; the menu entry now behaves the same.
 - A book downloaded from the BookOrbit catalog stays marked as on the device, and listed under "On device", after you rename it in the File Browser (new in CrossInk v1.6.0) or move it, including the end-of-book move to a read folder. The catalog used to lose track of it and offer it for download again.

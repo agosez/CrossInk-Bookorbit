@@ -227,8 +227,9 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   }
 
   // Per-section entry counts, the way BookOrbit's own plugin badges its Browse
-  // tiles: one dashboard request, cached with the listings. Non-fatal — an older
-  // server without the dashboard just shows the sections without counts.
+  // tiles: the dashboard plus the totals of the two EPUB book listings, cached
+  // with the listings. Non-fatal — an older server without the dashboard just
+  // shows the sections without counts.
   BookOrbitCatalogCounts counts;
   if (!BookOrbitCatalogListCache::loadCatalogCounts(counts) && allowNetwork &&
       BookOrbitCatalogClient::fetchCatalogCounts(counts)) {

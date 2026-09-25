@@ -30,7 +30,10 @@ push and on CI.
   user → KOReader sync credentials), waits for the library ingestion, then
   plays a **synthetic device** over the same kosync API the firmware speaks
   (`/api/v1/koreader/...`) to pre-load reading progress, highlights and
-  bookmarks on a subset of books. Two-device scenarios use this synthetic
+  bookmarks on a subset of books. It also uploads the non-EPUB records the
+  catalog must hide or keep: an audiobook-only book (a generated silent MP3)
+  that shares an EPUB's title and author, and an audio file attached to
+  another EPUB. Both are marked as being read. Two-device scenarios use this synthetic
   device as the "other" reader — the simulator's MAC is fixed, so two real
   simulator instances would share one device id.
 - **Harness**: [harness/run_scenarios.py](harness/run_scenarios.py) prepares an
@@ -99,6 +102,7 @@ scenarios, compose down.
 | `catalog_collections_browse` | Scripted UI navigation: home menu → BookOrbit catalog → Collections → the seeded collection; asserted through the browser's list cache. The catalog flow never silent-reboots before exit, so input scripts drive it end to end. |
 | `catalog_empty_listing_back` | Opening the seeded empty collection shows the no-entries error; Back climbs out of it and the next listing still loads (regression: Back reloaded the same empty listing forever). |
 | `catalog_libraries_browse` | Libraries as a browsable root section: its listing carries the seeded library's book count, opening it lists that library's books (cache key carries the library id), and the root's per-section counts (dashboard fetch) are cached. |
+| `catalog_hides_non_epub` | Continue reading and Recently added list only EPUBs: the audiobook-only record is absent, the EPUB+audio record stays, and the root's two book counts equal those listings' totals rather than the dashboard's all-format ones. Continue reading lists only books being read. Expected numbers come from the server's own filtered listings. |
 | `catalog_download_naming` | A download lands where the account's KOReader file naming template says, folders created on the way, instead of a flat `Title - Author.epub`. The expected path is the `devicePath` the server itself resolved for the book the browser listed first, so the test never reimplements the template. A second run then proves "On device" still counts the book, which it can only do from the download index. |
 
 ### Repeatability

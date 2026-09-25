@@ -181,10 +181,13 @@ bool BookOrbitCatalogClient::fetchRootSections(std::vector<BookOrbitCatalogSecti
 }
 
 namespace {
-// The books listing URL for one page of a query.
+// The books listing URL for one page of a query. Only EPUBs can be downloaded, so
+// the server drops audiobook-only and other non-EPUB records: it filters before
+// paginating, which keeps pages full and `total` accurate, and keeps mixed-format
+// records that include an EPUB.
 std::string booksUrl(const BookOrbitBookQuery& query, const int page, const int size) {
   std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/books?page=" + std::to_string(page) +
-                    "&size=" + std::to_string(size);
+                    "&size=" + std::to_string(size) + "&format=epub";
   if (!query.sort.empty()) {
     url += "&sort=" + urlEncode(query.sort);
   }
@@ -214,6 +217,19 @@ std::string booksUrl(const BookOrbitBookQuery& query, const int page, const int 
   }
   return url;
 }
+
+// The total of a books listing, read from a single-item page. -1 on failure.
+int fetchBookTotal(const BookOrbitBookQuery& query) {
+  JsonDocument filter;
+  filter["total"] = true;
+  JsonDocument doc;
+  if (!fetchJson(booksUrl(query, 1, 1), filter, doc)) {
+    LOG_ERR("BookOrbit", "Book total unavailable for sort=%s readStatus=%s", query.sort.c_str(),
+            query.readStatus.c_str());
+    return -1;
+  }
+  return doc["total"] | -1;
+}
 }  // namespace
 
 BookOrbitBookQuery BookOrbitCatalogClient::sectionBookQuery(const std::string& sectionId) {
@@ -235,8 +251,6 @@ bool BookOrbitCatalogClient::fetchCatalogCounts(BookOrbitCatalogCounts& outCount
 
   const std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/dashboard";
   JsonDocument filter;
-  filter["totalBooks"] = true;
-  filter["browseCounts"]["inProgress"] = true;
   filter["browseCounts"]["libraries"] = true;
   filter["browseCounts"]["authors"] = true;
   filter["browseCounts"]["series"] = true;
@@ -245,13 +259,17 @@ bool BookOrbitCatalogClient::fetchCatalogCounts(BookOrbitCatalogCounts& outCount
   JsonDocument doc;
   if (!fetchJson(url, filter, doc)) return false;
 
-  outCounts.totalBooks = doc["totalBooks"] | -1;
-  outCounts.inProgress = doc["browseCounts"]["inProgress"] | -1;
   outCounts.libraries = doc["browseCounts"]["libraries"] | -1;
   outCounts.authors = doc["browseCounts"]["authors"] | -1;
   outCounts.series = doc["browseCounts"]["series"] | -1;
   outCounts.collections = doc["browseCounts"]["collections"] | -1;
   outCounts.smartScopes = doc["browseCounts"]["smartScopes"] | -1;
+  // Free the dashboard document before the next two requests' TLS sessions.
+  doc.clear();
+
+  // "Recently added" lists the same books as "All books", in another order.
+  outCounts.totalBooks = fetchBookTotal(sectionBookQuery("all-books"));
+  outCounts.inProgress = fetchBookTotal(sectionBookQuery("continue-reading"));
   return true;
 }
 

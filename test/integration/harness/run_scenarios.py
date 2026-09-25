@@ -752,8 +752,10 @@ def scenario_catalog_libraries_browse(verbose: bool) -> None:
         facets = [c for c in caches if "hasNext" in c]
         library_rows = [i for c in facets for i in c["items"] if i["title"] == "Integration"]
         assert library_rows, f"the libraries listing never loaded: {facets}"
-        assert library_rows[0]["count"] == len(books), \
-            f"library book count wrong: {library_rows[0]['count']} != {len(books)}"
+        # The per-library count comes from the server and covers every format, so
+        # it includes the seeded audiobook-only book the listing itself hides.
+        assert library_rows[0]["count"] == len(books) + 1, \
+            f"library book count wrong: {library_rows[0]['count']} != {len(books) + 1}"
         scoped = [c for c in caches if c.get("key", "").split("|")[-1] != "" and "total" in c]
         assert scoped, "no book listing was fetched with a libraryId"
         assert scoped[0]["total"] == len(books), \
@@ -797,6 +799,65 @@ def scenario_catalog_smart_scopes_browse(verbose: bool) -> None:
         listed = {b["title"] for b in books[0]["items"]}
         expected = {Path(b["file"]).stem for b in scope["books"]}
         assert listed == expected, f"SmartScope books mismatch: {listed} != {expected}"
+
+
+def scenario_catalog_hides_non_epub(verbose: bool) -> None:
+    """The catalog lists only books it can download: the audiobook-only record,
+    which shares an EPUB's title and author, is absent, while the book holding
+    both an EPUB and an audio file stays. The seed uploads the audiobook after
+    the library and marks it as being read, so an unfiltered listing would show
+    it first in Recently added and among Continue reading. The root's two book
+    counts must match those EPUB listings, not the dashboard's all-format
+    totals, and Continue reading lists only the books being read."""
+    manifest, _ = load_seed()
+    non_epub = manifest["non_epub"]
+    server = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                          manifest["kosync"]["password"], SIM_DEVICE_ID)
+    epub_total = server.catalog_page(size=1, format="epub")["total"]
+    reading_total = server.catalog_page(size=1, format="epub", readStatus="reading")["total"]
+    # Guards on the fixture itself: without these gaps the test proves nothing.
+    assert server.catalog_page(size=1)["total"] > epub_total, "the seed holds no non-EPUB book"
+    assert server.catalog_page(size=1, readStatus="reading")["total"] > reading_total, \
+        "the seeded audiobook is not marked as being read"
+    assert reading_total <= 20, "Continue reading no longer fits on one page; check whole pages"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])  # no open book: boots to home
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",  # home menu -> BookOrbit catalog
+            "11000:CONFIRM",                           # root -> Continue reading (1st row)
+            "14000:BACK",                              # back to the root
+            "16000:DOWN", "16350:CONFIRM",             # Recently added (2nd row)
+            "19500:QUIT",
+        ])
+        run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
+
+        caches = [json.loads(p.read_text())
+                  for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
+        counts = [c for c in caches if "totalBooks" in c]
+        assert counts, "the root's section counts were never cached"
+        assert counts[0]["totalBooks"] == epub_total, \
+            f"All books count {counts[0]['totalBooks']} != {epub_total} EPUBs"
+        assert counts[0]["inProgress"] == reading_total, \
+            f"Continue reading count {counts[0]['inProgress']} != {reading_total} EPUBs being read"
+
+        # Book cache keys are books|page|sort|readStatus|...
+        listings = {tuple(c["key"].split("|")[2:4]): c for c in caches
+                    if c.get("key", "").startswith("books|")}
+        reading = listings.get(("recently_read", "reading"))
+        recent = listings.get(("recently_added", ""))
+        assert reading, f"Continue reading never listed with readStatus=reading: {sorted(listings)}"
+        assert recent, f"Recently added was never listed: {sorted(listings)}"
+        assert reading["total"] == reading_total, \
+            f"Continue reading total {reading['total']} != {reading_total}"
+        assert recent["total"] == epub_total, f"Recently added total {recent['total']} != {epub_total}"
+
+        reading_ids = {i["id"] for i in reading["items"]}
+        recent_ids = {i["id"] for i in recent["items"]}
+        assert non_epub["audiobook_id"] not in reading_ids | recent_ids, \
+            f"the audiobook-only {non_epub['audiobook_title']!r} is listed"
+        assert non_epub["mixed_id"] in reading_ids, \
+            f"the EPUB+audio {non_epub['mixed_title']!r} is missing from Continue reading"
 
 
 def scenario_catalog_download_naming(verbose: bool) -> None:
@@ -898,6 +959,7 @@ SCENARIOS = {
     "catalog_libraries_browse": scenario_catalog_libraries_browse,
     "catalog_smart_scopes_browse": scenario_catalog_smart_scopes_browse,
     "catalog_download_naming": scenario_catalog_download_naming,
+    "catalog_hides_non_epub": scenario_catalog_hides_non_epub,
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,
     "highlight_pull": scenario_highlight_pull,
