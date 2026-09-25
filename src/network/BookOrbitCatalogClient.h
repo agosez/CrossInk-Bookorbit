@@ -51,6 +51,7 @@ struct BookOrbitFacetPage {
 /** Filters for a book listing request; empty fields are omitted from the query. */
 struct BookOrbitBookQuery {
   std::string sort;          // BookOrbit sort id (e.g. "recently_added", "title", "series")
+  std::string readStatus;    // read-status filter ("reading" for Continue reading)
   std::string query;         // free-text search
   std::string author;        // author filter (facet entry id)
   std::string seriesId;      // numeric series filter (preferred when present)
@@ -126,6 +127,12 @@ class BookOrbitCatalogClient {
    * counts are decorative, so callers treat that as "show no counts".
    */
   static bool fetchCatalogCounts(BookOrbitCatalogCounts& outCounts);
+
+  /**
+   * The listing query behind a root book section ("recent", "continue-reading",
+   * "all-books"), mirroring the booksHref the server gives each of them.
+   */
+  static BookOrbitBookQuery sectionBookQuery(const std::string& sectionId);
 
   /**
    * Fetch a page of books matching the given filters.

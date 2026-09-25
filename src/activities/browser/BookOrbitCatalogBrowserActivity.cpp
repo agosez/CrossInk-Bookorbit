@@ -752,10 +752,7 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
   const auto& entry = entries[selectorIndex];
   switch (entry.type) {
     case EntryType::SECTION: {
-      BookOrbitBookQuery query;
-      query.sort = entry.sectionId == "continue-reading" ? "recently_read"
-                   : entry.sectionId == "all-books"      ? "title"
-                                                         : "recently_added";
+      const BookOrbitBookQuery query = BookOrbitCatalogClient::sectionBookQuery(entry.sectionId);
       if (!loadBooks(query, entry.title, 1, /*fromFacet=*/false, /*append=*/false, /*allowNetwork=*/false)) {
         showLoadingBeforeFetch();
         loadBooks(query, entry.title, 1, /*fromFacet=*/false);

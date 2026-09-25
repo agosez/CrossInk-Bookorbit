@@ -180,6 +180,55 @@ bool BookOrbitCatalogClient::fetchRootSections(std::vector<BookOrbitCatalogSecti
   return true;
 }
 
+namespace {
+// The books listing URL for one page of a query.
+std::string booksUrl(const BookOrbitBookQuery& query, const int page, const int size) {
+  std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/books?page=" + std::to_string(page) +
+                    "&size=" + std::to_string(size);
+  if (!query.sort.empty()) {
+    url += "&sort=" + urlEncode(query.sort);
+  }
+  if (!query.readStatus.empty()) {
+    url += "&readStatus=" + urlEncode(query.readStatus);
+  }
+  if (!query.query.empty()) {
+    url += "&q=" + urlEncode(query.query);
+  }
+  if (!query.author.empty()) {
+    url += "&author=" + urlEncode(query.author);
+  }
+  // Mirror BookOrbit's own plugin: prefer the numeric series id, fall back to name.
+  if (!query.seriesId.empty()) {
+    url += "&seriesId=" + urlEncode(query.seriesId);
+  } else if (!query.series.empty()) {
+    url += "&series=" + urlEncode(query.series);
+  }
+  if (!query.collectionId.empty()) {
+    url += "&collectionId=" + urlEncode(query.collectionId);
+  }
+  if (!query.smartScopeId.empty()) {
+    url += "&smartScopeId=" + urlEncode(query.smartScopeId);
+  }
+  if (!query.libraryId.empty()) {
+    url += "&libraryId=" + urlEncode(query.libraryId);
+  }
+  return url;
+}
+}  // namespace
+
+BookOrbitBookQuery BookOrbitCatalogClient::sectionBookQuery(const std::string& sectionId) {
+  BookOrbitBookQuery query;
+  if (sectionId == "continue-reading") {
+    query.sort = "recently_read";
+    query.readStatus = "reading";
+  } else if (sectionId == "all-books") {
+    query.sort = "title";
+  } else {
+    query.sort = "recently_added";
+  }
+  return query;
+}
+
 bool BookOrbitCatalogClient::fetchCatalogCounts(BookOrbitCatalogCounts& outCounts) {
   outCounts = BookOrbitCatalogCounts{};
   if (!BOOKORBIT_STORE.hasCredentials()) return false;
@@ -210,32 +259,7 @@ bool BookOrbitCatalogClient::fetchBooks(const BookOrbitBookQuery& query, const i
   outPage = BookOrbitBookPage{};
   if (!BOOKORBIT_STORE.hasCredentials()) return false;
 
-  std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/books?page=" + std::to_string(page) +
-                    "&size=" + std::to_string(PAGE_SIZE);
-  if (!query.sort.empty()) {
-    url += "&sort=" + urlEncode(query.sort);
-  }
-  if (!query.query.empty()) {
-    url += "&q=" + urlEncode(query.query);
-  }
-  if (!query.author.empty()) {
-    url += "&author=" + urlEncode(query.author);
-  }
-  // Mirror BookOrbit's own plugin: prefer the numeric series id, fall back to name.
-  if (!query.seriesId.empty()) {
-    url += "&seriesId=" + urlEncode(query.seriesId);
-  } else if (!query.series.empty()) {
-    url += "&series=" + urlEncode(query.series);
-  }
-  if (!query.collectionId.empty()) {
-    url += "&collectionId=" + urlEncode(query.collectionId);
-  }
-  if (!query.smartScopeId.empty()) {
-    url += "&smartScopeId=" + urlEncode(query.smartScopeId);
-  }
-  if (!query.libraryId.empty()) {
-    url += "&libraryId=" + urlEncode(query.libraryId);
-  }
+  const std::string url = booksUrl(query, page, PAGE_SIZE);
 
   JsonDocument filter;
   filter["page"] = true;
