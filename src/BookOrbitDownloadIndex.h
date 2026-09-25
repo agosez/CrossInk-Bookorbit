@@ -14,9 +14,11 @@
  * source of truth.
  *
  * Backed by /.crosspoint/bookorbit_downloads.bin (see docs/file-formats.md). The
- * index is loaded lazily on first use and freed with unload(); the catalog
- * activity, and book renames/moves through relocate(), all run on the main task,
- * so access is not locked.
+ * index is loaded lazily on first use and freed with unload(). Only fixed-size
+ * records live in RAM (24 bytes per book); paths stay in the file and are read
+ * back when a lookup needs one, which is what lets the index hold hundreds of
+ * books (thousands with PSRAM). The catalog activity, and book renames/moves
+ * through relocate(), all run on the main task, so access is not locked.
  * Book ids are scoped to one server: the file records the configured server URL
  * and is discarded when it no longer matches.
  */
@@ -24,7 +26,7 @@ namespace BookOrbitDownloadIndex {
 
 // Fetches the recorded on-device path for a catalog book. Returns false when the
 // book was never recorded or its file is gone or replaced (the stale entry is
-// dropped and the index file updated).
+// dropped, and the index file updated on the next write or on unload()).
 bool lookup(int64_t bookId, std::string& outPath);
 
 // Records where a catalog download landed. The file's current size is stored for
@@ -33,7 +35,7 @@ void record(int64_t bookId, const std::string& path);
 
 // Visits every recorded download whose file is still there, unchanged. This is what
 // lets the catalog list its own downloads wherever the server's file naming template
-// filed them, without walking the card.
+// filed them, without walking the card. visit must not call back into the index.
 void forEachExisting(void (*visit)(int64_t bookId, const std::string& path, void* context), void* context);
 
 // True when some recorded download claims this exact path. Lets a directory scan
@@ -49,7 +51,8 @@ void relocate(const std::string& oldPath, const std::string& newPath);
 // deleted outside the catalog stays counted until a lookup finds it gone.
 size_t recordedCount();
 
-// Frees the in-RAM copy; the next lookup or record reloads it from the SD card.
+// Saves any stale entries lookup() dropped, then frees the in-RAM copy; the next
+// lookup or record reloads it from the SD card.
 void unload();
 
 }  // namespace BookOrbitDownloadIndex

@@ -745,7 +745,7 @@ history at all: Smart sync then asks, and the sleep sync leaves the progress alo
 
 ## `/.crosspoint/bookorbit_downloads.bin`
 
-### Version 1
+### Version 2
 
 Remembers where BookOrbit catalog downloads landed on the SD card, keyed by the
 server's book id, so the catalog can mark a book as already on the device even
@@ -756,14 +756,38 @@ server's file naming template filed it, without walking the card. It is a
 best-effort convenience cache: entries are verified on lookup (the file must
 still exist with its recorded size) and dropped when stale, and a missing or
 discarded index costs the marker and the listing entry, leaving the filename
-heuristic and a flat directory scan as fallbacks. Capped at 128 entries, oldest
-evicted first.
+heuristic and a flat directory scan as fallbacks.
+
+Only the fixed-size records are loaded into RAM; each path stays in the file
+and is read back at its recorded offset when needed, and the stored path hash
+lets a path match skip the SD read for every other entry. Capped at 512 entries
+on devices without PSRAM and 2048 with it, oldest evicted first; a card moved
+to a device with a lower cap keeps its newest entries.
 
 Book ids are only meaningful on the server that issued them, so the header
 records a CRC32 of the configured server URL; the whole file is discarded when
-it no longer matches, as it is when the magic is unreadable.
+it no longer matches, as it is when the magic is unreadable. The file is
+rewritten through `bookorbit_downloads.tmp` and a `bookorbit_downloads.bak`
+backup, so an interrupted write leaves the previous version in place.
 
 Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `BOD2`
+- `[4-7]` `serverCrc` (`uint32_t`, CRC32 of the configured BookOrbit server URL)
+- `[8-11]` `count` (`uint32_t`, number of records)
+- `count` fixed-size records of 22 bytes, oldest first:
+  - `[0-7]` `bookId` (`int64_t`, the server's book id)
+  - `[8-11]` `fileSize` (`uint32_t`, size of the downloaded file, for the replacement check)
+  - `[12-15]` `pathHash` (`uint32_t`, 32-bit FNV-1a of the path bytes)
+  - `[16-19]` `pathOffset` (`uint32_t`, absolute file offset of the path)
+  - `[20-21]` `pathLength` (`uint16_t`, 1-256)
+- Path area: each record's `path` (`pathLength` bytes, absolute SD path, not
+  null-terminated), back to back in record order.
+
+### Version 1
+
+Variable-length records with the path inline, capped at 128 entries. Migrated
+to version 2 the first time the index is loaded.
 
 - `[0-3]` magic + version: ASCII `BOD1`
 - `[4-7]` `serverCrc` (`uint32_t`, CRC32 of the configured BookOrbit server URL)

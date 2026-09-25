@@ -5,6 +5,14 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.6.1.
+
+### Changed
+
+- The BookOrbit catalog now remembers where up to 512 downloaded books landed (2048 on the X4 Pro and reTerminal Sticky), up from 128. Beyond 128 downloads, older books filed in the server's series folders used to lose their on-device dot and drop out of "On device"; they now keep both, and the BookOrbit count on the Library page's card tile (BookOrbit theme) no longer stops at 128. The existing record is converted automatically the first time it is read. The "On device" list itself still shows at most 200 books.
+
 ## [v1.6.1+bookorbit.8] - 2026-11-13
 
 Based on CrossInk v1.6.1.

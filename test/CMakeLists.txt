@@ -113,3 +113,4 @@ add_subdirectory(library_recent_order)
 add_subdirectory(scalable_fonts)
 
 add_subdirectory(glyph_bitmap)
+add_subdirectory(bookorbit_download_index)

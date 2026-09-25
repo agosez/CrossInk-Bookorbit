@@ -32,6 +32,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -267,6 +268,75 @@ def read_bob_store(path: Path) -> tuple[int, list[dict]]:
         offset += pos_len
         out.append({"timestamp": ts, "identityEpoch": epoch, "spine": spine, "pos": pos})
     return watermark, out
+
+
+# /.crosspoint/bookorbit_downloads.bin, written and read from docs/file-formats.md
+# rather than from the firmware source, so the scenarios also hold the doc to account.
+DOWNLOAD_INDEX = ".crosspoint/bookorbit_downloads.bin"
+
+
+def download_index_crc() -> int:
+    # The header's CRC32 of the configured server URL, which the firmware keeps verbatim.
+    return zlib.crc32(BASE_URL.encode())
+
+
+def write_download_index(path: Path, entries: list[tuple[int, str, int]], version: int) -> None:
+    """Writes (bookId, sdPath, fileSize) entries as a BOD1 or BOD2 index."""
+    out = bytearray(f"BOD{version}".encode()) + struct.pack("<I", download_index_crc())
+    if version == 1:
+        for book_id, sd_path, size in entries:
+            raw = sd_path.encode()
+            out += struct.pack("<qIH", book_id, size, len(raw)) + raw
+    else:
+        out += struct.pack("<I", len(entries))
+        offset = 12 + 22 * len(entries)
+        for book_id, sd_path, size in entries:
+            raw = sd_path.encode()
+            fnv = 2166136261
+            for b in raw:
+                fnv = ((fnv ^ b) * 16777619) & 0xFFFFFFFF
+            out += struct.pack("<qIIIH", book_id, size, fnv, offset, len(raw))
+            offset += len(raw)
+        for _, sd_path, _ in entries:
+            out += sd_path.encode()
+    path.write_bytes(bytes(out))
+
+
+def read_download_index(path: Path) -> list[tuple[int, str, int]]:
+    """Parses a BOD2 index into (bookId, sdPath, fileSize) entries, checking every field
+    the format documents: magic, server CRC, count, and each path's hash and offset."""
+    data = path.read_bytes()
+    assert data[:4] == b"BOD2", f"download index is not BOD2: {data[:4]!r}"
+    crc, count = struct.unpack_from("<II", data, 4)
+    assert crc == download_index_crc(), "download index records another server"
+    entries = []
+    for i in range(count):
+        book_id, size, fnv, offset, length = struct.unpack_from("<qIIIH", data, 12 + 22 * i)
+        raw = data[offset:offset + length]
+        assert len(raw) == length, f"entry {i} points past the end of the file"
+        expected = 2166136261
+        for b in raw:
+            expected = ((expected ^ b) * 16777619) & 0xFFFFFFFF
+        assert fnv == expected, f"entry {i} path hash does not match its path"
+        entries.append((book_id, raw.decode(), size))
+    assert len(data) == 12 + 22 * count + sum(len(p.encode()) for _, p, _ in entries), \
+        "download index has trailing bytes"
+    return entries
+
+
+def seed_nested_books(fs: "SimFs", count: int) -> list[tuple[int, str, int]]:
+    """Copies `count` library EPUBs into series folders under the download folder, where
+    the catalog's flat scan never looks, so only the download index can list them."""
+    _, library = load_seed()
+    entries = []
+    for i in range(count):
+        source = INTEGRATION / "library" / library[i % len(library)]["file"]
+        sd_path = f"{fs.download_folder}/Series {i // 10:02d}/Book {i:03d}.epub"
+        dest = fs.fs / sd_path.lstrip("/")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+        entries.append((1000 + i, sd_path, dest.stat().st_size))
+    return entries
 
 
 class SimFs:
@@ -1834,6 +1904,10 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
         # The legacy flat name must not appear beside it.
         assert downloaded == [f"Downloads/{device_path}"], \
             f"unexpected extra downloads: {downloaded}"
+        # The download index recorded it, in the documented on-card format.
+        index = read_download_index(fs.fs / DOWNLOAD_INDEX)
+        assert index == [(first["id"], f"/Downloads/{device_path}", expected.stat().st_size)], \
+            f"download index does not record the download: {index}"
 
         # Second run on the same card: the offline "On device" category must still
         # find the book now that the template filed it two folders deep. The catalog
@@ -2261,6 +2335,50 @@ def scenario_highlight_mint_outside_paragraph(verbose: bool) -> None:
             f"\"{text}\" stored at {mine[-1]['pos0']} .. {mine[-1]['pos1']} on the server"
 
 
+CATALOG_ROOT_SCRIPT = ";".join([
+    "6000:DOWN", "6500:DOWN", "7000:CONFIRM",  # home menu -> BookOrbit catalog
+    "13000:QUIT",                              # the root counts local books as it builds
+])
+
+
+def scenario_catalog_download_index_migration(verbose: bool) -> None:
+    """An index written by an earlier release (BOD1) is converted on the first catalog
+    visit: the books it lists, filed in series folders the flat scan never visits, are
+    still counted under "On device", and the card now holds the same entries as BOD2
+    with no temporary or backup file left behind."""
+    manifest, _ = load_seed()
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
+        entries = seed_nested_books(fs, 3)
+        write_download_index(fs.fs / DOWNLOAD_INDEX, entries, version=1)
+
+        output = run_simulator(fs, input_script=CATALOG_ROOT_SCRIPT, choice="apply",
+                               timeout_s=60, verbose=verbose)
+        assert "Local scan: kind=on-device count=3" in output, \
+            "'On device' lost the books listed by the BOD1 index"
+        assert read_download_index(fs.fs / DOWNLOAD_INDEX) == entries, \
+            "the migrated index does not hold the BOD1 entries"
+        leftovers = sorted(p.name for p in fs.crosspoint.glob("bookorbit_downloads.*")
+                           if p.suffix != ".bin")
+        assert not leftovers, f"the index rewrite left files behind: {leftovers}"
+
+
+def scenario_catalog_download_index_beyond_legacy_cap(verbose: bool) -> None:
+    """The index now keeps more than the 128 downloads BOD1 was capped at: 150 books
+    in series folders, known only through the index, are all counted under "On
+    device". Before the compact index, the oldest 22 were evicted and went missing."""
+    manifest, _ = load_seed()
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
+        entries = seed_nested_books(fs, 150)
+        write_download_index(fs.fs / DOWNLOAD_INDEX, entries, version=2)
+
+        output = run_simulator(fs, input_script=CATALOG_ROOT_SCRIPT, choice="apply",
+                               timeout_s=60, verbose=verbose)
+        assert "Local scan: kind=on-device count=150" in output, \
+            "'On device' did not count every book the index lists"
+
+
 SCENARIOS = {
     "catalog_collections_browse": scenario_catalog_collections_browse,
     "catalog_empty_listing_back": scenario_catalog_empty_listing_back,
@@ -2269,6 +2387,8 @@ SCENARIOS = {
     "catalog_download_naming": scenario_catalog_download_naming,
     "catalog_book_actions": scenario_catalog_book_actions,
     "catalog_deep_listing": scenario_catalog_deep_listing,
+    "catalog_download_index_migration": scenario_catalog_download_index_migration,
+    "catalog_download_index_beyond_legacy_cap": scenario_catalog_download_index_beyond_legacy_cap,
     "catalog_hides_non_epub": scenario_catalog_hides_non_epub,
     "catalog_sort_filter": scenario_catalog_sort_filter,
     "catalog_sections_and_shelf": scenario_catalog_sections_and_shelf,
