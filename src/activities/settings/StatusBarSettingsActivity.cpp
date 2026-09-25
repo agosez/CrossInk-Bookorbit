@@ -23,6 +23,7 @@ enum MenuItem {
   ITEM_CHAPTER_PAGE_COUNT = 0,
   ITEM_STABLE_PAGE_NUMBERS,
   ITEM_BOOK_PROGRESS_PERCENTAGE,
+  ITEM_BOOK_PERCENTAGE_FORMAT,
   ITEM_PROGRESS_BAR,
   ITEM_PROGRESS_BAR_THICKNESS,
   ITEM_TITLE,
@@ -36,12 +37,19 @@ const StrId menuNames[ITEM_COUNT] = {
     StrId::STR_CHAPTER_PAGE_COUNT,
     StrId::STR_STABLE_PAGE_NUMBERS,
     StrId::STR_BOOK_PROGRESS_PERCENTAGE,
+    StrId::STR_PERCENTAGE_FORMAT,
     StrId::STR_PROGRESS_BAR,
     StrId::STR_PROGRESS_BAR_THICKNESS,
     StrId::STR_TITLE,
     StrId::STR_TIME_LEFT,
     StrId::STR_BATTERY,
     StrId::STR_XTC_STATUS_BAR,
+};
+
+const StrId percentageFormatNames[CrossPointSettings::BOOK_PERCENTAGE_FORMAT_COUNT] = {
+    StrId::STR_PERCENTAGE_FORMAT_WHOLE,
+    StrId::STR_PERCENTAGE_FORMAT_ONE_DECIMAL,
+    StrId::STR_PERCENTAGE_FORMAT_TWO_DECIMALS,
 };
 
 constexpr int PROGRESS_BAR_ITEMS = 3;
@@ -72,6 +80,8 @@ const StrId xtcStatusBarNames[XTC_STATUS_BAR_ITEMS] = {StrId::STR_HIDE, StrId::S
 
 int optionCountForItem(const int item) {
   switch (item) {
+    case ITEM_BOOK_PERCENTAGE_FORMAT:
+      return CrossPointSettings::BOOK_PERCENTAGE_FORMAT_COUNT;
     case ITEM_PROGRESS_BAR:
       return PROGRESS_BAR_ITEMS;
     case ITEM_PROGRESS_BAR_THICKNESS:
@@ -87,20 +97,22 @@ int optionCountForItem(const int item) {
   }
 }
 
-StrId optionNameForItem(const int item, const int optionIndex) {
+const char* optionNameForItem(const int item, const int optionIndex) {
   switch (item) {
+    case ITEM_BOOK_PERCENTAGE_FORMAT:
+      return I18N.get(percentageFormatNames[optionIndex]);
     case ITEM_PROGRESS_BAR:
-      return progressBarNames[optionIndex];
+      return I18N.get(progressBarNames[optionIndex]);
     case ITEM_PROGRESS_BAR_THICKNESS:
-      return progressBarThicknessNames[optionIndex];
+      return I18N.get(progressBarThicknessNames[optionIndex]);
     case ITEM_TITLE:
-      return titleNames[optionIndex];
+      return I18N.get(titleNames[optionIndex]);
     case ITEM_TIME_LEFT:
-      return timeLeftNames[optionIndex];
+      return I18N.get(timeLeftNames[optionIndex]);
     case ITEM_XTC_STATUS_BAR:
-      return xtcStatusBarNames[optionIndex];
+      return I18N.get(xtcStatusBarNames[optionIndex]);
     default:
-      return StrId::STR_NONE_OPT;
+      return tr(STR_NONE_OPT);
   }
 }
 
@@ -118,6 +130,9 @@ uint8_t optionRawValueForItem(const int item, const int optionIndex) {
 uint8_t currentOptionIndexForItem(const int item) {
   uint8_t rawValue = 0;
   switch (item) {
+    case ITEM_BOOK_PERCENTAGE_FORMAT:
+      rawValue = SETTINGS.statusBarBookPercentageFormat;
+      break;
     case ITEM_PROGRESS_BAR:
       rawValue = SETTINGS.statusBarProgressBar;
       break;
@@ -147,6 +162,9 @@ uint8_t currentOptionIndexForItem(const int item) {
 void setOptionIndexForItem(const int item, const uint8_t optionIndex) {
   const uint8_t rawValue = optionRawValueForItem(item, optionIndex);
   switch (item) {
+    case ITEM_BOOK_PERCENTAGE_FORMAT:
+      SETTINGS.statusBarBookPercentageFormat = rawValue;
+      break;
     case ITEM_PROGRESS_BAR:
       SETTINGS.statusBarProgressBar = rawValue;
       break;
@@ -181,7 +199,7 @@ std::string valueTextForItem(const int item) {
       const int optionCount = optionCountForItem(item);
       const uint8_t optionIndex = currentOptionIndexForItem(item);
       if (optionCount == 0 || optionIndex >= optionCount) return tr(STR_HIDE);
-      return I18N.get(optionNameForItem(item, optionIndex));
+      return optionNameForItem(item, optionIndex);
     }
   }
 }
@@ -199,6 +217,10 @@ void StatusBarSettingsActivity::onEnter() {
   applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &StatusBarSettingsActivity::onRowEvent, this);
   app.setScreen(&StatusBarSettingsActivity::settingsScreen, this);
+
+  if (SETTINGS.statusBarBookPercentageFormat >= CrossPointSettings::BOOK_PERCENTAGE_FORMAT_COUNT) {
+    SETTINGS.statusBarBookPercentageFormat = CrossPointSettings::BOOK_PERCENTAGE_WHOLE;
+  }
 
   // Clamp statusBarProgressBar and statusBarTitle in case of corrupt/migrated data
   if (SETTINGS.statusBarProgressBar >= PROGRESS_BAR_ITEMS) {
@@ -225,6 +247,11 @@ void StatusBarSettingsActivity::onEnter() {
 }
 
 void StatusBarSettingsActivity::onExit() { Activity::onExit(); }
+
+bool StatusBarSettingsActivity::handleHomeGesture() {
+  finish();
+  return true;
+}
 
 void StatusBarSettingsActivity::loop() {
   if (optionPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
@@ -335,7 +362,7 @@ void StatusBarSettingsActivity::openOptionPicker() {
   std::vector<std::string> options;
   options.reserve(optionCount);
   for (int i = 0; i < optionCount; i++) {
-    options.push_back(I18N.get(optionNameForItem(item, i)));
+    options.push_back(optionNameForItem(item, i));
   }
 
   uint8_t currentIndex = currentOptionIndexForItem(item);
@@ -475,8 +502,8 @@ void StatusBarSettingsActivity::render(RenderLock&&) {
   const int previewLabelY = bottomPreviewTop - previewLabelLineHeight - previewLabelGap;
 
   renderer.drawText(UI_10_FONT_ID, previewX, previewLabelY, tr(STR_PREVIEW));
-  GUI.drawStatusBar(renderer, 75, 8, 32, title.c_str(), bottomPreviewPadding, 0, false, timeLeftPreview, false, -1.0f,
-                    stablePageNumbersAvailable ? 120 : 0, stablePageNumbersAvailable ? 540 : 0);
+  GUI.drawStatusBar(renderer, 75.12f, 8, 32, title.c_str(), bottomPreviewPadding, 0, false, timeLeftPreview, false,
+                    -1.0f, stablePageNumbersAvailable ? 120 : 0, stablePageNumbersAvailable ? 540 : 0);
 
   renderer.displayBuffer();
 }

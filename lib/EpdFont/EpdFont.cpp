@@ -23,6 +23,8 @@ void EpdFont::getTextBounds(const char* string, const int startX, const int star
   uint32_t cp;
   uint32_t prevCp = 0;
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&string)))) {
+    if (utf8IsVariationSelector(cp)) continue;
+
     const bool isCombining = utf8IsCombiningMark(cp);
 
     if (!isCombining) {

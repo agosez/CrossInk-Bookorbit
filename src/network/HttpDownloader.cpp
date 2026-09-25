@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "AppVersion.h"
+#include "network/HttpRedirectPolicy.h"
 #include "network/WifiPowerSaveGuard.h"
 
 namespace {
@@ -53,74 +54,6 @@ esp_err_t captureLocationHeader(esp_http_client_event_t* evt) {
     location->assign(evt->header_value);
   }
   return ESP_OK;
-}
-
-struct ParsedUrl {
-  bool https = false;
-  std::string host;
-  std::string path;
-  uint16_t port = 80;
-};
-
-bool parseUrl(const std::string& url, ParsedUrl& out) {
-  const size_t schemeEnd = url.find("://");
-  if (schemeEnd == std::string::npos) return false;
-
-  const std::string scheme = url.substr(0, schemeEnd);
-  out.https = scheme == "https";
-  if (!out.https && scheme != "http") return false;
-
-  const size_t hostStart = schemeEnd + 3;
-  const size_t pathStart = url.find('/', hostStart);
-  const std::string hostPort =
-      url.substr(hostStart, pathStart == std::string::npos ? std::string::npos : pathStart - hostStart);
-  out.path = pathStart == std::string::npos ? "/" : url.substr(pathStart);
-  out.port = out.https ? 443 : 80;
-
-  const size_t portSep = hostPort.rfind(':');
-  if (portSep != std::string::npos) {
-    out.host = hostPort.substr(0, portSep);
-    const std::string portText = hostPort.substr(portSep + 1);
-    if (portText.empty()) return false;
-    uint32_t parsedPort = 0;
-    for (const char c : portText) {
-      if (c < '0' || c > '9') return false;
-      parsedPort = parsedPort * 10 + static_cast<uint32_t>(c - '0');
-      if (parsedPort > UINT16_MAX) return false;
-    }
-    if (parsedPort == 0) return false;
-    out.port = static_cast<uint16_t>(parsedPort);
-  } else {
-    out.host = hostPort;
-  }
-
-  return !out.host.empty() && !out.path.empty();
-}
-
-bool sameOrigin(const ParsedUrl& a, const ParsedUrl& b) {
-  return a.https == b.https && a.port == b.port && strcasecmp(a.host.c_str(), b.host.c_str()) == 0;
-}
-
-const char* schemeName(const ParsedUrl& url) { return url.https ? "https" : "http"; }
-
-std::string buildRedirectUrl(const std::string& baseUrl, const std::string& location) {
-  if (location.starts_with("http://") || location.starts_with("https://")) return location;
-
-  ParsedUrl base;
-  if (!parseUrl(baseUrl, base)) return location;
-
-  std::string origin = base.https ? "https://" : "http://";
-  origin += base.host;
-  if ((base.https && base.port != 443) || (!base.https && base.port != 80)) {
-    origin += ":";
-    origin += std::to_string(base.port);
-  }
-
-  if (!location.empty() && location[0] == '/') return origin + location;
-
-  const size_t lastSlash = base.path.rfind('/');
-  const std::string parent = lastSlash == std::string::npos ? "/" : base.path.substr(0, lastSlash + 1);
-  return origin + parent + location;
 }
 
 bool isCancelRequested(bool* cancelFlag, const HttpDownloader::CancelCallback& shouldCancel) {
@@ -168,6 +101,9 @@ struct Sink {
   bool rangeIgnored = false;
 };
 
+// Stands in for a hop's credential headers when that hop leaves the credential origin.
+const HttpDownloader::HeaderList kNoHeaders;
+
 void setRequestHeaders(esp_http_client_handle_t client, const std::string& username, const std::string& password,
                        size_t resumeOffset, bool sendAuthorization,
                        const HttpDownloader::HeaderList& extraHeaders = {}) {
@@ -201,24 +137,26 @@ void logTlsError(esp_http_client_handle_t client, const char* phase) {
 
 #if defined(FREEINK_NET_WOLFSSL)
 HttpDownloader::DownloadError runGetWolfSsl(const std::string& url, const std::string& username,
-                                            const std::string& password, Sink& sink, const size_t bufferSize,
-                                            const HttpDownloader::HeaderList& extraHeaders = {}) {
+                                            const std::string& password,
+                                            const HttpRedirectPolicy::Url& credentialOrigin, const bool hasCredentials,
+                                            Sink& sink, const size_t bufferSize,
+                                            const HttpDownloader::HeaderList& extraHeaders) {
   (void)bufferSize;  // SecureHttpClient owns one fixed 1024-byte streaming buffer.
   std::string currentUrl = url;
-
-  ParsedUrl credentialOrigin;
-  const bool hasCredentials = !username.empty() && !password.empty() && parseUrl(url, credentialOrigin);
   ProgressNotifier progressNotifier(sink.progress);
 
   for (uint8_t hop = 0; hop < MAX_REDIRECTS; ++hop) {
-    ParsedUrl currentOrigin;
-    const bool currentParsed = parseUrl(currentUrl, currentOrigin);
-    const bool sendAuthorization = hasCredentials && currentParsed && sameOrigin(currentOrigin, credentialOrigin);
+    HttpRedirectPolicy::Url currentOrigin;
+    const bool currentParsed = HttpRedirectPolicy::parseUrl(currentUrl, currentOrigin);
+    const bool sendCredentials =
+        currentParsed && HttpRedirectPolicy::shouldSendAuthorization(currentOrigin, credentialOrigin, hasCredentials);
+    const bool sendAuthorization = sendCredentials && !username.empty() && !password.empty();
+    const HttpDownloader::HeaderList& hopHeaders = sendCredentials ? extraHeaders : kNoHeaders;
 
     freeink::SecureHttpClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
     // SecureNet does not yet expose ESP-IDF's CA bundle. This matches the
-    // existing KOSync transport; credentialed redirects remain same-origin.
+    // existing KOSync transport; cross-origin hops omit all credentials.
     http.setInsecure();
     if (!http.begin(currentUrl)) {
       LOG_ERR("HTTP", "wolfSSL rejected URL: %s", currentUrl.c_str());
@@ -233,7 +171,7 @@ HttpDownloader::DownloadError runGetWolfSsl(const std::string& url, const std::s
       http.addHeader("Range", rangeHeader);
       LOG_DBG("HTTP", "Resuming download at byte %zu", sink.resumeOffset);
     }
-    for (const auto& header : extraHeaders) {
+    for (const auto& header : hopHeaders) {
       http.addHeader(header.first, header.second);
     }
     if (sendAuthorization) {
@@ -284,19 +222,14 @@ HttpDownloader::DownloadError runGetWolfSsl(const std::string& url, const std::s
         return HttpDownloader::HTTP_ERROR;
       }
 
-      const std::string redirectUrl = buildRedirectUrl(currentUrl, location);
-      ParsedUrl redirect;
-      if (!parseUrl(redirectUrl, redirect)) {
+      const std::string redirectUrl = HttpRedirectPolicy::buildRedirectUrl(currentUrl, location);
+      HttpRedirectPolicy::Url redirect;
+      if (!HttpRedirectPolicy::parseUrl(redirectUrl, redirect)) {
         LOG_ERR("HTTP", "Rejected redirect with unsupported Location");
         return HttpDownloader::HTTP_ERROR;
       }
-      if (currentParsed && currentOrigin.https && !redirect.https) {
+      if (currentParsed && !HttpRedirectPolicy::isAllowedRedirect(currentOrigin, redirect)) {
         LOG_ERR("HTTP", "Rejected HTTPS downgrade redirect to %s", redirect.host.c_str());
-        return HttpDownloader::HTTP_ERROR;
-      }
-      if (hasCredentials && !sameOrigin(redirect, credentialOrigin)) {
-        LOG_ERR("HTTP", "Rejected credentialed redirect to different origin: %s://%s:%u", schemeName(redirect),
-                redirect.host.c_str(), redirect.port);
         return HttpDownloader::HTTP_ERROR;
       }
       currentUrl = redirectUrl;
@@ -332,9 +265,11 @@ HttpDownloader::DownloadError runGetWolfSsl(const std::string& url, const std::s
 #endif
 
 HttpDownloader::DownloadError runGetDefault(const std::string& url, const std::string& username,
-                                            const std::string& password, Sink& sink, const size_t bufferSize,
-                                            const HttpDownloader::HeaderList& extraHeaders = {},
-                                            const size_t clientRxBufferSize = 0) {
+                                            const std::string& password,
+                                            const HttpRedirectPolicy::Url& credentialOrigin, const bool hasCredentials,
+                                            Sink& sink, const size_t bufferSize,
+                                            const HttpDownloader::HeaderList& extraHeaders,
+                                            const size_t clientRxBufferSize) {
   // Allocate the transfer buffer before the TLS session comes up: the handshake can leave
   // only a few KB of headroom on the ESP32-C3, and grabbing even 2KB at that point is
   // exactly the allocation that used to fail on catalog fetches.
@@ -346,13 +281,13 @@ HttpDownloader::DownloadError runGetDefault(const std::string& url, const std::s
   }
   std::string currentUrl = url;
 
-  ParsedUrl credentialOrigin;
-  const bool hasCredentials = !username.empty() && !password.empty() && parseUrl(url, credentialOrigin);
-
   for (uint8_t hop = 0; hop < MAX_REDIRECTS; ++hop) {
-    ParsedUrl currentOrigin;
-    const bool currentParsed = parseUrl(currentUrl, currentOrigin);
-    const bool sendAuthorization = hasCredentials && currentParsed && sameOrigin(currentOrigin, credentialOrigin);
+    HttpRedirectPolicy::Url currentOrigin;
+    const bool currentParsed = HttpRedirectPolicy::parseUrl(currentUrl, currentOrigin);
+    const bool sendCredentials =
+        currentParsed && HttpRedirectPolicy::shouldSendAuthorization(currentOrigin, credentialOrigin, hasCredentials);
+    const bool sendAuthorization = sendCredentials && !username.empty() && !password.empty();
+    const HttpDownloader::HeaderList& hopHeaders = sendCredentials ? extraHeaders : kNoHeaders;
     std::string redirectLocation;
 
     esp_http_client_config_t config = {};
@@ -372,7 +307,7 @@ HttpDownloader::DownloadError runGetDefault(const std::string& url, const std::s
       return HttpDownloader::HTTP_ERROR;
     }
 
-    setRequestHeaders(client, username, password, sink.resumeOffset, sendAuthorization, extraHeaders);
+    setRequestHeaders(client, username, password, sink.resumeOffset, sendAuthorization, hopHeaders);
 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
@@ -401,21 +336,15 @@ HttpDownloader::DownloadError runGetDefault(const std::string& url, const std::s
         return HttpDownloader::HTTP_ERROR;
       }
 
-      const std::string redirectUrl = buildRedirectUrl(currentUrl, redirectLocation);
-      ParsedUrl redirect;
-      if (!parseUrl(redirectUrl, redirect)) {
+      const std::string redirectUrl = HttpRedirectPolicy::buildRedirectUrl(currentUrl, redirectLocation);
+      HttpRedirectPolicy::Url redirect;
+      if (!HttpRedirectPolicy::parseUrl(redirectUrl, redirect)) {
         LOG_ERR("HTTP", "Rejected redirect with unsupported Location");
         esp_http_client_cleanup(client);
         return HttpDownloader::HTTP_ERROR;
       }
-      if (currentParsed && currentOrigin.https && !redirect.https) {
+      if (currentParsed && !HttpRedirectPolicy::isAllowedRedirect(currentOrigin, redirect)) {
         LOG_ERR("HTTP", "Rejected HTTPS downgrade redirect to %s", redirect.host.c_str());
-        esp_http_client_cleanup(client);
-        return HttpDownloader::HTTP_ERROR;
-      }
-      if (hasCredentials && !sameOrigin(redirect, credentialOrigin)) {
-        LOG_ERR("HTTP", "Rejected credentialed redirect to different origin: %s://%s:%u", schemeName(redirect),
-                redirect.host.c_str(), redirect.port);
         esp_http_client_cleanup(client);
         return HttpDownloader::HTTP_ERROR;
       }
@@ -527,19 +456,27 @@ HttpDownloader::DownloadError runGetDefault(const std::string& url, const std::s
 }
 
 HttpDownloader::DownloadError runGet(const std::string& url, const std::string& username, const std::string& password,
-                                     Sink& sink, const size_t bufferSize, const HttpDownloader::Transport transport,
+                                     const std::string_view authorizationOrigin, Sink& sink, const size_t bufferSize,
+                                     const HttpDownloader::Transport transport,
                                      const HttpDownloader::HeaderList& extraHeaders = {},
                                      const size_t clientRxBufferSize = 0) {
   HttpDownloader::lastHttpStatus = 0;
+  // Header-borne API keys are credentials too: they follow the same origin rule as Basic
+  // auth, or a redirect to another host would receive them.
+  HttpRedirectPolicy::Url credentialOrigin;
+  const std::string_view credentialUrl = authorizationOrigin.empty() ? std::string_view(url) : authorizationOrigin;
+  const bool hasCredentials = ((!username.empty() && !password.empty()) || !extraHeaders.empty()) &&
+                              HttpRedirectPolicy::parseUrl(credentialUrl, credentialOrigin);
 #if defined(FREEINK_NET_WOLFSSL)
   if (transport == HttpDownloader::Transport::WOLFSSL) {
     (void)clientRxBufferSize;  // SecureHttpClient owns its own fixed buffer.
-    return runGetWolfSsl(url, username, password, sink, bufferSize, extraHeaders);
+    return runGetWolfSsl(url, username, password, credentialOrigin, hasCredentials, sink, bufferSize, extraHeaders);
   }
 #else
   (void)transport;
 #endif
-  return runGetDefault(url, username, password, sink, bufferSize, extraHeaders, clientRxBufferSize);
+  return runGetDefault(url, username, password, credentialOrigin, hasCredentials, sink, bufferSize, extraHeaders,
+                       clientRxBufferSize);
 }
 }  // namespace
 
@@ -585,8 +522,8 @@ HttpDownloader::DownloadError HttpDownloader::streamUrl(const std::string& url, 
   sink.progress = std::move(progress);
   sink.shouldCancel = std::move(options.shouldCancel);
   const size_t bufferSize = options.bufferSize > 0 ? options.bufferSize : DEFAULT_DOWNLOAD_BUFFER_SIZE;
-  return runGet(url, username, password, sink, bufferSize, options.transport, options.extraHeaders,
-                options.clientRxBufferSize);
+  return runGet(url, username, password, options.authorizationOrigin, sink, bufferSize, options.transport,
+                options.extraHeaders, options.clientRxBufferSize);
 }
 
 HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& url, const std::string& destPath,
@@ -638,8 +575,8 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
 
   sink.write = [&](const uint8_t* data, size_t len) { return openOutputFile() && file.write(data, len) == len; };
 
-  DownloadError result = runGet(url, username, password, sink, bufferSize, options.transport, options.extraHeaders,
-                                options.clientRxBufferSize);
+  DownloadError result = runGet(url, username, password, options.authorizationOrigin, sink, bufferSize,
+                                options.transport, options.extraHeaders, options.clientRxBufferSize);
   if (sink.rangeIgnored) {
     if (fileOpen) {
       file.close();
@@ -651,8 +588,8 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
     sink.downloaded = 0;
     sink.total = 0;
     sink.write = [&](const uint8_t* data, size_t len) { return openOutputFile() && file.write(data, len) == len; };
-    result = runGet(url, username, password, sink, bufferSize, options.transport, options.extraHeaders,
-                    options.clientRxBufferSize);
+    result = runGet(url, username, password, options.authorizationOrigin, sink, bufferSize, options.transport,
+                    options.extraHeaders, options.clientRxBufferSize);
   }
 
   if (fileOpen) {

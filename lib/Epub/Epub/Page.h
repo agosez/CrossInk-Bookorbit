@@ -194,8 +194,10 @@ class Page {
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true) const;
   void renderText(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true) const;
   void renderImages(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true) const;
+  // When renderCachedImages is false, draw placeholders without checking or
+  // reading image caches. This keeps transient queued pages free of image I/O.
   void renderWithImagePlaceholders(GfxRenderer& renderer, int fontId, int xOffset, int yOffset,
-                                   bool foregroundBlack = true) const;
+                                   bool foregroundBlack = true, bool renderCachedImages = true) const;
   bool forEachTextLine(PageTextLineVisitor visitor, void* context) const;
   bool serialize(FsFile& file) const;
   static std::unique_ptr<Page> deserialize(FsFile& file);

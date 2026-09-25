@@ -13,6 +13,9 @@
  * BookOrbit is self-hosted only (no public default server), and always
  * identifies documents by the binary partial-MD5 hash (see KOReaderDocumentId),
  * so unlike KOReaderCredentialStore there is no document matching method to store.
+ *
+ * Like KOReaderCredentialStore, it loads on first use rather than at boot: every accessor
+ * and mutator calls ensureLoaded(), so a resume straight into a book skips the SD read.
  */
 // Mirrors KOReaderSyncBehavior; declared here so this fork-owned store does
 // not pull upstream's KOReader headers in.
@@ -41,8 +44,14 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
 
   // Credential management
   void setCredentials(const std::string& user, const std::string& pass);
-  const std::string& getUsername() const { return username; }
-  const std::string& getPassword() const { return password; }
+  const std::string& getUsername() const {
+    ensureLoaded();
+    return username;
+  }
+  const std::string& getPassword() const {
+    ensureLoaded();
+    return password;
+  }
 
   // Get MD5 hash of password for API authentication (BookOrbit's kosync-compatible "userkey")
   std::string getMd5Password() const;
@@ -50,21 +59,36 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
   // Check if credentials and a server address are set
   bool hasCredentials() const;
 
-  void setSyncBehavior(BookOrbitSyncBehavior behavior) { syncBehavior = behavior; }
-  BookOrbitSyncBehavior getSyncBehavior() const { return syncBehavior; }
+  void setSyncBehavior(BookOrbitSyncBehavior behavior) {
+    ensureLoaded();
+    syncBehavior = behavior;
+  }
+  BookOrbitSyncBehavior getSyncBehavior() const {
+    ensureLoaded();
+    return syncBehavior;
+  }
 
   // Catalog download folder. Callers must pass a normalized value: "" for the SD
   // root, otherwise "/Folder" with a leading and no trailing slash, so paths can
   // be built as folder + "/file.epub" without special-casing the root.
-  void setDownloadFolder(const std::string& folder) { downloadFolder = folder; }
-  const std::string& getDownloadFolder() const { return downloadFolder; }
+  void setDownloadFolder(const std::string& folder) {
+    ensureLoaded();
+    downloadFolder = folder;
+  }
+  const std::string& getDownloadFolder() const {
+    ensureLoaded();
+    return downloadFolder;
+  }
 
   // Clear credentials
   void clearCredentials();
 
   // Server URL management
   void setServerUrl(const std::string& url);
-  const std::string& getServerUrl() const { return serverUrl; }
+  const std::string& getServerUrl() const {
+    ensureLoaded();
+    return serverUrl;
+  }
 
   // Get base URL for API calls: normalized server URL + BookOrbit's kosync-compatible API prefix.
   // Empty when no server URL has been configured (BookOrbit has no public default server).

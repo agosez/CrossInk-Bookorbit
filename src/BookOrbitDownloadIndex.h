@@ -14,7 +14,8 @@
  *
  * Backed by /.crosspoint/bookorbit_downloads.bin (see docs/file-formats.md). The
  * index is loaded lazily on first use and freed with unload(); the catalog
- * activity is its only user and runs on the main task, so access is not locked.
+ * activity, and book renames/moves through relocate(), all run on the main task,
+ * so access is not locked.
  * Book ids are scoped to one server: the file records the configured server URL
  * and is discarded when it no longer matches.
  */
@@ -37,6 +38,11 @@ void forEachExisting(void (*visit)(int64_t bookId, const std::string& path, void
 // True when some recorded download claims this exact path. Lets a directory scan
 // skip files the index already listed, without a second pass to de-duplicate.
 bool hasPath(const std::string& path);
+
+// Follows a recorded download that was renamed or moved on the device, so the catalog
+// still finds it. No-op when oldPath was never a catalog download. Leaves the index
+// unloaded: the file browser and the reader call this, and neither keeps it around.
+void relocate(const std::string& oldPath, const std::string& newPath);
 
 // Frees the in-RAM copy; the next lookup or record reloads it from the SD card.
 void unload();

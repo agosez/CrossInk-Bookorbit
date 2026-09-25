@@ -264,6 +264,7 @@ int FontDecompressor::prewarmCache(const EpdFontData* fontData, const char* utf8
   while (*p) {
     uint32_t cp = utf8NextCodepoint(&p);
     if (cp == 0) break;
+    if (utf8IsVariationSelector(cp)) continue;
 
     int32_t glyphIdx = findGlyphIndex(fontData, cp);
     if (glyphIdx < 0 && !syntheticGlyph::isSpaceFallback(cp)) {

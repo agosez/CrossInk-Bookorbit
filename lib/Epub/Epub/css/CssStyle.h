@@ -75,6 +75,9 @@ enum class CssDisplay : uint8_t { Block = 0, None = 1 };
 // Vertical alignment options for inline elements (e.g. superscript/subscript)
 enum class CssVerticalAlign : uint8_t { Baseline = 0, Super = 1, Sub = 2 };
 
+// List markers supported by the EPUB renderer.
+enum class CssListStyleType : uint8_t { Disc = 0, None = 1 };
+
 // Bitmask for tracking which properties have been explicitly set
 struct CssPropertyFlags {
   uint32_t textAlign : 1;
@@ -99,6 +102,7 @@ struct CssPropertyFlags {
   uint32_t pageBreakBefore : 1;
   uint32_t pageBreakAfter : 1;
   uint32_t fontVariantCaps : 1;
+  uint32_t listStyleType : 1;
 
   CssPropertyFlags()
       : textAlign(0),
@@ -122,13 +126,14 @@ struct CssPropertyFlags {
         direction(0),
         pageBreakBefore(0),
         pageBreakAfter(0),
-        fontVariantCaps(0) {}
+        fontVariantCaps(0),
+        listStyleType(0) {}
 
   [[nodiscard]] bool anySet() const {
     return textAlign || fontStyle || fontWeight || textDecoration || textIndent || marginTop || marginBottom ||
            marginLeft || marginRight || paddingTop || paddingBottom || paddingLeft || paddingRight || imageHeight ||
            imageWidth || display || backgroundBlack || verticalAlign || direction || pageBreakBefore ||
-           pageBreakAfter || fontVariantCaps;
+           pageBreakAfter || fontVariantCaps || listStyleType;
   }
 
   void clearAll() {
@@ -136,7 +141,7 @@ struct CssPropertyFlags {
     marginTop = marginBottom = marginLeft = marginRight = 0;
     paddingTop = paddingBottom = paddingLeft = paddingRight = 0;
     imageHeight = imageWidth = display = backgroundBlack = verticalAlign = direction = 0;
-    pageBreakBefore = pageBreakAfter = fontVariantCaps = 0;
+    pageBreakBefore = pageBreakAfter = fontVariantCaps = listStyleType = 0;
   }
 };
 
@@ -170,6 +175,7 @@ struct CssStyle {
   CssVerticalAlign verticalAlign = CssVerticalAlign::Baseline;  // vertical-align (super/sub positioning)
   bool pageBreakBefore = false;
   bool pageBreakAfter = false;
+  CssListStyleType listStyleType = CssListStyleType::Disc;
 
   CssPropertyFlags defined;  // Tracks which properties were explicitly set
 
@@ -264,6 +270,10 @@ struct CssStyle {
       fontVariantCaps = base.fontVariantCaps;
       defined.fontVariantCaps = 1;
     }
+    if (base.hasListStyleType()) {
+      listStyleType = base.listStyleType;
+      defined.listStyleType = 1;
+    }
   }
 
   [[nodiscard]] bool hasTextAlign() const { return defined.textAlign; }
@@ -288,6 +298,7 @@ struct CssStyle {
   [[nodiscard]] bool hasPageBreakBefore() const { return defined.pageBreakBefore; }
   [[nodiscard]] bool hasPageBreakAfter() const { return defined.pageBreakAfter; }
   [[nodiscard]] bool hasFontVariantCaps() const { return defined.fontVariantCaps; }
+  [[nodiscard]] bool hasListStyleType() const { return defined.listStyleType; }
 
   void reset() {
     textAlign = CssTextAlign::Left;
@@ -305,6 +316,7 @@ struct CssStyle {
     verticalAlign = CssVerticalAlign::Baseline;
     pageBreakBefore = false;
     pageBreakAfter = false;
+    listStyleType = CssListStyleType::Disc;
     defined.clearAll();
   }
 };

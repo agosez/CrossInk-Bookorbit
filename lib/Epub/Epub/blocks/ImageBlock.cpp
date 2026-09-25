@@ -105,15 +105,28 @@ constexpr size_t MAX_SESSION_IMAGE_FAILURES = 16;
 uint64_t failedImageHashes[MAX_SESSION_IMAGE_FAILURES];
 size_t failedImageCount = 0;
 
-// One full 2-bit PXC payload is retained for the current/last image. A full
-// 800x480 image is 96 KB; cap pathological files at 128 KB. The buffer is PSRAM
-// only, so C3 keeps the existing ~4 KB streamed reader and internal heap budget.
+// Retain up to two recently rendered 2-bit PXC payloads. Their allocated
+// capacities share this 128 KB budget (a full 800x480 payload is 96 KB), so
+// alternating images avoid repeated SD reads without adding PSRAM pressure.
+// PSRAM-only ownership leaves C3 on the existing small streamed-reader path.
 constexpr size_t MAX_RETAINED_PXC_BYTES = 128 * 1024;
-HeapByteBuffer retainedPxcPixels;
+constexpr size_t RETAINED_PXC_ENTRY_COUNT = 2;
+
+struct RetainedPxcEntry {
+  HeapByteBuffer pixels;
+  size_t capacity = 0;
+  size_t payloadBytes = 0;
+  uint16_t width = 0;
+  uint16_t height = 0;
+  uint32_t lastUse = 0;
+  std::string path;
+};
+
+RetainedPxcEntry retainedPxcEntries[RETAINED_PXC_ENTRY_COUNT];
+// Kept separately for aggregate-budget checks and host assertions. It counts
+// allocated capacity, never just active payload bytes.
 size_t retainedPxcCapacity = 0;
-uint16_t retainedPxcWidth = 0;
-uint16_t retainedPxcHeight = 0;
-std::string retainedPxcPath;
+uint32_t retainedPxcUseClock = 0;
 
 uint64_t imagePathHash(const std::string& path) {
   uint64_t hash = 14695981039346656037ull;
@@ -135,6 +148,117 @@ bool imageFailedThisSession(const std::string& path) {
 void rememberImageFailure(const std::string& path) {
   if (failedImageCount == MAX_SESSION_IMAGE_FAILURES || imageFailedThisSession(path)) return;
   failedImageHashes[failedImageCount++] = imagePathHash(path);
+}
+
+void clearRetainedPxcEntry(RetainedPxcEntry& entry) {
+  retainedPxcCapacity -= entry.capacity;
+  entry.pixels.reset();
+  entry.capacity = 0;
+  entry.payloadBytes = 0;
+  entry.width = 0;
+  entry.height = 0;
+  entry.lastUse = 0;
+  entry.path.clear();
+}
+
+void forgetRetainedPxcContent(RetainedPxcEntry& entry) {
+  entry.payloadBytes = 0;
+  entry.width = 0;
+  entry.height = 0;
+  entry.lastUse = 0;
+  entry.path.clear();
+}
+
+void invalidateRetainedPxcPath(const std::string& cachePath) {
+  for (auto& entry : retainedPxcEntries) {
+    if (entry.payloadBytes != 0 && entry.path == cachePath) clearRetainedPxcEntry(entry);
+  }
+}
+
+void touchRetainedPxcEntry(RetainedPxcEntry& entry) { entry.lastUse = ++retainedPxcUseClock; }
+
+RetainedPxcEntry* findRetainedPxcEntry(const std::string& cachePath, const int expectedWidth,
+                                       const int expectedHeight) {
+  for (auto& entry : retainedPxcEntries) {
+    if (entry.payloadBytes != 0 && entry.path == cachePath && abs(entry.width - expectedWidth) <= 1 &&
+        abs(entry.height - expectedHeight) <= 1) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+RetainedPxcEntry* leastRecentlyUsedEntry(const size_t minimumCapacity = 0) {
+  RetainedPxcEntry* result = nullptr;
+  for (auto& entry : retainedPxcEntries) {
+    if (entry.capacity < minimumCapacity) continue;
+    if (!result || entry.lastUse < result->lastUse) result = &entry;
+  }
+  return result;
+}
+
+bool allocateRetainedPxcEntry(RetainedPxcEntry& entry, const size_t pixelBytes) {
+  // Keep enough PSRAM for the next JPEG decoder as well as the normal EPUB
+  // reserve; otherwise a retained PXC can starve a later chapter image.
+  const size_t requiredPsram = pixelBytes + MemoryBudget::JPEG_DECODER_APPROX_BYTES;
+  if (!MemoryBudget::canAllocatePsram(requiredPsram)) return false;
+  entry.pixels = makePsramByteBufferNoThrow(pixelBytes);
+  if (!entry.pixels) {
+    LOG_ERR("IMG", "Failed to retain PXC in PSRAM: %u bytes", static_cast<unsigned>(pixelBytes));
+    return false;
+  }
+  entry.capacity = pixelBytes;
+  retainedPxcCapacity += pixelBytes;
+  return true;
+}
+
+RetainedPxcEntry* prepareRetainedPxcEntry(const size_t pixelBytes) {
+  if (!psramHeapAvailable() || pixelBytes > MAX_RETAINED_PXC_BYTES) return nullptr;
+
+  RetainedPxcEntry* empty = nullptr;
+  for (auto& candidate : retainedPxcEntries) {
+    if (candidate.capacity == 0) {
+      empty = &candidate;
+      break;
+    }
+  }
+
+  // Fill a budget-fitting empty slot before reusing another image's backing
+  // buffer, so two alternating images remain resident.
+  if (empty && pixelBytes <= MAX_RETAINED_PXC_BYTES - retainedPxcCapacity) {
+    return allocateRetainedPxcEntry(*empty, pixelBytes) ? empty : nullptr;
+  }
+
+  // Reuse an LRU allocation when it is already large enough. This avoids heap
+  // churn while evicting only cached content, not its PSRAM backing buffer.
+  if (auto* reusable = leastRecentlyUsedEntry(pixelBytes)) {
+    forgetRetainedPxcContent(*reusable);
+    return reusable;
+  }
+
+  // Both slots are occupied by smaller buffers. Evict the LRU even when the
+  // aggregate budget has room, so the new image can use its slot.
+  if (!empty) {
+    empty = leastRecentlyUsedEntry(1);
+    if (!empty) return nullptr;
+    clearRetainedPxcEntry(*empty);
+  }
+
+  // A larger image may need to evict both entries before its own fallible
+  // PSRAM allocation fits the aggregate 128 KB budget.
+  while (pixelBytes > MAX_RETAINED_PXC_BYTES - retainedPxcCapacity) {
+    auto* victim = leastRecentlyUsedEntry(1);
+    if (!victim) return nullptr;
+    clearRetainedPxcEntry(*victim);
+  }
+  for (auto& candidate : retainedPxcEntries) {
+    if (candidate.capacity == 0) {
+      empty = &candidate;
+      break;
+    }
+  }
+  if (!empty) return nullptr;
+  return allocateRetainedPxcEntry(*empty, pixelBytes) ? empty : nullptr;
 }
 
 bool renderCachedPixels(GfxRenderer& renderer, const uint8_t* pixels, const uint16_t cachedWidth,
@@ -160,20 +284,23 @@ bool renderCachedPixels(GfxRenderer& renderer, const uint8_t* pixels, const uint
 
 bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x, int y, int expectedWidth,
                      int expectedHeight) {
-  const bool retainedDimensionsMatch = abs(static_cast<int>(retainedPxcWidth) - expectedWidth) <= 1 &&
-                                       abs(static_cast<int>(retainedPxcHeight) - expectedHeight) <= 1;
-  if (retainedPxcPixels && retainedPxcPath == cachePath && retainedDimensionsMatch) {
-    return renderCachedPixels(renderer, retainedPxcPixels.get(), retainedPxcWidth, retainedPxcHeight, x, y);
+  // Cache generation invalidates retained entries before overwriting a PXC
+  // path, so repeated grayscale strips can avoid storage I/O entirely.
+  if (auto* retained = findRetainedPxcEntry(cachePath, expectedWidth, expectedHeight)) {
+    touchRetainedPxcEntry(*retained);
+    return renderCachedPixels(renderer, retained->pixels.get(), retained->width, retained->height, x, y);
   }
 
   FsFile cacheFile;
   if (!Storage.openFileForRead("IMG", cachePath, cacheFile)) {
+    invalidateRetainedPxcPath(cachePath);
     return false;
   }
 
   uint16_t cachedWidth, cachedHeight;
   if (!readValidCacheHeader(cacheFile, expectedWidth, expectedHeight, cachedWidth, cachedHeight)) {
     LOG_ERR("IMG", "Invalid image cache: %s", cachePath.c_str());
+    invalidateRetainedPxcPath(cachePath);
     cacheFile.close();
     return false;
   }
@@ -186,28 +313,25 @@ bool renderFromCache(GfxRenderer& renderer, const std::string& cachePath, int x,
 
   const size_t bytesPerRow = (cachedWidth + 3U) / 4U;
   const size_t pixelBytes = bytesPerRow * cachedHeight;
+
   if (psramHeapAvailable() && pixelBytes <= MAX_RETAINED_PXC_BYTES) {
-    if (retainedPxcCapacity < pixelBytes) {
-      auto grown = makePsramByteBufferNoThrow(pixelBytes);
-      if (grown) {
-        retainedPxcPixels = std::move(grown);
-        retainedPxcCapacity = pixelBytes;
-      }
-    }
-    // A failed growth leaves the previous, smaller buffer in place; reading the
-    // new payload into it would overflow that allocation.
-    if (retainedPxcPixels && retainedPxcCapacity >= pixelBytes && cacheFile.seek(4) &&
-        cacheFile.read(retainedPxcPixels.get(), pixelBytes) == static_cast<int>(pixelBytes)) {
-      retainedPxcPath = cachePath;
-      retainedPxcWidth = cachedWidth;
-      retainedPxcHeight = cachedHeight;
+    RetainedPxcEntry* retained = prepareRetainedPxcEntry(pixelBytes);
+    if (retained && cacheFile.seek(4) &&
+        cacheFile.read(retained->pixels.get(), pixelBytes) == static_cast<int>(pixelBytes)) {
+      retained->payloadBytes = pixelBytes;
+      retained->width = cachedWidth;
+      retained->height = cachedHeight;
+      retained->path = cachePath;
+      touchRetainedPxcEntry(*retained);
       cacheFile.close();
-      LOG_INF("EPS", "Retained PXC in PSRAM: bytes=%u dimensions=%ux%u", static_cast<unsigned>(pixelBytes), cachedWidth,
-              cachedHeight);
+      LOG_INF("EPS", "Retained PXC in PSRAM: bytes=%u total=%u entries=2 dimensions=%ux%u",
+              static_cast<unsigned>(pixelBytes), static_cast<unsigned>(retainedPxcCapacity), cachedWidth, cachedHeight);
       MemoryBudget::logEpubHeapPools("pxc retained");
-      return renderCachedPixels(renderer, retainedPxcPixels.get(), cachedWidth, cachedHeight, x, y);
+      return renderCachedPixels(renderer, retained->pixels.get(), cachedWidth, cachedHeight, x, y);
     }
-    retainedPxcPath.clear();
+    // A short read must never leave an entry that could be mistaken for a
+    // complete cache payload. Keep its allocation for a later retry.
+    if (retained) forgetRetainedPxcContent(*retained);
     if (!cacheFile.seek(4)) {
       cacheFile.close();
       return false;
@@ -306,6 +430,9 @@ void ImageBlock::prepareCache() const {
   }
   if (sourcePath.empty()) return;
   const std::string cache = getCachePath(imagePath);
+  // Seed/extract replaces this path's PXC payload. Invalidate before it is
+  // regenerated so a retained previous payload cannot outlive that write.
+  invalidateRetainedPxcPath(cache);
   Storage.remove((cache + ".optimizer.tmp").c_str());
   Storage.remove((cache + ".optimizer.source").c_str());
   if (seedCacheFn && seedCacheFn(extractContext, sourcePath.c_str(), width, height, cache.c_str())) return;
@@ -323,11 +450,17 @@ void ImageBlock::clearSessionRenderFailures() {
 }
 
 void ImageBlock::releaseSessionPixelCache() {
-  retainedPxcPixels.reset();
   retainedPxcCapacity = 0;
-  retainedPxcWidth = 0;
-  retainedPxcHeight = 0;
-  retainedPxcPath.clear();
+  retainedPxcUseClock = 0;
+  for (auto& entry : retainedPxcEntries) {
+    entry.pixels.reset();
+    entry.capacity = 0;
+    entry.payloadBytes = 0;
+    entry.width = 0;
+    entry.height = 0;
+    entry.lastUse = 0;
+    entry.path.clear();
+  }
 }
 
 void ImageBlock::renderPlaceholder(GfxRenderer& renderer, const int x, const int y, const bool foregroundBlack) const {
@@ -414,6 +547,9 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y, const b
   config.performanceMode = false;
   config.useExactDimensions = true;  // Use pre-calculated dimensions to avoid rounding mismatches
   if (fullyOnScreen) {
+    // The decoder will replace this PXC path. Drop any retained payload first
+    // so the next grayscale pass cannot draw its previous generation.
+    invalidateRetainedPxcPath(cachePath);
     config.cachePath = cachePath;  // Enable caching during decode
   }
 

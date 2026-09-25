@@ -27,12 +27,14 @@ struct Allocation {
 };
 inline std::unordered_map<const void*, Allocation> live;
 inline bool defaultExternal = false;
+inline size_t reduceInternalFreeOnExternalFailure = 0;
 inline Heap& heap(uint32_t caps) { return (caps & MALLOC_CAP_SPIRAM) ? external : internal; }
 inline void reset(bool psram = true) {
   assert(live.empty());
   internal = {1024 * 1024, 1024 * 1024, 1024 * 1024};
   external = psram ? Heap{8 * 1024 * 1024, 8 * 1024 * 1024, 8 * 1024 * 1024} : Heap{0, 0, 0};
   defaultExternal = false;
+  reduceInternalFreeOnExternalFailure = 0;
 }
 }  // namespace fakeheap
 inline size_t heap_caps_get_total_size(uint32_t caps) { return fakeheap::heap(caps).total; }
@@ -45,6 +47,10 @@ inline void* heap_caps_malloc(size_t bytes, uint32_t caps) {
   if (h.failOnAttempt == h.attempts) return nullptr;
   if (h.fail) {
     --h.fail;
+    if ((caps & MALLOC_CAP_SPIRAM) && fakeheap::reduceInternalFreeOnExternalFailure != 0) {
+      fakeheap::internal.free = std::min(fakeheap::internal.free, fakeheap::reduceInternalFreeOnExternalFailure);
+      fakeheap::internal.largest = std::min(fakeheap::internal.largest, fakeheap::reduceInternalFreeOnExternalFailure);
+    }
     return nullptr;
   }
   if (bytes > h.free || bytes > h.largest) return nullptr;

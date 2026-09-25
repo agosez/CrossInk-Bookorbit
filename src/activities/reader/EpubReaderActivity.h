@@ -151,6 +151,7 @@ class EpubReaderActivity final : public Activity {
   unsigned long lastPageTurnTime = 0UL;
   unsigned long pageTurnDuration = 0UL;
   ManualPageTurnQueue pendingManualPageTurns;
+  QueuedTurnRenderingState queuedTurnRendering;
   unsigned long pageShownAtMs = 0UL;
   unsigned long lastRenderCompleteMs = 0UL;
   int idlePrewarmSpine = -1;
@@ -180,6 +181,10 @@ class EpubReaderActivity final : public Activity {
   bool pendingPercentJump = false;
   // Normalized 0.0-1.0 progress within the target spine item, computed from book percentage.
   float pendingSpineProgress = 0.0f;
+  std::optional<uint32_t> pendingReferenceUnitOffset;
+  uint32_t pendingReferenceUnitCount = 0;
+  bool pendingReferenceUnitsAreCharacters = false;
+  std::optional<uint16_t> pendingResolvedReferencePage;
   uint16_t pendingParagraphIndex = UINT16_MAX;
 #if CROSSINK_APP_CAP_TOUCH
   ReaderDrawerState touchReaderDrawerState{};
@@ -445,8 +450,9 @@ class EpubReaderActivity final : public Activity {
   static void saveGlobalSettingsForBookReader(void* ctx);
   static void beginGlobalSettingsEditForBookReader(void* ctx);
   static void endGlobalSettingsEditForBookReader(void* ctx);
-  // Jump to a percentage of the book (0-100), mapping it to spine and page.
-  void jumpToPercent(int percent);
+  // Jump to a percentage of the book (0.0-100.0, two decimals meaningful), mapping it to spine and page.
+  void jumpToPercent(float percent);
+  void jumpToStablePage(uint32_t page);
   void reindexCurrentSection();
   void prepareCurrentSectionForRelayout();
   void executeReaderQuickAction(CrossPointSettings::LONG_PRESS_MENU_ACTION action,
@@ -478,7 +484,7 @@ class EpubReaderActivity final : public Activity {
   void applyOrientation(uint8_t orientation);
   void requestManualPageTurn(bool isForwardTurn, const char* source);
   bool drainPendingManualPageTurn();
-  void clearPendingManualPageTurns();
+  void clearPendingManualPageTurns(bool requestRecoveryRedraw = true);
   void finishManualPageTurnBrakeIfReady();
   void cancelSilentNextChapterPrefetchForForwardTurn();
   void pageTurn(bool isForwardTurn, const char* source = "unknown");

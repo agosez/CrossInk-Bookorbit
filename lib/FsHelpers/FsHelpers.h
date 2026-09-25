@@ -92,6 +92,13 @@ inline bool hasCssExtension(const String& fileName) {
 }
 std::string extractFolderPath(const std::string& filePath);
 
+// Rejects a path component that could escape the directory it is joined to.
+// Repeated dots inside a normal filename remain valid.
+bool isSafePathComponent(std::string_view name);
+inline bool isSafePathComponent(const String& name) {
+  return isSafePathComponent(std::string_view{name.c_str(), name.length()});
+}
+
 /**
  * Sanitize a filename/path component for FAT32 in a caller-provided buffer.
  * Replaces invalid path characters, spaces, and control characters with '-'.

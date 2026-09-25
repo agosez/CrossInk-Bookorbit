@@ -22,10 +22,6 @@
 #include <string>
 #include <vector>
 
-#if defined(CROSSINK_ISSUE_666_MEMORY_DIAGNOSTICS) && defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
-#include <esp_memory_utils.h>
-#endif
-
 #include "../reader/BookReadingStats.h"
 #include "../reader/BookStatsActivity.h"
 #include "../reader/EpubReaderUtils.h"
@@ -142,35 +138,6 @@ bool hasHeapForCarouselFrameCache() {
   return ESP.getFreeHeap() >= CAROUSEL_FRAME_MIN_FREE_AFTER_ALLOC &&
          ESP.getMaxAllocHeap() >= CAROUSEL_FRAME_MIN_MAX_ALLOC_AFTER_ALLOC;
 }
-
-#if defined(CROSSINK_ISSUE_666_MEMORY_DIAGNOSTICS) && defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
-const char* carouselPointerPool(const void* ptr) {
-  if (!ptr) return "null";
-  if (esp_ptr_external_ram(ptr)) return "PSRAM";
-  if (esp_ptr_internal(ptr)) return "internal";
-  return "other";
-}
-
-// Temporary #666 probe: cache frames are full-screen buffers, so stack/static
-// storage is unsuitable. Check their containing heap regions only at cache
-// setup/copy time. A healthy region does not prove that an individual pointer
-// still owns a live allocation; the owner/alias check below covers that case.
-bool logCarouselMemoryDiagnostic(const char* stage, const int slotIdx, const void* source, const void* destination,
-                                 const size_t byteCount) {
-  const auto internal = MemoryBudget::snapshot();
-  const auto psram = MemoryBudget::psramSnapshot();
-  const bool sourceRegionIntact = source && heap_caps_check_integrity_addr(reinterpret_cast<intptr_t>(source), true);
-  const bool destinationRegionIntact =
-      destination && heap_caps_check_integrity_addr(reinterpret_cast<intptr_t>(destination), true);
-  LOG_INF("DIAG666",
-          "%s slot=%d bytes=%u task=%s src=%p(%s region=%d) dst=%p(%s region=%d); internal free=%u max=%u; "
-          "psram free=%u max=%u",
-          stage, slotIdx, static_cast<unsigned>(byteCount), pcTaskGetName(nullptr), source, carouselPointerPool(source),
-          sourceRegionIntact, destination, carouselPointerPool(destination), destinationRegionIntact, internal.freeHeap,
-          internal.maxAllocHeap, psram.freeHeap, psram.maxAllocHeap);
-  return sourceRegionIntact && destinationRegionIntact;
-}
-#endif
 
 void appendHashedFileStateToKey(std::string& key, const std::string& path) {
   FsFile file;
@@ -1229,10 +1196,6 @@ bool HomeActivity::allocateCarouselFrameSlots(int targetFrameCount) {
       gCarouselCache.frameStorage[i] = std::move(frame);
       gCarouselCache.frames[i] = gCarouselCache.frameStorage[i].get();
       gCarouselCache.frameBookIdx[i] = -1;
-#if defined(CROSSINK_ISSUE_666_MEMORY_DIAGNOSTICS) && defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
-      logCarouselMemoryDiagnostic("frame-allocated", i, renderer.getFrameBuffer(), gCarouselCache.frames[i],
-                                  bufferSize);
-#endif
     }
 
     if (!allocFailed) {
@@ -2187,7 +2150,7 @@ bool HomeActivity::handleShortcutAction(const CrossPointSettings::SHORT_PWRBTN a
         if (selectedAction == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH) {
           // OptionPopup has already dismissed itself. Repaint Home before flushing
           // so the full refresh cannot preserve the popup in the panel image.
-          initialFullRefresh = true;
+          initialRefreshMode = HalDisplay::FULL_REFRESH;
           requestUpdate();
           return;
         }
@@ -2211,9 +2174,8 @@ void HomeActivity::render(RenderLock&&) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
   const auto displayHomeBuffer = [this] {
-    const auto refreshMode = initialFullRefresh ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH;
-    initialFullRefresh = false;
-    renderer.displayBuffer(refreshMode);
+    renderer.displayBuffer(initialRefreshMode);
+    initialRefreshMode = HalDisplay::FAST_REFRESH;
   };
 
   if (usesMinimalHomeInteraction()) {
@@ -2416,22 +2378,8 @@ void HomeActivity::renderCarouselFrame(int bookIdx, int slotIdx) {
   }
   uint8_t* frameBuffer = renderer.getFrameBuffer();
   if (!frameBuffer || !gCarouselCache.frames[slotIdx]) return;
-#if defined(CROSSINK_ISSUE_666_MEMORY_DIAGNOSTICS) && defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
-  const uint8_t* const ownedFrame = gCarouselCache.frameStorage[slotIdx].get();
-  if (ownedFrame != gCarouselCache.frames[slotIdx]) {
-    LOG_ERR("DIAG666", "pre-copy slot=%d cache alias=%p owner=%p", slotIdx, gCarouselCache.frames[slotIdx], ownedFrame);
-    return;
-  }
-#endif
   renderCarouselFrameToCurrentBuffer(bookIdx, nullptr, nullptr, nullptr);
 
-#if defined(CROSSINK_ISSUE_666_MEMORY_DIAGNOSTICS) && defined(ARDUINO_ARCH_ESP32) && !defined(SIMULATOR)
-  if (!logCarouselMemoryDiagnostic("pre-copy", slotIdx, frameBuffer, gCarouselCache.frames[slotIdx],
-                                   renderer.getBufferSize())) {
-    LOG_ERR("DIAG666", "pre-copy heap integrity failed; skipping carousel frame copy");
-    return;
-  }
-#endif
   memcpy(gCarouselCache.frames[slotIdx], frameBuffer, renderer.getBufferSize());
   gCarouselCache.frameBookIdx[slotIdx] = bookIdx;
   carouselFrames[slotIdx] = gCarouselCache.frames[slotIdx];

@@ -33,7 +33,7 @@ class EpubReaderMenuActivity final : public Activity {
       ReaderOptionsActivity::SaveGlobalSettingsCallback saveGlobalSettingsCallback = nullptr,
       void* saveGlobalSettingsContext = nullptr,
       ReaderOptionsActivity::GlobalSettingsEditCallback beginGlobalSettingsEditCallback = nullptr,
-      void* beginGlobalSettingsEditContext = nullptr, bool stablePageNumbersAvailable = false,
+      void* beginGlobalSettingsEditContext = nullptr, uint32_t stableCurrentPage = 0, uint32_t stablePageCount = 0,
       ReaderOptionsActivity::GlobalSettingsEditCallback endGlobalSettingsEditCallback = nullptr,
       void* endGlobalSettingsEditContext = nullptr, const char* dictionaryFontFamilyName = nullptr,
       uint8_t dictionaryFontPointSize = 0, bool hasDictionaryFontOverride = false,
@@ -67,7 +67,7 @@ class EpubReaderMenuActivity final : public Activity {
 
   static TabMenuItems buildMenuItems(bool hasFootnotes, bool hasBookmarks, bool hasClippings,
                                      bool isCurrentPageBookmarked, bool isBookCompleted, bool showReadingPaceReset,
-                                     bool hasDictionary);
+                                     bool hasDictionary, bool hasStablePageNumbers);
   [[nodiscard]] const std::vector<MenuItem>& activeMenuItems() const;
   [[nodiscard]] size_t activeTabIndex() const { return static_cast<size_t>(activeTab); }
   void cycleActiveTab();
@@ -111,7 +111,8 @@ class EpubReaderMenuActivity final : public Activity {
   void* saveGlobalSettingsContext = nullptr;
   ReaderOptionsActivity::GlobalSettingsEditCallback beginGlobalSettingsEditCallback = nullptr;
   void* beginGlobalSettingsEditContext = nullptr;
-  bool stablePageNumbersAvailable = false;
+  uint32_t stableCurrentPage = 0;
+  uint32_t stablePageCount = 0;
   ReaderOptionsActivity::GlobalSettingsEditCallback endGlobalSettingsEditCallback = nullptr;
   void* endGlobalSettingsEditContext = nullptr;
   char dictionaryFontFamilyName[64] = "";

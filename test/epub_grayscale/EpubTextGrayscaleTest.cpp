@@ -157,6 +157,41 @@ TEST(EpubTextGrayscaleTest, RealTextRasterMatchesFullAndStripTargets) {
 }
 }  // namespace
 
+TEST(EpubTextRaster, VariationSelectorsDoNotDrawOrAdvance) {
+  for (const bool sd : {false, true}) {
+    SCOPED_TRACE(testing::Message() << "sd=" << sd);
+    fakeheap::reset(true);
+    Storage.reset();
+    RasterFont fixture(12);
+    SdCardFont sdFont;
+    HalDisplay display;
+    GfxRenderer renderer(display);
+    renderer.begin();
+    if (sd) {
+      Storage.put("font.cpfont", fixture.file());
+      ASSERT_TRUE(sdFont.load("font.cpfont"));
+      renderer.insertFont(1, EpdFontFamily(sdFont.getEpdFont()));
+      renderer.registerSdCardFont(1, &sdFont);
+    } else {
+      renderer.insertFont(1, EpdFontFamily(&fixture.font));
+    }
+
+    const auto render = [&renderer, &display](const char* text) {
+      renderer.clearScreen();
+      renderer.drawText(1, 25, 40, text);
+      return display.bw;
+    };
+
+    const auto base = render("!");
+    const int baseAdvance = renderer.getTextAdvanceX(1, "!", EpdFontFamily::REGULAR);
+    for (const char* text : {"!\xE1\xA0\x8B", "!\xEF\xB8\x8E", "!\xEF\xB8\x8F"}) {  // U+180B/U+FE0E/U+FE0F
+      EXPECT_EQ(renderer.getTextAdvanceX(1, text, EpdFontFamily::REGULAR), baseAdvance);
+      EXPECT_EQ(render(text), base);
+    }
+    renderer.removeFont(1);
+  }
+}
+
 TEST(AbsoluteImageRaster, TextMatchesBlackWhiteInBothPlanesAndCancellationResetsMode) {
   fakeheap::reset(true);
   Storage.reset();

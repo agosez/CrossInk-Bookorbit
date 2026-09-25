@@ -40,6 +40,9 @@ class FileBrowserActivity final : public Activity {
   void unpinBootFavorite();
   bool isPinnedBootFavorite(const std::string& fullPath) const;
   void showFileActionMenu(const std::string& entry, bool ignoreInitialConfirmRelease = false);
+  void startRenameFile(const std::string& fullPath, const std::string& entry);
+  void renameFile(const std::string& oldPath, const std::string& oldEntry, const std::string& newStem,
+                  const std::string& extension);
 
   ButtonNavigator buttonNavigator;
 

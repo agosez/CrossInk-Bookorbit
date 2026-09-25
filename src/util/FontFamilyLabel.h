@@ -14,6 +14,7 @@ struct FontFamilyPointSizeRange {
 };
 
 inline FontFamilyPointSizeRange fontFamilyPointSizeRange(const SdCardFontFamilyInfo& family) {
+  if (family.firstSize) return {family.firstSize, family.lastSize};
   FontFamilyPointSizeRange range;
   for (const auto& file : family.files) {
     if (file.style != 0) continue;

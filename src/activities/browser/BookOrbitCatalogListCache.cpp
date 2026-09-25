@@ -78,9 +78,9 @@ void appendJsonEscaped(std::string& out, const std::string& value) {
 }
 
 std::string booksCacheKey(const BookOrbitBookQuery& query, const int page) {
-  return std::string("books|") + std::to_string(page) + "|" + query.sort + "|" + query.query + "|" + query.author +
-         "|" + query.seriesId + "|" + query.series + "|" + query.collectionId + "|" + query.smartScopeId + "|" +
-         query.libraryId;
+  return std::string("books|") + std::to_string(page) + "|" + query.sort + "|" + query.readStatus + "|" + query.query +
+         "|" + query.author + "|" + query.seriesId + "|" + query.series + "|" + query.collectionId + "|" +
+         query.smartScopeId + "|" + query.libraryId;
 }
 
 std::string facetCacheKey(const std::string& sectionId, const int page) {

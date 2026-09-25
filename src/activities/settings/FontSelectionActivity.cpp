@@ -89,6 +89,7 @@ FontSelectionActivity::FontSelectionActivity(GfxRenderer& renderer, MappedInputM
 
 void FontSelectionActivity::onEnter() {
   Activity::onEnter();
+  if (registry_ == &sdFontSystem.registry()) sdFontSystem.refreshIfDirty();
 
   // Get metrics and calculate layout dimensions
   metrics_ = UITheme::getInstance().getMetrics();
@@ -227,6 +228,7 @@ void FontSelectionActivity::handleSelection() {
     const auto& families = registry_->getFamilies();
     if (sdIdx < static_cast<int>(families.size())) {
       const std::vector<uint8_t> sizes = families[sdIdx].availableSizes();
+      if (sizes.empty()) return;
       SETTINGS.readerFontPointSize = sizes[closestSizeIndex(sizes, targetPointSize)];
       strncpy(SETTINGS.sdFontFamilyName, families[sdIdx].name.c_str(), sizeof(SETTINGS.sdFontFamilyName) - 1);
       SETTINGS.sdFontFamilyName[sizeof(SETTINGS.sdFontFamilyName) - 1] = '\0';

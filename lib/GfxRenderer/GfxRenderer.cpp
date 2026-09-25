@@ -25,6 +25,8 @@ uint8_t resolveSdCardStyle(const SdCardFont& font, const EpdFontFamily::Style st
 
 int32_t resolveSdCardAdvanceFP(const SdCardFont& sdFont, const EpdFontFamily& font, const uint32_t cp,
                                const EpdFontFamily::Style style, const uint8_t styleIdx) {
+  if (utf8IsVariationSelector(cp)) return 0;
+
   uint16_t advanceFP = sdFont.getAdvance(cp, styleIdx);
   if (advanceFP != 0 || utf8IsCombiningMark(cp)) {
     return advanceFP;
@@ -206,6 +208,7 @@ bool GfxRenderer::collectSdCardFontShapedRtlCodepoints(const char* utf8Text, uin
     const auto* p = reinterpret_cast<const unsigned char*>(shaped);
     uint32_t cp = 0;
     while ((cp = utf8NextCodepoint(&p))) {
+      if (utf8IsVariationSelector(cp)) continue;
       if (std::find(codepoints, codepoints + cpCount, cp) != codepoints + cpCount) continue;
       if (cpCount >= capacity) {
         truncated = true;
@@ -1064,6 +1067,7 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
     }
     const auto& font = fontIt->second;
     while (uint32_t cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&textCursor))) {
+      if (utf8IsVariationSelector(cp)) continue;
       widthFP += resolveSdCardAdvanceFP(*sdIt->second, font, cp, style, styleIdx);
     }
     return fp4::toPixel(widthFP);
@@ -1139,6 +1143,8 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
   uint32_t prevCp = 0;
   bool prevScaledSmallCap = false;
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&textCursor)))) {
+    if (utf8IsVariationSelector(cp)) continue;
+
     if (utf8IsCombiningMark(cp) || BidiUtils::isTransparentMark(cp)) {
       const EpdGlyph* combiningGlyph = font.getGlyph(cp, style);
       if (!combiningGlyph) continue;
@@ -2745,7 +2751,7 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFo
     uint32_t lastCp = 0;
     bool lastScaledSmallCap = false;
     while (uint32_t cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text))) {
-      if (BidiUtils::isTransparentMark(cp)) {
+      if (utf8IsVariationSelector(cp) || BidiUtils::isTransparentMark(cp)) {
         continue;
       }
       const bool scaledSmallCap = isSmallCapsLowercase(style, cp);
@@ -2792,7 +2798,7 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFo
   const auto& font = fontIt->second;
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text)))) {
     // RTL vowel marks (niqqud/harakat) are zero-advance overlays in drawText — no width.
-    if (BidiUtils::isTransparentMark(cp)) {
+    if (utf8IsVariationSelector(cp) || BidiUtils::isTransparentMark(cp)) {
       continue;
     }
     if (utf8IsCombiningMark(cp)) {
@@ -2928,6 +2934,8 @@ void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y
   uint32_t cp;
   uint32_t prevCp = 0;
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text)))) {
+    if (utf8IsVariationSelector(cp)) continue;
+
     // RTL vowel marks (Hebrew niqqud, Arabic harakat) ride the combining-mark
     // path: zero-advance overlays on the preceding base glyph (applyBidiVisual
     // emits base-then-marks per UAX#9 L3). anchorFor pins position-sensitive
@@ -3204,12 +3212,33 @@ bool GfxRenderer::supportsAbsoluteGrayscale() const {
 #endif
 }
 
+bool GfxRenderer::supportsDirectGrayscale() const {
+#ifdef SIMULATOR
+  return false;
+#else
+  return display.grayscaleCapabilities(HalDisplay::GrayscaleMode::Direct).supported();
+#endif
+}
+
 bool GfxRenderer::displayAbsoluteGrayscaleBase(HalDisplay::RefreshMode fallback) const {
   absoluteGrayPlanes = false;
 #ifdef SIMULATOR
   return false;
 #else
   if (!display.displayGrayscaleBase(HalDisplay::GrayscaleMode::Absolute, fallback, fadingFix)) return false;
+  absoluteGrayPlanes = true;
+  return true;
+#endif
+}
+
+bool GfxRenderer::displayDirectGrayscaleBase(HalDisplay::RefreshMode fallback) const {
+  absoluteGrayPlanes = false;
+#ifdef SIMULATOR
+  return false;
+#else
+  if (!display.displayGrayscaleBase(HalDisplay::GrayscaleMode::Direct, fallback, fadingFix)) return false;
+  // Direct uploads complete planes, so grayPlanePixel() must use the absolute
+  // encoding rather than overlay masks.
   absoluteGrayPlanes = true;
   return true;
 #endif

@@ -37,6 +37,7 @@ Note: Even though some actions assigned to the front buttons could be used globa
 - Next Page
 - Previous Page
 - Pinch to Resize Font (on supported multi-touch devices)
+- Two-finger Screen Rotation (on supported multi-touch devices)
 - Tap to Hide Status Bar
 - Two-finger Swipe (on supported multi-touch devices)
 
@@ -74,6 +75,16 @@ book, move two fingers apart to increase the font or together to decrease it.
 Each completed pinch changes one available font-size step. Pinch resizing also
 requires **Touch Reader Controls** to be enabled. XTC pages are pre-rendered,
 so this option cannot resize them.
+
+## Two-finger Screen Rotation
+
+On touchscreen devices with multi-touch support, **Two-finger Screen Rotation**
+is enabled by default in **Settings > Controls > Taps & Gestures**. While
+reading an EPUB or TXT book, place two fingers on the page and twist them to
+rotate the reading orientation one step, the same as changing **Reading
+Orientation** by hand. The new orientation is saved, so it survives sleep and
+restart. Turn the toggle off if accidental twists rotate the page while you
+read; the four-way **Reading Orientation** setting still works.
 
 ## Tap to Hide Status Bar
 

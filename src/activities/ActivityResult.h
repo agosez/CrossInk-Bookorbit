@@ -28,6 +28,7 @@ struct MenuResult {
   ReaderSettingsChangeMask changeMask = ReaderSettingsChangeMask::None;
   bool reopenDrawer = false;
   int16_t drawerValue = -1;
+  uint32_t drawerPage = 0;
 };
 
 struct ChapterResult {
@@ -39,7 +40,8 @@ struct ChapterResult {
 };
 
 struct PercentResult {
-  int percent = 0;
+  // 0.0-100.0; keypad entry allows two decimal places.
+  float percent = 0.0f;
 };
 
 struct IntervalResult {

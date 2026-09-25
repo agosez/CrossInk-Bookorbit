@@ -107,6 +107,27 @@ def request_json(method: str, url: str, headers: dict[str, str], payload: Any | 
     return json.loads(body) if body.strip() else {}
 
 
+def upload_file(url: str, headers: dict[str, str], path: Path,
+                ok: tuple[int, ...] = (200, 201)) -> tuple[int, Any]:
+    """POST ``path`` as the single ``file`` part of a multipart form. Returns the
+    status and parsed body; a status outside ``ok`` raises unless it is a 409,
+    which the seeder reads as "already there"."""
+    boundary = f"crossink-{int(time.time() * 1000)}"
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+            f"filename=\"{path.name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode()
+    body += path.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        **headers, "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            status, text = resp.status, resp.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        status, text = e.code, e.read().decode(errors="replace")
+    if status not in ok and status != 409:
+        raise HttpError("POST", url, status, text)
+    return status, json.loads(text) if text.strip() else {}
+
+
 # --- BookOrbit web API (admin/seeding side) ------------------------------------
 
 
@@ -250,6 +271,17 @@ class AdminClient:
                          self._headers(), {"bookIds": book_ids})
         return collection_id
 
+    def upload_book(self, library_id: int, path: Path) -> int | None:
+        """Upload ``path`` as a new book of the library. Returns its book id, or None
+        when a file of that name is already there (409)."""
+        status, body = upload_file(self.api(f"/libraries/{library_id}/upload"), self._headers(), path)
+        return None if status == 409 else int(body["bookId"])
+
+    def add_book_file(self, book_id: int, path: Path) -> None:
+        """Attach ``path`` to an existing book as another format; already attached
+        (409) is fine."""
+        upload_file(self.api(f"/books/{book_id}/files"), self._headers(), path)
+
     def ensure_smart_scope(self, name: str, icon: str, rules: list[dict]) -> int:
         """Create a SmartScope matching ``rules``, or return the existing one by name.
 
@@ -298,6 +330,16 @@ class KosyncDevice:
         """One page of the catalog book listing, exactly as the firmware asks for it."""
         return request_json("GET", self.api(f"/plugin/catalog/books?page={page}&size={size}&sort={sort}"),
                             self._headers(), ok=(200,))
+
+    def catalog_page(self, **params: Any) -> dict:
+        """One page of the catalog book listing with arbitrary query parameters —
+        the server's own answer to compare the firmware's listings against."""
+        query = "&".join(f"{k}={v}" for k, v in {"page": 1, "size": 20, **params}.items())
+        return request_json("GET", self.api(f"/plugin/catalog/books?{query}"), self._headers(), ok=(200,))
+
+    def set_read_status(self, book_id: int, status: str) -> None:
+        request_json("PUT", self.api(f"/plugin/catalog/books/{book_id}/read-status"), self._headers(),
+                     {"status": status}, ok=(200,))
 
     def catalog_book_detail(self, book_id: int) -> dict:
         """A catalog book's detail, including each file's devicePath — the account's

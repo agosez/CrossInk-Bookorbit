@@ -12,9 +12,9 @@ constexpr char API_PREFIX[] = "/api/v1/koreader";
 }  // namespace
 
 void BookOrbitCredentialStore::toJson(JsonDocument& doc) const {
-  doc["username"] = getUsername();
-  doc["password_obf"] = obfuscation::obfuscateToBase64(getPassword());
-  doc["serverUrl"] = getServerUrl();
+  doc["username"] = username;
+  doc["password_obf"] = obfuscation::obfuscateToBase64(password);
+  doc["serverUrl"] = serverUrl;
   doc["downloadFolder"] = downloadFolder;
   doc["syncBehavior"] = static_cast<uint8_t>(syncBehavior);
 }
@@ -40,12 +40,14 @@ bool BookOrbitCredentialStore::fromJson(JsonVariantConst doc) {
 }
 
 void BookOrbitCredentialStore::setCredentials(const std::string& user, const std::string& pass) {
+  ensureLoaded();
   username = user;
   password = pass;
   LOG_DBG("BOS", "Set credentials for user: %s", user.c_str());
 }
 
 std::string BookOrbitCredentialStore::getMd5Password() const {
+  ensureLoaded();
   if (password.empty()) {
     return "";
   }
@@ -59,10 +61,12 @@ std::string BookOrbitCredentialStore::getMd5Password() const {
 }
 
 bool BookOrbitCredentialStore::hasCredentials() const {
+  ensureLoaded();
   return !username.empty() && !password.empty() && !serverUrl.empty();
 }
 
 void BookOrbitCredentialStore::clearCredentials() {
+  ensureLoaded();
   username.clear();
   password.clear();
   saveToFile();
@@ -70,11 +74,13 @@ void BookOrbitCredentialStore::clearCredentials() {
 }
 
 void BookOrbitCredentialStore::setServerUrl(const std::string& url) {
+  ensureLoaded();
   serverUrl = url;
   LOG_DBG("BOS", "Set server URL: %s", url.empty() ? "(none)" : url.c_str());
 }
 
 std::string BookOrbitCredentialStore::getBaseUrl() const {
+  ensureLoaded();
   if (serverUrl.empty()) {
     return "";
   }

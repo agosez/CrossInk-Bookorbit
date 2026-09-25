@@ -51,6 +51,7 @@ struct BookOrbitFacetPage {
 /** Filters for a book listing request; empty fields are omitted from the query. */
 struct BookOrbitBookQuery {
   std::string sort;          // BookOrbit sort id (e.g. "recently_added", "title", "series")
+  std::string readStatus;    // read-status filter ("reading" for Continue reading)
   std::string query;         // free-text search
   std::string author;        // author filter (facet entry id)
   std::string seriesId;      // numeric series filter (preferred when present)
@@ -77,13 +78,15 @@ struct BookOrbitBookPage {
 };
 
 /**
- * Per-section entry counts for the catalog root, from the server's dashboard —
- * the numbers BookOrbit's own KOReader plugin shows on its Browse tiles.
- * -1 = unknown (older server without the dashboard, or field absent).
+ * Per-section entry counts for the catalog root — the numbers BookOrbit's own
+ * KOReader plugin shows on its Browse tiles. The book counts are the totals of
+ * the EPUB-only listings the tiles open; the facet counts come from the server's
+ * dashboard and cover every format, since the server cannot filter those.
+ * -1 = unknown (older server without the dashboard, field absent, or failed fetch).
  */
 struct BookOrbitCatalogCounts {
-  int totalBooks = -1;  // "All Books" and "Recently added" list every book
-  int inProgress = -1;
+  int totalBooks = -1;  // "All Books" and "Recently added" list every EPUB
+  int inProgress = -1;  // "Continue reading": EPUBs marked as being read
   int libraries = -1;
   int authors = -1;
   int series = -1;
@@ -120,12 +123,22 @@ class BookOrbitCatalogClient {
   static bool fetchRootSections(std::vector<BookOrbitCatalogSection>& outSections);
 
   /**
-   * Fetch the root sections' entry counts from the server dashboard. The response
-   * also carries book lists the caller never reads; the streaming filter drops
-   * them, so only the counts ever reach memory. Returns false on any failure —
-   * counts are decorative, so callers treat that as "show no counts".
+   * Fetch the root sections' entry counts. The facet counts come from the server
+   * dashboard, whose response also carries book lists the caller never reads; the
+   * streaming filter drops them, so only the counts ever reach memory. The
+   * dashboard's book counts include formats the catalog hides, so the two book
+   * counts are instead the totals of their own EPUB listings: two more requests,
+   * each for a single-item page. Returns false when the dashboard fails; a failed
+   * book total only leaves that count unknown. Counts are decorative, so callers
+   * treat any failure as "show no counts".
    */
   static bool fetchCatalogCounts(BookOrbitCatalogCounts& outCounts);
+
+  /**
+   * The listing query behind a root book section ("recent", "continue-reading",
+   * "all-books"), mirroring the booksHref the server gives each of them.
+   */
+  static BookOrbitBookQuery sectionBookQuery(const std::string& sectionId);
 
   /**
    * Fetch a page of books matching the given filters.

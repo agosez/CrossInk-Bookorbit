@@ -278,8 +278,7 @@ int pngDrawCallback(PNGDRAW* pDraw) {
         if (useDithering) {
           ditheredGray = applyBayerDither4Level(gray, outX, outY);
         } else {
-          ditheredGray = gray / 85;
-          if (ditheredGray > 3) ditheredGray = 3;
+          ditheredGray = quantizeGrayTo4Level(gray);
         }
         pw.writePixel(outX, ditheredGray);
         if (caching) cw.writePixel(outX, ditheredGray);

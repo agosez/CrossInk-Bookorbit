@@ -1,38 +1,61 @@
 #include "EpubReaderPercentSelectionActivity.h"
 
+#include <FreeInkUIIcon.h>
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
 #include <I18n.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "DeviceCapabilities.h"
 #include "MappedInputManager.h"
-#include "components/SliderValue.h"
+#include "StablePageSelectionModel.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
+#include "components/icons/keyboardIcons.h"
 #include "fontIds.h"
 
 namespace fui = freeink::ui;
 
 namespace {
-constexpr fui::ActionId ACTION_SLIDER = 1;
-constexpr fui::ActionId ACTION_STEP = 2;
-constexpr fui::ActionId ACTION_CANCEL = 3;
-constexpr fui::ActionId ACTION_CONFIRM = 4;
-// Fine/coarse step sizes for physical input and the four touch step controls.
+constexpr fui::ActionId ACTION_KEYPAD_KEY = 1;
+constexpr fui::ActionId ACTION_KEYPAD_BACKSPACE = 2;
+// Display-only step sizes shown in the front/side button hints (1 and 10, in
+// whichever unit the current mode reads in). Actual deltas applied to `value`
+// go through deltaForDisplayStep() since Percent mode stores centipercent.
 constexpr int kSmallStep = 1;
 constexpr int kLargeStep = 10;
+constexpr unsigned long kLongPressMs = 1000;
+// Sentinel key values for the two non-digit keypad keys; digits use their own 0-9 value.
+constexpr int16_t kKeypadDot = -1;
+constexpr int16_t kKeypadOk = -2;
 }  // namespace
 
 EpubReaderPercentSelectionActivity::EpubReaderPercentSelectionActivity(GfxRenderer& renderer,
                                                                        MappedInputManager& mappedInput,
-                                                                       const int initialPercent)
+                                                                       const float initialPercent)
     : Activity("EpubReaderPercentSelection", renderer, mappedInput),
-      percent(initialPercent),
+      // Round to the nearest whole percent, not the nearest centipercent: every slider
+      // step is a multiple of 1.00%, so seeding a fractional remainder here would make
+      // 0% and 100% permanently unreachable by stepping (only the keypad could type them).
+      value(static_cast<uint32_t>(std::lround(std::clamp(initialPercent, 0.0f, 100.0f))) * 100),
+      uiTarget(makeUiTarget(renderer)),
+      app(uiTarget, uiTarget.deviceContext()) {}
+
+EpubReaderPercentSelectionActivity::EpubReaderPercentSelectionActivity(GfxRenderer& renderer,
+                                                                       MappedInputManager& mappedInput,
+                                                                       const uint32_t initialPage,
+                                                                       const uint32_t pageCount)
+    : Activity("EpubReaderStablePageSelection", renderer, mappedInput),
+      mode(Mode::StablePage),
+      value(clampStablePage(initialPage, pageCount)),
+      maximum(pageCount),
       uiTarget(makeUiTarget(renderer)),
       app(uiTarget, uiTarget.deviceContext()) {}
 
@@ -40,57 +63,184 @@ void EpubReaderPercentSelectionActivity::onEnter() {
   Activity::onEnter();
   uiReady = false;
   applySharedUiTheme(app, uiTarget);
-  app.on(ACTION_SLIDER, &EpubReaderPercentSelectionActivity::onSliderEvent, this);
-  app.on(ACTION_STEP, &EpubReaderPercentSelectionActivity::onStepEvent, this);
-  app.on(ACTION_CANCEL, &EpubReaderPercentSelectionActivity::onCancelEvent, this);
-  app.on(ACTION_CONFIRM, &EpubReaderPercentSelectionActivity::onConfirmEvent, this);
+  app.on(ACTION_KEYPAD_KEY, &EpubReaderPercentSelectionActivity::onKeypadKeyEvent, this);
+  app.on(ACTION_KEYPAD_BACKSPACE, &EpubReaderPercentSelectionActivity::onKeypadBackspaceEvent, this);
   app.setScreen(&EpubReaderPercentSelectionActivity::percentScreen, this);
+  // Touch devices always use the keypad; it has no slider fallback to return to.
+  keypadActive = mappedInput.hasTouch();
   // Set up rendering task and mark first frame dirty.
   requestUpdate();
 }
 
 void EpubReaderPercentSelectionActivity::onExit() { Activity::onExit(); }
 
-void EpubReaderPercentSelectionActivity::adjustPercent(const int delta) {
-  // Wrap using a 100-value ring (0% and 100% are the same wrap point), but keep 100 as the
-  // natural landing value when reached without crossing the boundary (e.g. 90 + 10 = 100).
-  const int raw = percent + delta;
-  if (raw > 0 && raw % 100 == 0) {
-    percent = 100;
+int EpubReaderPercentSelectionActivity::deltaForDisplayStep(const int displaySteps) const {
+  // StablePage steps by whole pages; Percent stores centipercent, so a "1" or "10"
+  // step shown to the user is 100x that in the stored unit.
+  return mode == Mode::StablePage ? displaySteps : displaySteps * 100;
+}
+
+void EpubReaderPercentSelectionActivity::adjustValue(const int delta) {
+  if (mode == Mode::StablePage) {
+    value = adjustStablePage(value, delta, maximum);
+    requestUpdate();
+    return;
+  }
+  // Wrap using a 10000-value ring (0.00% and 100.00% are the same wrap point), but keep
+  // 10000 as the natural landing value when reached without crossing the boundary.
+  const int raw = static_cast<int>(value) + delta;
+  if (raw > 0 && raw % 10000 == 0) {
+    value = 10000;
   } else {
-    percent = ((raw % 100) + 100) % 100;
+    value = static_cast<uint32_t>(((raw % 10000) + 10000) % 10000);
   }
   requestUpdate();
 }
 
-void EpubReaderPercentSelectionActivity::setPercent(const int value) {
-  const int clamped = std::clamp(value, 0, 100);
-  if (clamped == percent) return;
-  percent = clamped;
+bool EpubReaderPercentSelectionActivity::isKeypadVisible() const { return mappedInput.hasTouch() || keypadActive; }
+
+void EpubReaderPercentSelectionActivity::enterKeypad() {
+  keypadActive = true;
+  seedKeypadEntryFromValue();
+  keypadRow = 0;
+  keypadCol = 0;
+  keypadBackspaceFocused = false;
   requestUpdate();
 }
 
-void EpubReaderPercentSelectionActivity::onSliderEvent(const fui::ActionEvent& event, void* user) {
-  auto* self = static_cast<EpubReaderPercentSelectionActivity*>(user);
-  if (event.dragPermille < 0) return;
-  const int value = (static_cast<int>(event.dragPermille) * 100 + 500) / 1000;
-  self->setPercent(self->sliderTapPending ? snapSliderTapValue(value, 0, 100, 5) : value);
+void EpubReaderPercentSelectionActivity::exitKeypad() {
+  keypadActive = false;
+  requestUpdate();
 }
 
-void EpubReaderPercentSelectionActivity::onStepEvent(const fui::ActionEvent& event, void* user) {
-  static_cast<EpubReaderPercentSelectionActivity*>(user)->adjustPercent(event.value);
+void EpubReaderPercentSelectionActivity::seedKeypadEntryFromValue() {
+  if (mode == Mode::StablePage) {
+    std::snprintf(entryText, sizeof(entryText), "%lu", static_cast<unsigned long>(value));
+  } else if (value % 100 == 0) {
+    std::snprintf(entryText, sizeof(entryText), "%lu", static_cast<unsigned long>(value / 100));
+  } else if (value % 10 == 0) {
+    std::snprintf(entryText, sizeof(entryText), "%lu.%lu", static_cast<unsigned long>(value / 100),
+                  static_cast<unsigned long>((value % 100) / 10));
+  } else {
+    std::snprintf(entryText, sizeof(entryText), "%lu.%02lu", static_cast<unsigned long>(value / 100),
+                  static_cast<unsigned long>(value % 100));
+  }
+  entryLen = static_cast<uint8_t>(std::strlen(entryText));
 }
 
-void EpubReaderPercentSelectionActivity::onCancelEvent(const fui::ActionEvent&, void* user) {
-  auto* self = static_cast<EpubReaderPercentSelectionActivity*>(user);
-  self->app.clearTapFlash();
-  self->cancel();
+void EpubReaderPercentSelectionActivity::moveKeypadFocus(const int rowDelta, const int colDelta) {
+  if (keypadBackspaceFocused) {
+    if (rowDelta > 0 || colDelta != 0) keypadBackspaceFocused = false;
+    requestUpdate();
+    return;
+  }
+  if (rowDelta < 0 && keypadRow == 0) {
+    keypadBackspaceFocused = true;
+    requestUpdate();
+    return;
+  }
+  keypadRow = ((keypadRow + rowDelta) % 4 + 4) % 4;
+  keypadCol = ((keypadCol + colDelta) % 3 + 3) % 3;
+  // The '.' cell (row 3, col 1) is disabled outside Percent mode; step past it in
+  // whichever direction focus was already moving rather than let it land there.
+  if (mode != Mode::Percent && keypadRow == 3 && keypadCol == 1) {
+    if (colDelta != 0) {
+      keypadCol = ((keypadCol + colDelta) % 3 + 3) % 3;
+    } else if (rowDelta != 0) {
+      keypadRow = ((keypadRow + rowDelta) % 4 + 4) % 4;
+    } else {
+      keypadCol = 0;
+    }
+  }
+  requestUpdate();
 }
 
-void EpubReaderPercentSelectionActivity::onConfirmEvent(const fui::ActionEvent&, void* user) {
-  auto* self = static_cast<EpubReaderPercentSelectionActivity*>(user);
-  self->app.clearTapFlash();
-  self->confirm();
+void EpubReaderPercentSelectionActivity::activateKeypadFocus() {
+  if (keypadBackspaceFocused) {
+    backspaceEntry();
+    return;
+  }
+  // Grid layout: 1 2 3 / 4 5 6 / 7 8 9 / 0 . OK (matches handleKeypadValue's key values).
+  static constexpr int16_t kGridValues[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 0, kKeypadDot, kKeypadOk};
+  const int idx = keypadRow * 3 + keypadCol;
+  if (idx == 10 && mode != Mode::Percent) return;  // '.' is disabled outside Percent mode
+  handleKeypadValue(kGridValues[idx]);
+}
+
+void EpubReaderPercentSelectionActivity::handleKeypadValue(const int16_t keyValue) {
+  if (keyValue == kKeypadOk) {
+    // Nothing typed: do nothing rather than silently confirm whatever `value` already
+    // held while the readout reads "0" (which is what an empty buffer displays as).
+    if (entryLen == 0) return;
+    confirmKeypad();
+  } else if (keyValue == kKeypadDot) {
+    appendDecimalPoint();
+  } else {
+    appendDigit(static_cast<char>('0' + keyValue));
+  }
+}
+
+void EpubReaderPercentSelectionActivity::appendDigit(const char digit) {
+  if (entryLen >= sizeof(entryText) - 1) return;
+  // Reject a digit that would push the typed value out of range, rather than let the
+  // readout show a number OK would silently clamp to something else.
+  char candidate[sizeof(entryText)];
+  std::memcpy(candidate, entryText, entryLen);
+  candidate[entryLen] = digit;
+  candidate[entryLen + 1] = 0;
+  if (mode == Mode::Percent) {
+    const char* dot = static_cast<const char*>(std::memchr(entryText, '.', entryLen));
+    if (dot != nullptr && (entryText + entryLen) - (dot + 1) >= 2) return;
+    if (std::strtof(candidate, nullptr) > 100.0f) return;
+  } else {
+    const unsigned long candidateValue = std::strtoul(candidate, nullptr, 10);
+    if (candidateValue == 0 || candidateValue > maximum) return;
+  }
+  entryText[entryLen++] = digit;
+  entryText[entryLen] = 0;
+  requestUpdate();
+}
+
+void EpubReaderPercentSelectionActivity::appendDecimalPoint() {
+  if (mode != Mode::Percent) return;
+  // Require a leading digit ("0." rather than bare "."): otherwise the readout
+  // would show "." while OK silently confirms 0%.
+  if (entryLen == 0) return;
+  for (uint8_t i = 0; i < entryLen; ++i) {
+    if (entryText[i] == '.') return;  // one decimal point at most
+  }
+  if (entryLen >= sizeof(entryText) - 1) return;
+  entryText[entryLen++] = '.';
+  entryText[entryLen] = 0;
+  requestUpdate();
+}
+
+void EpubReaderPercentSelectionActivity::backspaceEntry() {
+  if (entryLen == 0) return;
+  entryText[--entryLen] = 0;
+  if (entryLen == 0) keypadBackspaceFocused = false;
+  requestUpdate();
+}
+
+void EpubReaderPercentSelectionActivity::confirmKeypad() {
+  app.clearTapFlash();
+  if (entryLen > 0) {
+    if (mode == Mode::StablePage) {
+      value = clampStablePage(static_cast<uint32_t>(std::strtoul(entryText, nullptr, 10)), maximum);
+    } else {
+      const float parsed = std::strtof(entryText, nullptr);
+      value = static_cast<uint32_t>(std::lround(std::clamp(parsed, 0.0f, 100.0f) * 100.0f));
+    }
+  }
+  confirm();
+}
+
+void EpubReaderPercentSelectionActivity::onKeypadKeyEvent(const fui::ActionEvent& event, void* user) {
+  static_cast<EpubReaderPercentSelectionActivity*>(user)->handleKeypadValue(static_cast<int16_t>(event.value));
+}
+
+void EpubReaderPercentSelectionActivity::onKeypadBackspaceEvent(const fui::ActionEvent&, void* user) {
+  static_cast<EpubReaderPercentSelectionActivity*>(user)->backspaceEntry();
 }
 
 void EpubReaderPercentSelectionActivity::cancel() {
@@ -101,34 +251,35 @@ void EpubReaderPercentSelectionActivity::cancel() {
 }
 
 void EpubReaderPercentSelectionActivity::confirm() {
-  setResult(PercentResult{percent});
+  if (mode == Mode::StablePage) {
+    setResult(PageResult{value});
+  } else {
+    setResult(PercentResult{static_cast<float>(value) / 100.0f});
+  }
   finish();
 }
 
 void EpubReaderPercentSelectionActivity::loop() {
-  // Touch goes through the FreeInkApp: render() registered the slider, step controls,
-  // and actions; the slider follows the finger via InputDrag (dragPermille per held frame).
-  // Runs before the Back handler because the release of a drag can also register as a
-  // swipe (e.g. the left-edge rightward back gesture), so the drag must consume it so it
-  // can't cancel the dialog or step the percent.
+  // Touch goes through the FreeInkApp: render() registered the keypad grid and its
+  // backspace icon. Runs before the Back handler for the same reason as elsewhere in
+  // this codebase: a release routed to a UI control must not also read as a gesture.
   fui::InputSnapshot snap{};
   if (uiReady) {
     snap = touchSnapshotFrom(mappedInput);
     if (snap.touchPressed || snap.touchHeld || snap.touchReleased) {
-      sliderTapPending = snap.touchReleased && snap.touchX >= 0;
       const auto event = app.route(snap);
-      sliderTapPending = false;
       if (app.invalidated()) requestUpdate();
-      if (event) {
-        if (event.dragPermille >= 0) draggingSlider = true;
-        return;
-      }
+      if (event) return;
     }
-    if (draggingSlider) {
-      // Drag ended (possibly off the slider): swallow the tap/swipe events it produced.
-      if (!snap.touchHeld) draggingSlider = false;
-      return;
+  }
+
+  // A long-press Confirm already fired this press: swallow input until it's physically
+  // released (same hold-to-act pattern used elsewhere in this codebase, e.g. RecentBooksActivity).
+  if (confirmLongPressFired) {
+    if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
+      confirmLongPressFired = false;
     }
+    return;
   }
 
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -140,19 +291,58 @@ void EpubReaderPercentSelectionActivity::loop() {
     return;
   }
 
-  // Back cancels, confirm selects, arrows adjust the percent.
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    cancel();
+    if (keypadActive && !mappedInput.hasTouch()) {
+      // Back out of keypad entry to the slider first; a second Back cancels the screen.
+      exitKeypad();
+    } else {
+      cancel();
+    }
     return;
   }
 
+  // getHeldTime() times the current chord from whichever button went down first, not
+  // Confirm specifically. Left/Right/Up/Down auto-repeat while held on this screen, so
+  // holding one of them for a second and then pressing Confirm would otherwise read as
+  // an instant long-press. Only treat Confirm's own hold as a long-press.
+  const bool anyDirectionHeld = mappedInput.isPressed(MappedInputManager::Button::Left) ||
+                                mappedInput.isPressed(MappedInputManager::Button::Right) ||
+                                mappedInput.isPressed(MappedInputManager::Button::Up) ||
+                                mappedInput.isPressed(MappedInputManager::Button::Down);
+
+  if (isKeypadVisible()) {
+    if (!anyDirectionHeld && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+        mappedInput.getHeldTime() >= kLongPressMs) {
+      confirmLongPressFired = true;
+      backspaceEntry();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      activateKeypadFocus();
+      return;
+    }
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Left}, [this] { moveKeypadFocus(0, -1); });
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Right}, [this] { moveKeypadFocus(0, 1); });
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Up}, [this] { moveKeypadFocus(-1, 0); });
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Down}, [this] { moveKeypadFocus(1, 0); });
+    return;
+  }
+
+  // Slider mode (non-touch only; touch is always keypadVisible above).
   const auto swipe = mappedInput.wasSwipe();
   if (swipe == MappedInputManager::SwipeDir::Right) {
-    adjustPercent(kLargeStep);
+    adjustValue(deltaForDisplayStep(kLargeStep));
     return;
   }
   if (swipe == MappedInputManager::SwipeDir::Left) {
-    adjustPercent(-kLargeStep);
+    adjustValue(deltaForDisplayStep(-kLargeStep));
+    return;
+  }
+
+  if (!anyDirectionHeld && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+      mappedInput.getHeldTime() >= kLongPressMs) {
+    confirmLongPressFired = true;
+    enterKeypad();
     return;
   }
 
@@ -161,17 +351,20 @@ void EpubReaderPercentSelectionActivity::loop() {
     return;
   }
 
-  buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Left}, [this] { adjustPercent(-kSmallStep); });
-  buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Right}, [this] { adjustPercent(kSmallStep); });
+  buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Left},
+                                       [this] { adjustValue(deltaForDisplayStep(-kSmallStep)); });
+  buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Right},
+                                       [this] { adjustValue(deltaForDisplayStep(kSmallStep)); });
 
   // On edge-button boards (X3, X4 Pro) the side buttons sit on the left/right edges of the screen rather
   // than as a vertical up/down rocker (X4), so BTN_UP is physically the left button and BTN_DOWN the right
   // one. Flip the large-step direction there so the left button decreases and the right button increases.
   const int upDelta = deviceHasEdgeSideButtons(gpio) ? -kLargeStep : kLargeStep;
   const int downDelta = deviceHasEdgeSideButtons(gpio) ? kLargeStep : -kLargeStep;
-  buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Up}, [this, upDelta] { adjustPercent(upDelta); });
+  buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Up},
+                                       [this, upDelta] { adjustValue(deltaForDisplayStep(upDelta)); });
   buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Down},
-                                       [this, downDelta] { adjustPercent(downDelta); });
+                                       [this, downDelta] { adjustValue(deltaForDisplayStep(downDelta)); });
 }
 
 void EpubReaderPercentSelectionActivity::percentScreen(UiApp::ScreenType& screen, void* user) {
@@ -192,83 +385,132 @@ void EpubReaderPercentSelectionActivity::buildPercentScreen(UiApp::ScreenType& s
 
   char line[64];
 
-  // Percent readout, centered above the slider.
+  if (isKeypadVisible()) {
+    buildKeypadScreen(screen, line, sizeof(line));
+    return;
+  }
+
+  // Percent/page readout, centered above the slider.
   fui::TextStyle readout = theme.titleText;
   readout.align = fui::TextAlign::Center;
   const int16_t readoutLh = screen.target().lineHeight(readout.font);
-  snprintf(line, sizeof(line), "%d%%", percent);
+  if (mode == Mode::StablePage) {
+    snprintf(line, sizeof(line), "%lu / %lu", static_cast<unsigned long>(value), static_cast<unsigned long>(maximum));
+  } else {
+    snprintf(line, sizeof(line), "%lu.%02lu%%", static_cast<unsigned long>(value / 100),
+             static_cast<unsigned long>(value % 100));
+  }
   screen.target().text(screen.takeTop(readoutLh, theme.spaceLg), line, readout);
 
-  // The slider owns the full row. FreeInkUI expands the hit rect to the theme's
-  // minimum touch size and keeps a drag captured after the finger leaves the track.
+  // The slider is a visual-only indicator here: it only renders when the device has no
+  // touch hardware (isKeypadVisible() already handled the touch case above), so it can
+  // never be dragged. Physical buttons drive `value` directly via adjustValue().
   const fui::Insets sideInset{0, static_cast<int16_t>(theme.spaceLg * 2), 0, static_cast<int16_t>(theme.spaceLg * 2)};
   const fui::Rect row = screen.takeTop(theme.rowHeight, theme.spaceLg).inset(sideInset);
 
-  fui::SliderProps props;
-  props.value = percent;
-  props.max = 100;
-  props.action = ACTION_SLIDER;
-  props.inputMask = fui::InputTouch | fui::InputDrag;
-  fui::slider(screen.frame(), row, props);
-
-  if (mappedInput.hasTouch()) {
-    // Preserve CrossInk's four direct coarse/fine step controls, but let the
-    // FreeInkApp own both their rendering and hit testing.
-    constexpr int16_t deltas[] = {-kLargeStep, -kSmallStep, kSmallStep, kLargeStep};
-    constexpr const char* labels[] = {"-10", "-1", "+1", "+10"};
-    const fui::Rect stepBand = screen.takeTop(theme.rowHeight, theme.spaceLg);
-    const int16_t gap = theme.spaceMd;
-    const int16_t width = static_cast<int16_t>((stepBand.width - gap * 3) / 4);
-    for (int index = 0; index < 4; ++index) {
-      fui::ButtonProps button;
-      button.label = labels[index];
-      button.action = ACTION_STEP;
-      button.value = deltas[index];
-      button.inputMask = fui::InputTouch;
-      screen.button(button, fui::Rect{static_cast<int16_t>(stepBand.x + index * (width + gap)), stepBand.y, width,
-                                      stepBand.height});
-    }
-
-    const int16_t actionGap = theme.spaceMd;
-    // Reserve at least as much vertical space as each button needs. Otherwise
-    // FreeInkUI expands the smaller rows to minTouchSize after the bottom band
-    // has been placed, which can draw the Cancel action beyond the screen.
-    const int16_t actionHeight = std::max<int16_t>(theme.rowHeight, 56);
-    const int16_t actionBandHeight = static_cast<int16_t>(actionHeight * 2 + actionGap);
-    const fui::Rect actionBand = screen.takeBottom(actionBandHeight, theme.spaceLg);
-    // Keep these explicit full-width actions aligned with the inset used by
-    // every TouchActionButtons group, rather than drawing against the bezel.
-    const int16_t actionSideInset = static_cast<int16_t>(metrics.contentSidePadding);
-    const fui::Rect actionArea{static_cast<int16_t>(actionBand.x + actionSideInset), actionBand.y,
-                               std::max<int16_t>(1, static_cast<int16_t>(actionBand.width - actionSideInset * 2)),
-                               actionBand.height};
-    fui::ButtonProps action;
-    action.inputMask = fui::InputTouch;
-    action.styles = fui::outlinedButtonStyles();
-    action.text = theme.bodyText;
-    action.text.align = fui::TextAlign::Center;
-    action.minTouchSize = actionHeight;
-    action.label = tr(STR_CONFIRM);
-    action.action = ACTION_CONFIRM;
-    action.text.bold = true;
-    screen.button(action, fui::Rect{actionArea.x, actionArea.y, actionArea.width, actionHeight});
-    action.label = tr(STR_CANCEL);
-    action.action = ACTION_CANCEL;
-    action.text.bold = false;
-    screen.button(action, fui::Rect{actionArea.x, static_cast<int16_t>(actionArea.y + actionHeight + actionGap),
-                                    actionArea.width, actionHeight});
-    return;
-  }
+  fui::SliderProps sliderProps;
+  sliderProps.value =
+      mode == Mode::StablePage ? stablePageToPermille(value, maximum) : static_cast<int32_t>(value / 10);
+  sliderProps.max = 1000;
+  fui::slider(screen.frame(), row, sliderProps);
 
   // Two-line step hint built from separate label + value strings (front buttons = fine step, side
   // buttons = coarse step), so the layout doesn't depend on a separator hidden in translated text.
   fui::TextStyle hint = theme.smallText;
   hint.align = fui::TextAlign::Center;
   const int16_t hintLh = screen.target().lineHeight(hint.font);
-  snprintf(line, sizeof(line), "%s %d%%", I18N.get(StrId::STR_STEP_HINT_FRONT), kSmallStep);
+  snprintf(line, sizeof(line), mode == Mode::StablePage ? "%s %d" : "%s %d%%", I18N.get(StrId::STR_STEP_HINT_FRONT),
+           kSmallStep);
   screen.target().text(screen.takeTop(hintLh, theme.spaceSm), line, hint);
-  snprintf(line, sizeof(line), "%s %d%%", I18N.get(StrId::STR_STEP_HINT_SIDE), kLargeStep);
+  snprintf(line, sizeof(line), mode == Mode::StablePage ? "%s %d" : "%s %d%%", I18N.get(StrId::STR_STEP_HINT_SIDE),
+           kLargeStep);
+  screen.target().text(screen.takeTop(hintLh, theme.spaceSm), line, hint);
+
+  // Discoverability for the keypad escape hatch: names the actual on-screen label for
+  // Confirm on this screen (STR_SELECT), so the hint always matches what's shown below.
+  snprintf(line, sizeof(line), I18N.get(StrId::STR_HOLD_FOR_KEYBOARD), tr(STR_SELECT));
   screen.target().text(screen.takeTop(hintLh), line, hint);
+}
+
+void EpubReaderPercentSelectionActivity::buildKeypadScreen(UiApp::ScreenType& screen, char* line, size_t lineSize) {
+  const auto& theme = screen.theme();
+
+  // Readout shows the raw typed digits (or a neutral placeholder), not a reformatted
+  // number, so a trailing "." typed by the user stays visible while editing.
+  const char* typed = entryLen > 0 ? entryText : "0";
+  if (mode == Mode::StablePage) {
+    snprintf(line, lineSize, "%s / %lu", typed, static_cast<unsigned long>(maximum));
+  } else {
+    snprintf(line, lineSize, "%s%%", typed);
+  }
+
+  fui::TextStyle readout = theme.titleText;
+  readout.align = fui::TextAlign::Center;
+  const int16_t readoutLh = screen.target().lineHeight(readout.font);
+  const int16_t rowH = std::max<int16_t>(theme.rowHeight, static_cast<int16_t>(readoutLh + 16));
+  const fui::Rect readoutRow = screen.takeTop(rowH, theme.spaceLg);
+  const int16_t iconSize = readoutRow.height;
+  const fui::Rect iconRect{static_cast<int16_t>(readoutRow.right() - iconSize), readoutRow.y, iconSize,
+                           readoutRow.height};
+
+  if (mappedInput.hasTouch()) {
+    // A backspace icon sits at the row's right edge; the grid itself has no room for a
+    // 13th key without breaking the 1-9/0/./OK layout. It overlays the full-width
+    // readout so the destination stays centered while editing.
+    screen.target().text(readoutRow, line, readout);
+
+    fui::ButtonProps backspaceBtn;
+    backspaceBtn.icon = fui::bitmapFromIcon(icon_backspace_28);
+    backspaceBtn.action = ACTION_KEYPAD_BACKSPACE;
+    backspaceBtn.inputMask = fui::InputTouch;
+    backspaceBtn.enabled = entryLen > 0;
+    screen.button(backspaceBtn, iconRect);
+  } else {
+    screen.target().text(readoutRow, line, readout);
+
+    // Button-only devices move Up from the first keypad row to this control;
+    // Confirm deletes the final digit. The FreeInk button supplies the same icon
+    // and selected treatment as touch, while the activity owns directional focus.
+    fui::ButtonProps backspaceBtn;
+    backspaceBtn.icon = fui::bitmapFromIcon(icon_backspace_28);
+    backspaceBtn.action = ACTION_KEYPAD_BACKSPACE;
+    backspaceBtn.inputMask = fui::InputNone;
+    backspaceBtn.state = keypadBackspaceFocused ? fui::StateSelected : fui::StateNormal;
+    backspaceBtn.enabled = entryLen > 0;
+    screen.button(backspaceBtn, iconRect);
+  }
+
+  const fui::Rect gridArea = screen.contentRect().inset(fui::Insets{0, theme.spaceLg, theme.spaceLg, theme.spaceLg});
+
+  static const char* const kDigitLabels[10] = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"};
+  fui::KeyGridKey keys[12];
+  for (int i = 0; i < 9; ++i) {
+    keys[i].label = kDigitLabels[i + 1];
+    keys[i].value = static_cast<int16_t>(i + 1);
+  }
+  keys[9].label = kDigitLabels[0];
+  keys[9].value = 0;
+  keys[10].label = ".";
+  keys[10].value = kKeypadDot;
+  keys[10].enabled = mode == Mode::Percent;
+  keys[11].label = tr(STR_OK);
+  keys[11].value = kKeypadOk;
+
+  fui::KeyGridProps gridProps;
+  gridProps.keys = keys;
+  gridProps.rows = 4;
+  gridProps.cols = 3;
+  gridProps.action = ACTION_KEYPAD_KEY;
+  gridProps.inputMask = fui::InputTouch;
+  gridProps.labelText = theme.bodyText;
+  gridProps.labelText.align = fui::TextAlign::Center;
+  gridProps.gap = theme.spaceSm;
+  gridProps.minTouchSize = theme.minTouchSize;
+  gridProps.radius = 3;
+  // Non-touch shows which key directional nav is on; touch has no such focus concept.
+  gridProps.selectedIndex =
+      mappedInput.hasTouch() || keypadBackspaceFocused ? int16_t{-1} : static_cast<int16_t>(keypadRow * 3 + keypadCol);
+  fui::keyGrid(screen.frame(), gridArea, gridProps);
 }
 
 void EpubReaderPercentSelectionActivity::render(RenderLock&&) {
@@ -281,19 +523,22 @@ void EpubReaderPercentSelectionActivity::render(RenderLock&&) {
   const Rect header{screen.x, screen.y + metrics.topPadding, screen.width,
                     TouchHeaderBackButton::height(metrics, mappedInput)};
   if (mappedInput.hasTouchHardware()) {
-    TouchHeaderBackButton::draw(renderer, header, tr(STR_GO_TO_PERCENT), true);
+    TouchHeaderBackButton::draw(renderer, header,
+                                mode == Mode::StablePage ? tr(STR_GO_TO_STABLE_PAGE) : tr(STR_GO_TO_PERCENT), true);
   } else {
-    GUI.drawHeader(renderer, header, tr(STR_GO_TO_PERCENT), nullptr, true);
+    GUI.drawHeader(renderer, header, mode == Mode::StablePage ? tr(STR_GO_TO_STABLE_PAGE) : tr(STR_GO_TO_PERCENT),
+                   nullptr, true);
   }
 
-  // Percent readout, slider, step controls, and actions render through the app.
+  // Percent/page readout, keypad or slider, and step controls render through the app.
   uiReady = false;
   app.setDevice(uiTarget.deviceContext());
   app.render();
   uiReady = true;
 
   // Button hints follow the current front button layout and auto-hide on touch devices.
-  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), "-", "+");
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_LEFT),
+                                            tr(STR_DIR_RIGHT));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
 
   renderer.displayBuffer();

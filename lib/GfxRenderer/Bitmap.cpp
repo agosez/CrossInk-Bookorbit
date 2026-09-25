@@ -1,5 +1,7 @@
 #include "Bitmap.h"
 
+#include <Logging.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -180,7 +182,13 @@ BmpReaderError Bitmap::parseHeaders() {
         return BmpReaderError::OomRowBuffer;
       }
     } else {
-      fsDitherer = new FloydSteinbergDitherer(width, imageLevels);
+      fsDitherer = new (std::nothrow) FloydSteinbergDitherer(width, imageLevels);
+      if (!fsDitherer || !fsDitherer->isValid()) {
+        delete fsDitherer;
+        fsDitherer = nullptr;
+        LOG_ERR("BMP", "Failed to allocate Floyd-Steinberg ditherer");
+        return BmpReaderError::OomRowBuffer;
+      }
     }
   }
 

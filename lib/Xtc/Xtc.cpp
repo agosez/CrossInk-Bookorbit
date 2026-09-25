@@ -239,8 +239,14 @@ bool thumbnailHasDimensions(const std::string& path, const uint16_t width, const
 }  // namespace
 
 bool Xtc::load() {
+  loaded = false;
+
   // Initialize parser
-  parser.reset(new xtc::XtcParser());
+  parser = makeUniqueNoThrow<xtc::XtcParser>();
+  if (!parser) {
+    LOG_ERR("XTC", "OOM: XtcParser");
+    return false;
+  }
 
   // Open XTC file
   xtc::XtcError err = parser->open(filepath.c_str());
@@ -448,17 +454,16 @@ bool Xtc::generateCoverBmp() const {
   // XTH (2-bit): Two bit planes, column-major, ((width * height + 7) / 8) * 2 bytes
   size_t bitmapSize;
   bitmapSize = ((pageInfo.width + 7) / 8) * pageInfo.height;
-  uint8_t* pageBuffer = static_cast<uint8_t*>(malloc(bitmapSize));
+  auto pageBuffer = makeUniqueNoThrow<uint8_t[]>(bitmapSize);
   if (!pageBuffer) {
     LOG_ERR("XTC", "Failed to allocate page buffer (%lu bytes)", bitmapSize);
     return false;
   }
 
   // Load first page (cover)
-  size_t bytesRead = const_cast<xtc::XtcParser*>(parser.get())->loadPage(0, pageBuffer, bitmapSize);
+  size_t bytesRead = const_cast<xtc::XtcParser*>(parser.get())->loadPage(0, pageBuffer.get(), bitmapSize);
   if (bytesRead == 0) {
     LOG_ERR("XTC", "Failed to load cover page");
-    free(pageBuffer);
     return false;
   }
 
@@ -466,7 +471,6 @@ bool Xtc::generateCoverBmp() const {
   FsFile coverBmp;
   if (!Storage.openFileForWrite("XTC", getCoverBmpPath(), coverBmp)) {
     LOG_DBG("XTC", "Failed to create cover BMP file");
-    free(pageBuffer);
     return false;
   }
 
@@ -486,7 +490,7 @@ bool Xtc::generateCoverBmp() const {
 
   for (uint16_t y = 0; y < pageInfo.height; y++) {
     // Write source row
-    coverBmp.write(pageBuffer + y * srcRowSize, srcRowSize);
+    coverBmp.write(pageBuffer.get() + y * srcRowSize, srcRowSize);
 
     // Pad to 4-byte boundary
     uint8_t padding[4] = {0, 0, 0, 0};
@@ -495,8 +499,6 @@ bool Xtc::generateCoverBmp() const {
       coverBmp.write(padding, paddingSize);
     }
   }
-
-  free(pageBuffer);
 
   return true;
 }
@@ -680,37 +682,30 @@ bool Xtc::generateThumbBmp(uint16_t width, uint16_t height) const {
 
   size_t bitmapSize;
   bitmapSize = ((pageInfo.width + 7) / 8) * pageInfo.height;
-  uint8_t* pageBuffer = static_cast<uint8_t*>(malloc(bitmapSize));
-  if (!pageBuffer) {
-    LOG_ERR("XTC", "Failed to allocate page buffer (%lu bytes)", bitmapSize);
+  const uint32_t rowSize = (thumbWidth + 31) / 32 * 4;
+  auto thumbScratch = makeUniqueNoThrow<uint8_t[]>(bitmapSize + rowSize);
+  if (!thumbScratch) {
+    LOG_ERR("XTC", "Failed to allocate thumbnail buffers (%lu bytes)",
+            static_cast<unsigned long>(bitmapSize + rowSize));
     return false;
   }
+  uint8_t* pageBuffer = thumbScratch.get();
+  uint8_t* rowBuffer = pageBuffer + bitmapSize;
 
   size_t bytesRead = const_cast<xtc::XtcParser*>(parser.get())->loadPage(0, pageBuffer, bitmapSize);
   if (bytesRead == 0) {
     LOG_ERR("XTC", "Failed to load cover page for thumb");
-    free(pageBuffer);
     return false;
   }
 
   FsFile thumbBmp;
   if (!Storage.openFileForWrite("XTC", thumbPath, thumbBmp)) {
-    free(pageBuffer);
     return false;
   }
 
-  const uint32_t rowSize = (thumbWidth + 31) / 32 * 4;
   BmpHeader bmpHeader;
   createBmpHeader(&bmpHeader, thumbWidth, thumbHeight, BmpRowOrder::TopDown);
   thumbBmp.write(reinterpret_cast<const uint8_t*>(&bmpHeader), sizeof(BmpHeader));
-
-  uint8_t* rowBuffer = static_cast<uint8_t*>(malloc(rowSize));
-  if (!rowBuffer) {
-    free(pageBuffer);
-    thumbBmp.close();
-    Storage.remove(thumbPath.c_str());
-    return false;
-  }
 
   const uint32_t scaleInv_fp = static_cast<uint32_t>(65536.0f / scale);
   const uint64_t srcWidth_fp = static_cast<uint64_t>(pageInfo.width) << 16;
@@ -791,9 +786,7 @@ bool Xtc::generateThumbBmp(uint16_t width, uint16_t height) const {
     yieldDuringThumbnail(rowsSinceYield);
   }
 
-  free(rowBuffer);
   thumbBmp.close();
-  free(pageBuffer);
   return true;
 }
 

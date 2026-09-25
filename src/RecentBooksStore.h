@@ -34,6 +34,7 @@ class RecentBooksStore : public PersistableStore<RecentBooksStore> {
   static const char* getFilePath() { return "/.crosspoint/recent.json"; }
   void toJson(JsonDocument& doc) const;
   bool fromJson(JsonVariantConst doc);
+  bool saveToFile() const;
   bool loadFromFile();
 
   // Add a new book to the front, or refresh an existing entry and promote it
@@ -56,8 +57,8 @@ class RecentBooksStore : public PersistableStore<RecentBooksStore> {
   // Repoint an entry's path (and coverBmpPath, if it lived under the old cache dir) after the
   // backing file and cache dir were moved on disk. No-op if no entry matches oldPath.
   // Persists on success. Keeps the entry's list position (does not reorder).
-  void updatePath(const std::string& oldPath, const std::string& newPath, const std::string& oldCachePath,
-                  const std::string& newCachePath);
+  [[nodiscard]] bool updatePath(const std::string& oldPath, const std::string& newPath, const std::string& oldCachePath,
+                                const std::string& newCachePath);
 
   // True if the book's backing file is no longer present on the SD card.
   static bool isMissing(const RecentBook& book);

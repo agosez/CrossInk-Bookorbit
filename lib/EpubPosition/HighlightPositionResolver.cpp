@@ -146,7 +146,7 @@ class CollapsedParagraphStream final : public Print {
       lastWasSpace = false;
       if (emittedAnything) pendingParagraphBreak = true;
     }
-    if (isNonVisibleTextTag(name)) nonVisibleDepth++;
+    if (nonVisibleDepth > 0 || isNonVisibleTextTag(name)) nonVisibleDepth++;
     depth++;
   }
 
@@ -156,9 +156,10 @@ class CollapsedParagraphStream final : public Print {
     if (!insideBody) {
       return;
     }
-    if (isNonVisibleTextTag(name) && nonVisibleDepth > 0) nonVisibleDepth--;
+    if (nonVisibleDepth > 0) nonVisibleDepth--;
     if (depth == bodyDepth && name == "body") {
       insideBody = false;
+      nonVisibleDepth = 0;
       parentStates.clear();
       textNodeCounts.clear();
       path.clear();

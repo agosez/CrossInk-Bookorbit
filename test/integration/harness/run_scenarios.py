@@ -752,8 +752,10 @@ def scenario_catalog_libraries_browse(verbose: bool) -> None:
         facets = [c for c in caches if "hasNext" in c]
         library_rows = [i for c in facets for i in c["items"] if i["title"] == "Integration"]
         assert library_rows, f"the libraries listing never loaded: {facets}"
-        assert library_rows[0]["count"] == len(books), \
-            f"library book count wrong: {library_rows[0]['count']} != {len(books)}"
+        # The per-library count comes from the server and covers every format, so
+        # it includes the seeded audiobook-only book the listing itself hides.
+        assert library_rows[0]["count"] == len(books) + 1, \
+            f"library book count wrong: {library_rows[0]['count']} != {len(books) + 1}"
         scoped = [c for c in caches if c.get("key", "").split("|")[-1] != "" and "total" in c]
         assert scoped, "no book listing was fetched with a libraryId"
         assert scoped[0]["total"] == len(books), \
@@ -797,6 +799,65 @@ def scenario_catalog_smart_scopes_browse(verbose: bool) -> None:
         listed = {b["title"] for b in books[0]["items"]}
         expected = {Path(b["file"]).stem for b in scope["books"]}
         assert listed == expected, f"SmartScope books mismatch: {listed} != {expected}"
+
+
+def scenario_catalog_hides_non_epub(verbose: bool) -> None:
+    """The catalog lists only books it can download: the audiobook-only record,
+    which shares an EPUB's title and author, is absent, while the book holding
+    both an EPUB and an audio file stays. The seed uploads the audiobook after
+    the library and marks it as being read, so an unfiltered listing would show
+    it first in Recently added and among Continue reading. The root's two book
+    counts must match those EPUB listings, not the dashboard's all-format
+    totals, and Continue reading lists only the books being read."""
+    manifest, _ = load_seed()
+    non_epub = manifest["non_epub"]
+    server = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                          manifest["kosync"]["password"], SIM_DEVICE_ID)
+    epub_total = server.catalog_page(size=1, format="epub")["total"]
+    reading_total = server.catalog_page(size=1, format="epub", readStatus="reading")["total"]
+    # Guards on the fixture itself: without these gaps the test proves nothing.
+    assert server.catalog_page(size=1)["total"] > epub_total, "the seed holds no non-EPUB book"
+    assert server.catalog_page(size=1, readStatus="reading")["total"] > reading_total, \
+        "the seeded audiobook is not marked as being read"
+    assert reading_total <= 20, "Continue reading no longer fits on one page; check whole pages"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])  # no open book: boots to home
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",  # home menu -> BookOrbit catalog
+            "11000:CONFIRM",                           # root -> Continue reading (1st row)
+            "14000:BACK",                              # back to the root
+            "16000:DOWN", "16350:CONFIRM",             # Recently added (2nd row)
+            "19500:QUIT",
+        ])
+        run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
+
+        caches = [json.loads(p.read_text())
+                  for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
+        counts = [c for c in caches if "totalBooks" in c]
+        assert counts, "the root's section counts were never cached"
+        assert counts[0]["totalBooks"] == epub_total, \
+            f"All books count {counts[0]['totalBooks']} != {epub_total} EPUBs"
+        assert counts[0]["inProgress"] == reading_total, \
+            f"Continue reading count {counts[0]['inProgress']} != {reading_total} EPUBs being read"
+
+        # Book cache keys are books|page|sort|readStatus|...
+        listings = {tuple(c["key"].split("|")[2:4]): c for c in caches
+                    if c.get("key", "").startswith("books|")}
+        reading = listings.get(("recently_read", "reading"))
+        recent = listings.get(("recently_added", ""))
+        assert reading, f"Continue reading never listed with readStatus=reading: {sorted(listings)}"
+        assert recent, f"Recently added was never listed: {sorted(listings)}"
+        assert reading["total"] == reading_total, \
+            f"Continue reading total {reading['total']} != {reading_total}"
+        assert recent["total"] == epub_total, f"Recently added total {recent['total']} != {epub_total}"
+
+        reading_ids = {i["id"] for i in reading["items"]}
+        recent_ids = {i["id"] for i in recent["items"]}
+        assert non_epub["audiobook_id"] not in reading_ids | recent_ids, \
+            f"the audiobook-only {non_epub['audiobook_title']!r} is listed"
+        assert non_epub["mixed_id"] in reading_ids, \
+            f"the EPUB+audio {non_epub['mixed_title']!r} is missing from Continue reading"
 
 
 def scenario_catalog_download_naming(verbose: bool) -> None:
@@ -859,6 +920,96 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
             "'On device' did not find the downloaded book inside the template's folders"
 
 
+def scenario_catalog_book_actions(verbose: bool) -> None:
+    """A catalog book's action menu, opened by holding Confirm, and what Confirm does
+    once the book is on the device. Four runs on one card, each on the first book of
+    All books: the menu's single Download entry downloads it; the on-device menu's
+    Re-download replaces it in place, keeping its reading progress; a plain Confirm
+    then opens it instead of downloading it again; and the menu's Delete removes it
+    along with its cache."""
+    manifest, _ = load_seed()
+    sim = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                       manifest["kosync"]["password"], SIM_DEVICE_ID)
+    to_all_books = [
+        "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
+        "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> All books (8th row)
+        "12050:DOWN", "12400:DOWN", "12750:DOWN",
+        "13100:DOWN",
+        "13450:CONFIRM",
+    ]
+    hold_first_book = "16000:CONFIRM:1500"  # past the 1 s threshold: opens the menu
+    # The menu logs the FileBrowserAction it returns: without that, a hold that
+    # simply downloaded on release (the old behaviour) would pass steps 1 and 2.
+    action_download, action_redownload, action_delete = 20, 21, 0
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
+
+        # 1. Not on the device: the menu holds Download only, selected by default.
+        script = ";".join(to_all_books + [hold_first_book, "18500:CONFIRM", "26500:QUIT"])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=90, verbose=verbose)
+        caches = [json.loads(p.read_text())
+                  for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
+        listings = [c for c in caches if "total" in c and "sections" not in c]
+        assert listings and listings[0]["items"], f"no book listing was cached: {caches}"
+        first = listings[0]["items"][0]
+        assert f"Book action {action_download} on book {first['id']}" in output, \
+            "holding Confirm did not offer Download from the book's menu"
+        epub = next(f for f in sim.catalog_book_detail(first["id"])["files"]
+                    if f["format"].lower() == "epub")
+        sim_path = f"/Downloads/{epub['devicePath']}"
+        book = fs.fs / sim_path.lstrip("/")
+        assert book.exists(), \
+            f"the menu's Download did not fetch {first['title']!r} to {sim_path!r}"
+        original = book.read_bytes()
+
+        # 2. On the device: Re-download (second entry) replaces the file where it is.
+        # Damage it without changing its size (the download index checks the size, so
+        # the book stays recognised as on the device), and give it reading progress.
+        damaged = bytearray(original)
+        damaged[-64:] = bytes(64)
+        book.write_bytes(bytes(damaged))
+        progress = fs.epub_cache_dir(sim_path) / "progress.bin"
+        write_progress_bin(progress, 3, 2, 10)
+        script = ";".join(to_all_books + [hold_first_book, "18500:DOWN", "18900:CONFIRM", "27000:QUIT"])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=90, verbose=verbose)
+        assert f"Book action {action_redownload} on book {first['id']}" in output, \
+            "the on-device menu's second entry is not Re-download"
+        assert book.read_bytes() == original, "Re-download did not replace the damaged file"
+        epubs = sorted(p.relative_to(fs.fs).as_posix() for p in fs.fs.rglob("*.epub*"))
+        assert epubs == [sim_path.lstrip("/")], f"Re-download left other files behind: {epubs}"
+        kept = read_progress_bin(progress)
+        assert kept and (kept["spine"], kept["page"]) == (3, 2), \
+            f"Re-download lost the book's reading progress: {kept}"
+
+        # 3. A plain Confirm opens the on-device book. The catalog persists the path and
+        # silent-restarts into the reader; synthetic input does not survive that
+        # restart, so the run ends on the timeout.
+        script = ";".join(to_all_books + ["16000:CONFIRM"])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=30, verbose=verbose)
+        assert "Downloading file" not in output, "Confirm downloaded an on-device book again"
+        state = json.loads((fs.crosspoint / "state.json").read_text())
+        assert state.get("openEpubPath") == sim_path, \
+            f"Confirm did not open {sim_path!r}: state={state}"
+        assert book.read_bytes() == original, "opening the book changed the file"
+
+        # 4. Delete (third entry), then confirm (Cancel is preselected). Boot to home
+        # again first: the reader left the book open and on the recent list, which
+        # would reshape the home screen the navigation counts on.
+        for name in ("state.json", "state.bin", "recent.json", "recent.bin"):
+            (fs.crosspoint / name).unlink(missing_ok=True)
+        script = ";".join(to_all_books + [
+            hold_first_book, "18500:DOWN", "18850:DOWN", "19200:CONFIRM",
+            "21000:DOWN", "21400:CONFIRM",
+            "23500:QUIT",
+        ])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
+        assert f"Book action {action_delete} on book {first['id']}" in output, \
+            "the on-device menu's third entry is not Delete"
+        assert not book.exists(), "Delete left the book on the card"
+        assert not fs.epub_cache_dir(sim_path).exists(), "Delete left the book's cache behind"
+
+
 def scenario_bookmark_push(verbose: bool) -> None:
     """A local bookmark (store entry + minted position record) reaches the
     server and is offered to a device that has never seen it."""
@@ -898,6 +1049,8 @@ SCENARIOS = {
     "catalog_libraries_browse": scenario_catalog_libraries_browse,
     "catalog_smart_scopes_browse": scenario_catalog_smart_scopes_browse,
     "catalog_download_naming": scenario_catalog_download_naming,
+    "catalog_book_actions": scenario_catalog_book_actions,
+    "catalog_hides_non_epub": scenario_catalog_hides_non_epub,
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,
     "highlight_pull": scenario_highlight_pull,

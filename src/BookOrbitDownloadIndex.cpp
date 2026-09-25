@@ -162,6 +162,23 @@ bool BookOrbitDownloadIndex::hasPath(const std::string& path) {
   return std::any_of(entries.begin(), entries.end(), [&path](const Entry& entry) { return entry.path == path; });
 }
 
+void BookOrbitDownloadIndex::relocate(const std::string& oldPath, const std::string& newPath) {
+  const bool wasLoaded = loaded;
+  ensureLoaded();
+  const auto it =
+      std::find_if(entries.begin(), entries.end(), [&oldPath](const Entry& entry) { return entry.path == oldPath; });
+  if (it != entries.end()) {
+    if (newPath.size() > PATH_MAX_LEN) {
+      LOG_ERR("BODI", "Dropping download entry, path too long: %s", newPath.c_str());
+      entries.erase(it);
+    } else {
+      it->path = newPath;
+    }
+    save();
+  }
+  if (!wasLoaded) unload();
+}
+
 void BookOrbitDownloadIndex::unload() {
   std::vector<Entry>().swap(entries);
   loaded = false;

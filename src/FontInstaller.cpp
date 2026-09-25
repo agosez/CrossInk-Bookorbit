@@ -2,6 +2,7 @@
 
 #include <HalStorage.h>
 #include <Logging.h>
+#include <SdCardFontSystem.h>
 
 #include <cctype>
 #include <cstring>
@@ -124,6 +125,7 @@ FontInstaller::Error FontInstaller::deleteFamily(const char* familyName) {
   if (!isValidFamilyName(familyName)) {
     return Error::INVALID_FAMILY_NAME;
   }
+  sdFontSystem.markRegistryDirty();
 
   // A family may exist in either root (or, edge case, both). Remove from both.
   const char* roots[] = {SdCardFontRegistry::FONTS_DIR_HIDDEN, SdCardFontRegistry::FONTS_DIR_VISIBLE};

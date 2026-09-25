@@ -5,6 +5,7 @@
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <SdCardFontSystem.h>
 
 #include <algorithm>
 #include <cstring>
@@ -109,6 +110,7 @@ void WebDAVHandler::raw(WebServer& server, const String& uri, HTTPRaw& raw) {
     if (_putFile) _putFile.close();
     if (_putOk) {
       String tempPath = _putPath + ".davtmp";
+      sdFontSystem.markRegistryDirtyForPath(_putPath.c_str());
       if (_putExisted) Storage.remove(_putPath.c_str());
       HalFile tmp = Storage.open(tempPath.c_str());
       if (tmp) {
@@ -407,6 +409,7 @@ void WebDAVHandler::handlePut(WebServer& s) {
 
   clearBookCachePreservingUserState(path.c_str());
   ImageFolderIndex::invalidateForPath(path.c_str());
+  sdFontSystem.markRegistryDirtyForPath(path.c_str());
   s.send(_putExisted ? 204 : 201);
 }
 
@@ -449,6 +452,7 @@ void WebDAVHandler::handleDelete(WebServer& s) {
     file.close();
     if (Storage.rmdir(path.c_str())) {
       ImageFolderIndex::invalidateForPath(path.c_str());
+      sdFontSystem.markRegistryDirtyForPath(path.c_str());
       s.send(204);
     } else {
       s.send(500, "text/plain", "Failed to remove directory");
@@ -458,6 +462,7 @@ void WebDAVHandler::handleDelete(WebServer& s) {
     clearBookCache(path.c_str());
     if (Storage.remove(path.c_str())) {
       ImageFolderIndex::invalidateForPath(path.c_str());
+      sdFontSystem.markRegistryDirtyForPath(path.c_str());
       s.send(204);
     } else {
       s.send(500, "text/plain", "Failed to delete file");
@@ -508,6 +513,7 @@ void WebDAVHandler::handleMkcol(WebServer& s) {
       return;
     }
     ImageFolderIndex::invalidateForPath(path.c_str());
+    sdFontSystem.markRegistryDirtyForPath(path.c_str());
     s.send(201);
   } else {
     s.send(500, "text/plain", "Failed to create directory");
@@ -564,6 +570,7 @@ void WebDAVHandler::handleMove(WebServer& s) {
     return;
   }
 
+  sdFontSystem.markRegistryDirtyForPath(dstPath.c_str());
   if (dstExists) {
     Storage.remove(dstPath.c_str());
   }
@@ -580,7 +587,9 @@ void WebDAVHandler::handleMove(WebServer& s) {
 
   if (success) {
     ImageFolderIndex::invalidateForPath(srcPath.c_str());
+    sdFontSystem.markRegistryDirtyForPath(srcPath.c_str());
     ImageFolderIndex::invalidateForPath(dstPath.c_str());
+    sdFontSystem.markRegistryDirtyForPath(dstPath.c_str());
     s.send(dstExists ? 204 : 201);
   } else {
     s.send(500, "text/plain", "Move failed");
@@ -646,6 +655,7 @@ void WebDAVHandler::handleCopy(WebServer& s) {
     return;
   }
 
+  sdFontSystem.markRegistryDirtyForPath(dstPath.c_str());
   if (dstExists) {
     Storage.remove(dstPath.c_str());
   }
@@ -683,6 +693,7 @@ void WebDAVHandler::handleCopy(WebServer& s) {
 
   if (copyOk) {
     ImageFolderIndex::invalidateForPath(dstPath.c_str());
+    sdFontSystem.markRegistryDirtyForPath(dstPath.c_str());
     s.send(dstExists ? 204 : 201);
   } else {
     Storage.remove(dstPath.c_str());

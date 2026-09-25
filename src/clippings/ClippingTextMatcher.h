@@ -17,6 +17,15 @@ struct TokenFragmentResult {
   size_t tokenBytes = 0;
 };
 
+// A complete clipping can be short. A partial run needs enough words to avoid
+// highlighting a coincidental first/last word at a page boundary after relayout.
+// Short fragments need an exact saved range or verification across adjacent pages.
+inline bool isReliableRun(const uint16_t startClipToken, const bool reachedClipEnd, const uint16_t matchedTokens,
+                          const uint16_t minPartialMatch) {
+  if (matchedTokens == 0) return false;
+  return (startClipToken == 0 && reachedClipEnd) || matchedTokens >= minPartialMatch;
+}
+
 inline bool isNonBreakingSpace(const char* text, const size_t length, const size_t offset) {
   return offset + 1 < length && static_cast<unsigned char>(text[offset]) == 0xC2 &&
          static_cast<unsigned char>(text[offset + 1]) == 0xA0;

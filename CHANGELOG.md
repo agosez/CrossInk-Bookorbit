@@ -5,13 +5,33 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
-## [Unreleased]
+## [v1.6.0+bookorbit.1] - 2026-09-25
 
-Based on CrossInk v1.5.1.
+Based on CrossInk v1.6.0.
 
 ### Added
 
 - The BookOrbit catalog now shows the server's SmartScopes section, alongside Collections, Libraries, Authors and Series. The section is badged with how many scopes you have, the way the other sections are, and an account with no scopes simply shows an empty section.
+- Holding a book in the BookOrbit catalog (holding Confirm, or a long press on touch devices) opens a menu for it. A book not yet on the device offers Download; a book already on it offers Open, Re-download and Delete. Re-downloading replaces the book where it is, so its reading progress is kept, and the copy you had stays in place until the new one has fully arrived.
+
+### Changed
+
+- Selecting a book in the BookOrbit catalog that is already on the device (marked with a dot) now opens it, instead of downloading it again.
+- BookOrbit settings are now read from the SD card the first time something needs them rather than on every start, the way CrossInk already defers its KOReader and OPDS settings. Waking straight back into a book skips that read entirely.
+
+### Fixed
+
+- "Re-download", used by the new catalog menu and by the SD font manager, is now translated in French and 17 other languages that showed it in English. "Delete" is now translated in Finnish.
+- The BookOrbit catalog no longer lists books that have no EPUB, such as audiobook-only records, in browsing and search. They looked the same as the ebook of the same title and failed with "No EPUB format available" once chosen. Books that come in both formats are still listed. The "All books", "Recently added" and "Continue reading" counts on the catalog's first screen now count only those EPUBs.
+- The BookOrbit catalog's "Continue reading" now lists only the books you are reading, as its count says. It used to list the whole library, most recently read first.
+- Choosing BookOrbit Sync from the reader menu without an account set up now opens the BookOrbit settings, instead of doing nothing. The shortcut already did this; the menu entry now behaves the same.
+- A book downloaded from the BookOrbit catalog stays marked as on the device, and listed under "On device", after you rename it in the File Browser (new in CrossInk v1.6.0) or move it, including the end-of-book move to a read folder. The catalog used to lose track of it and offer it for download again.
+- Bookmarks and highlights sent to BookOrbit now point at the exact character they start on. The position written for the server was one character past it, and a bookmark on the very first character of a paragraph fell back to the whole paragraph.
+- Reading positions coming from BookOrbit, including those a KOReader device synced to it, now land on the right words in paragraphs that contain HTML comments. Such a comment splits the text around it in two, as KOReader counts it, and positions after it were previously read from the start of the paragraph.
+
+### Security
+
+- The BookOrbit login is no longer sent to another server when a BookOrbit request is redirected. The catalog authenticates with its own headers rather than a password prompt, and those headers used to follow a redirect wherever it led; they now stay with your BookOrbit server, while the redirect itself is still followed.
 
 ## [v1.5.1+bookorbit.2] - 2026-09-21
 

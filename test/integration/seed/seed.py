@@ -6,7 +6,10 @@ Idempotent: safe to re-run against an already-seeded server. Phases:
 1. Wait for the server to be healthy.
 2. Bootstrap the test user (setup token) and its KOReader sync credentials.
 3. Wait for the book dock to ingest the generated library.
-4. As a synthetic second device, pre-load state on a fixed subset of books:
+4. Add the records the catalog must hide or keep: an audiobook-only book that
+   shares an EPUB's title and author, and an EPUB that also carries an
+   audiobook file. Both are marked as being read.
+5. As a synthetic second device, pre-load state on a fixed subset of books:
    reading progress on some, highlights and bookmarks on others, so scenarios
    can pull them down to the simulator or race against them.
 
@@ -17,7 +20,9 @@ from __future__ import annotations
 
 import json
 import shutil
+import struct
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -44,6 +49,61 @@ NAMING_PATTERN = "Catalog/{authors:first}/{authors:first} - {title}"
 # The SmartScope the catalog's smart-scopes section is browsed through; it mirrors
 # the collection above, so both sections list the same books by different means.
 SMART_SCOPE_NAME = "Integration Scope"
+# Non-EPUB records, outside every other seeded range: the audiobook-only book
+# copies this EPUB's title and author, the way a library holds a novel and its
+# audiobook as separate records; the mixed-format book gets an audio file too.
+AUDIOBOOK_TWIN = 60
+MIXED_FORMAT = 70
+
+
+def silent_mp3(path: Path, title: str, artist: str, seconds: int = 1) -> None:
+    """A valid, silent MP3 carrying an ID3v2.3 title and artist. Every frame is an
+    MPEG-1 Layer III header (32 kbit/s, 44.1 kHz, mono) followed by zeroed side
+    info and main data, which decoders play as silence; no encoder needed."""
+    def text_frame(frame_id: str, text: str) -> bytes:
+        data = b"\x00" + text.encode("latin-1")  # encoding byte: ISO-8859-1
+        return frame_id.encode() + struct.pack(">I", len(data)) + b"\x00\x00" + data
+
+    frames = text_frame("TIT2", title) + text_frame("TPE1", artist)
+    size = len(frames)
+    syncsafe = bytes([(size >> 21) & 0x7F, (size >> 14) & 0x7F, (size >> 7) & 0x7F, size & 0x7F])
+    tag = b"ID3\x03\x00\x00" + syncsafe + frames
+    frame = b"\xff\xfb\x10\xc0" + bytes(104 - 4)  # 144 * 32000 / 44100 = 104 bytes
+    path.write_bytes(tag + frame * (seconds * 39))  # 1152 samples per frame
+
+
+def seed_non_epub_books(admin: AdminClient, peer: KosyncDevice, library_id: int,
+                        books: list[dict]) -> dict:
+    """The audiobook-only twin and the mixed-format book, both marked as being
+    read so they would also land in Continue reading. Idempotent: the twin is
+    found again through the catalog's own format filter, and re-attaching the
+    mixed book's audio file is refused as already attached."""
+    twin, mixed = books[AUDIOBOOK_TWIN], books[MIXED_FORMAT]
+    audio_only = [item for item in peer.catalog_page(format="mp3", size=50)["items"]
+                  if item.get("formats") == ["mp3"]]
+    with tempfile.TemporaryDirectory(prefix="crossink-seed-") as tmp:
+        if audio_only:
+            audiobook_id = int(audio_only[0]["id"])
+        else:
+            audio = Path(tmp) / f"{Path(twin['file']).stem}-audiobook.mp3"
+            silent_mp3(audio, twin["title"], twin["author"])
+            audiobook_id = admin.upload_book(library_id, audio)
+            if audiobook_id is None:
+                raise RuntimeError("the audiobook file exists server-side but no audio-only book lists it")
+
+        names = [mixed["title"], Path(mixed["file"]).stem]
+        ids = admin.find_book_ids(names)
+        mixed_id = next((ids[n] for n in names if n in ids), None)
+        if mixed_id is None:
+            raise RuntimeError(f"Book '{mixed['title']}' not found on the server")
+        audio = Path(tmp) / f"{Path(mixed['file']).stem}.mp3"
+        silent_mp3(audio, mixed["title"], mixed["author"])
+        admin.add_book_file(mixed_id, audio)
+
+    for book_id in (audiobook_id, mixed_id):
+        peer.set_read_status(book_id, "reading")
+    return {"audiobook_id": audiobook_id, "audiobook_title": twin["title"],
+            "mixed_id": mixed_id, "mixed_title": mixed["title"]}
 
 
 def main() -> int:
@@ -148,6 +208,10 @@ def main() -> int:
     peer = KosyncDevice(BASE_URL, KOSYNC["username"], KOSYNC["password"], OTHER_DEVICE_ID)
     peer.auth()
 
+    non_epub = seed_non_epub_books(admin, peer, library_id, books)
+    print(f"Audiobook-only book {non_epub['audiobook_id']} and mixed-format book "
+          f"{non_epub['mixed_id']} in place")
+
     manifest = SeedManifest(INTEGRATION / "seed-manifest.json")
     manifest.data = {"user": USER, "kosync": KOSYNC, "peer_device_id": OTHER_DEVICE_ID,
                      "progress": [], "highlights": [], "bookmarks": [],
@@ -156,7 +220,8 @@ def main() -> int:
                      "empty_collection": {"id": empty_collection_id, "name": "Zero Shelf"},
                      "smart_scope": {"id": scope_id, "name": SMART_SCOPE_NAME,
                                      "books": collection_books},
-                     "naming_pattern": NAMING_PATTERN}
+                     "naming_pattern": NAMING_PATTERN,
+                     "non_epub": non_epub}
 
     for i in WITH_PROGRESS:
         book = books[i]

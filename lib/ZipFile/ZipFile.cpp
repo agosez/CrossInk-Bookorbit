@@ -743,7 +743,7 @@ uint8_t* ZipFile::readFileToMemory(const char* filename, size_t* size, const boo
       // resolve inside it and no 32KB window is allocated.
       InflateStream inflate;
       if (!inflate.init(false)) {
-        LOG_ERR("ZIP", "Failed to init inflate stream");
+        LOG_ERR("ZIP", "Failed to init inflate stream for %s", filename);
         free(fileReadBuffer);
         free(data);
         return nullptr;
@@ -796,6 +796,7 @@ bool ZipFile::readStoredFileToStream(const char* filename, Print& out) {
 }
 
 bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t chunkSize, const bool allowEarlyStop) {
+  const uint32_t started = micros();
   const ScopedOpenClose zip{*this};
   if (!zip) return false;
 
@@ -808,6 +809,9 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
   file.seek(fileOffset);
   const auto deflatedDataSize = fileStat.compressedSize;
   const auto inflatedDataSize = fileStat.uncompressedSize;
+  const uint32_t lookupUs = micros() - started;
+  uint32_t readInflateUs = 0;
+  uint32_t writeUs = 0;
 
   if (fileStat.method == ZIP_METHOD_STORED) {
     // no deflation, just read content
@@ -819,7 +823,9 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
 
     size_t remaining = inflatedDataSize;
     while (remaining > 0) {
+      const uint32_t readStarted = micros();
       const int readResult = file.read(buffer, remaining < chunkSize ? remaining : chunkSize);
+      readInflateUs += micros() - readStarted;
       if (readResult <= 0) {
         LOG_ERR("ZIP", "Could not read more stored bytes: %d", readResult);
         free(buffer);
@@ -827,7 +833,10 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       }
       const size_t dataRead = static_cast<size_t>(readResult);
 
-      if (out.write(buffer, dataRead) != dataRead) {
+      const uint32_t writeStarted = micros();
+      const size_t written = out.write(buffer, dataRead);
+      writeUs += micros() - writeStarted;
+      if (written != dataRead) {
         free(buffer);
         if (allowEarlyStop) return true;
         LOG_ERR("ZIP", "Failed to write all output bytes to stream");
@@ -837,6 +846,9 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
     }
 
     free(buffer);
+    LOG_DBG("ZIP", "Stream %s: lookup=%uus read=%uus write=%uus bytes=%u", filename, static_cast<unsigned>(lookupUs),
+            static_cast<unsigned>(readInflateUs), static_cast<unsigned>(writeUs),
+            static_cast<unsigned>(inflatedDataSize));
     return true;
   }
 
@@ -865,8 +877,8 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
 
     InflateStream inflate;
     if (!inflate.init(true)) {
-      LOG_ERR("ZIP", "Failed to init inflate stream (free=%u, maxAlloc=%u, chunk=%zu)", ESP.getFreeHeap(),
-              ESP.getMaxAllocHeap(), chunkSize);
+      LOG_ERR("ZIP", "Failed to init inflate stream for %s (free=%u, maxAlloc=%u, chunk=%zu)", filename,
+              ESP.getFreeHeap(), ESP.getMaxAllocHeap(), chunkSize);
       free(outputBuffer);
       free(fileReadBuffer);
       return false;
@@ -878,7 +890,9 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
 
     while (true) {
       size_t produced;
+      const uint32_t inflateStarted = micros();
       const InflateStream::Status status = inflate.readAtMost(outputBuffer, chunkSize, &produced);
+      readInflateUs += micros() - inflateStarted;
 
       totalProduced += produced;
       if (totalProduced > static_cast<size_t>(inflatedDataSize)) {
@@ -888,7 +902,10 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       }
 
       if (produced > 0) {
-        if (out.write(outputBuffer, produced) != produced) {
+        const uint32_t writeStarted = micros();
+        const size_t written = out.write(outputBuffer, produced);
+        writeUs += micros() - writeStarted;
+        if (written != produced) {
           if (allowEarlyStop) {
             success = true;
           } else {
@@ -917,6 +934,9 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
 
     free(outputBuffer);
     free(fileReadBuffer);
+    LOG_DBG("ZIP", "Stream %s: ok=%d lookup=%uus read/inflate=%uus write=%uus bytes=%u", filename, success,
+            static_cast<unsigned>(lookupUs), static_cast<unsigned>(readInflateUs), static_cast<unsigned>(writeUs),
+            static_cast<unsigned>(totalProduced));
     return success;  // inflate destructor frees the decompressor state + window
   }
 

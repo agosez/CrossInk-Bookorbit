@@ -44,11 +44,12 @@ struct TextLayoutBackingTest : testing::Test {
     FsFile output;
     EXPECT_TRUE(Storage.openFileForWrite("test", "layout", output));
     GfxRenderer renderer;
-    bool ok = text.layoutAndExtractLines(renderer, font, 240, [&](std::shared_ptr<TextBlock> block, uint32_t offset) {
-      EXPECT_TRUE(block->valid());
-      EXPECT_TRUE(block->serialize(output));
-      EXPECT_EQ(output.write(&offset, sizeof(offset)), sizeof(offset));
-    });
+    bool ok = text.layoutAndExtractLines(renderer, font, 240,
+                                         [&](std::shared_ptr<TextBlock> block, uint32_t offset, uint32_t) {
+                                           EXPECT_TRUE(block->valid());
+                                           EXPECT_TRUE(block->serialize(output));
+                                           EXPECT_EQ(output.write(&offset, sizeof(offset)), sizeof(offset));
+                                         });
     output.close();
     if (result)
       *result = ok;

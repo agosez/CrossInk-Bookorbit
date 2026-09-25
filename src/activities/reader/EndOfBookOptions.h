@@ -64,7 +64,8 @@ class EndOfBookOptions {
   std::vector<std::string> rowLabels;
   std::array<freeink::ui::ListItem, MAX_SUGGESTIONS + 1> rowItems{};
   uint16_t rowCount = 0;
-  int selector = 0;
+  // Input updates may overlap a repaint on the render task.
+  std::atomic<int> selector{0};
   std::atomic<bool> isLoaded{false};
 
   freeink::ui::GfxRendererTarget uiTarget;  // must precede `app`: the app holds a reference to it

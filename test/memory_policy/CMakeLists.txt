@@ -4,6 +4,16 @@ target_compile_definitions(MemoryPoolPolicyTest PRIVATE ARDUINO_ARCH_ESP32=1 CRO
 target_link_libraries(MemoryPoolPolicyTest PRIVATE crosspoint_test_common GTest::gtest_main)
 gtest_discover_tests(MemoryPoolPolicyTest PROPERTIES ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1")
 
+add_executable(JpegDecoderPolicyTest JpegDecoderPolicyTest.cpp
+  ${REPO_ROOT}/lib/Epub/Epub/converters/JpegToFramebufferConverter.cpp
+  ${REPO_ROOT}/lib/Epub/Epub/converters/ImageToFramebufferDecoder.cpp)
+target_include_directories(JpegDecoderPolicyTest PRIVATE jpeg_decoder_stubs stubs
+  ${REPO_ROOT}/lib/Epub/Epub/converters ${REPO_ROOT}/lib/Epub ${REPO_ROOT}/lib/Memory
+  ${REPO_ROOT}/lib/MemoryBudget)
+target_compile_definitions(JpegDecoderPolicyTest PRIVATE ARDUINO_ARCH_ESP32=1 CROSSINK_MEMORY_TEST=1)
+target_link_libraries(JpegDecoderPolicyTest PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(JpegDecoderPolicyTest PROPERTIES ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1")
+
 find_package(ZLIB REQUIRED)
 add_executable(InflateStreamStorageTest InflateStreamStorageTest.cpp
   ${REPO_ROOT}/lib/miniz/src/InflateStream.cpp ${REPO_ROOT}/lib/miniz/src/miniz_impl.c

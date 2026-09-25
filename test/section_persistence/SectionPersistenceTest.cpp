@@ -16,8 +16,10 @@
 #include <GfxRenderer.h>
 
 namespace {
-constexpr uint8_t kFullVersion = 66;
-constexpr uint8_t kPartialVersion = 0xF6;
+constexpr uint8_t kFullVersion = 77;
+constexpr uint8_t kPartialVersion = 0xF3;
+constexpr uint8_t kPreviousFullVersion = 76;
+constexpr uint8_t kPreviousPartialVersion = 0xF5;
 
 ReaderRenderSpec renderSpec() {
   ReaderRenderSpec spec;
@@ -44,8 +46,8 @@ struct SectionHarness {
         epub, context->parsePath, renderer, spec.fontId, spec.lineCompression, spec.extraParagraphSpacing,
         spec.forceParagraphIndents, spec.paragraphAlignment, spec.viewportWidth, spec.viewportHeight,
         spec.hyphenationEnabled, spec.focusReadingEnabled, spec.guideReadingEnabled, spec.wordSpacing,
-        [](std::unique_ptr<Page>, uint16_t, uint16_t, uint32_t) {}, spec.embeddedStyle, "", "", spec.imageRendering,
-        std::vector<std::string>{}, nullptr, nullptr, spec.renderMode);
+        [](std::unique_ptr<Page>, uint16_t, uint16_t, uint32_t, uint32_t) {}, spec.embeddedStyle, "", "",
+        spec.imageRendering, std::vector<std::string>{}, nullptr, nullptr, spec.renderMode);
     ASSERT_NE(context->parser, nullptr);
     context->parser->anchorData = anchors;
     section.build_ = std::move(context);
@@ -147,5 +149,19 @@ TEST_F(SectionPersistenceTest, FailedCommitKeepsThePreviousReadableCache) {
   ASSERT_TRUE(Storage.exists(replacement.section.filePath.c_str()));
   EXPECT_EQ(Storage.bytes(replacement.section.filePath), previous);
   replacement.section.build_.reset();
+}
+
+TEST_F(SectionPersistenceTest, RejectsCachesFromPreviousLayoutRevisions) {
+  for (const uint8_t staleVersion : {kPreviousFullVersion, kPreviousPartialVersion}) {
+    SectionHarness harness;
+    harness.begin();
+    harness.appendPages(1);
+    ASSERT_TRUE(harness.commit(staleVersion, 12345, 67890));
+    harness.finishSuccessfulCommit();
+
+    Section reopened(harness.epub, 0, harness.renderer);
+    EXPECT_FALSE(reopened.loadSectionFile(harness.spec));
+    EXPECT_FALSE(Storage.exists(harness.section.filePath.c_str()));
+  }
 }
 }  // namespace

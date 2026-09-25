@@ -52,6 +52,13 @@ bool RecentBooksStore::fromJson(JsonVariantConst doc) {
   return true;
 }
 
+bool RecentBooksStore::saveToFile() const {
+  std::lock_guard<std::mutex> lock(storeMutex);
+  JsonDocument doc;
+  toJson(doc);
+  return PersistableStoreBase::writeDocToFileAtomically(getFilePath(), doc);
+}
+
 void RecentBooksStore::addOrUpdateBook(const std::string& path, const std::string& title, const std::string& author,
                                        const std::string& coverBmpPath, const RecentBook::CoverState coverState) {
   ensureLoaded();
@@ -124,20 +131,26 @@ bool RecentBooksStore::removeByPath(const std::string& path) {
   return true;
 }
 
-void RecentBooksStore::updatePath(const std::string& oldPath, const std::string& newPath,
+bool RecentBooksStore::updatePath(const std::string& oldPath, const std::string& newPath,
                                   const std::string& oldCachePath, const std::string& newCachePath) {
   ensureLoaded();
 
   auto it = std::find_if(recentBooks.begin(), recentBooks.end(),
                          [&](const RecentBook& book) { return book.path == oldPath; });
   if (it == recentBooks.end()) {
-    return;
+    return true;
   }
+  const RecentBook original = *it;
   it->path = newPath;
   if (!oldCachePath.empty() && !it->coverBmpPath.empty() && it->coverBmpPath.rfind(oldCachePath, 0) == 0) {
     it->coverBmpPath = newCachePath + it->coverBmpPath.substr(oldCachePath.size());
   }
-  saveToFile();
+  if (!saveToFile()) {
+    *it = original;
+    LOG_ERR("RBS", "Failed to persist recent book path update: %s -> %s", oldPath.c_str(), newPath.c_str());
+    return false;
+  }
+  return true;
 }
 
 bool RecentBooksStore::isMissing(const RecentBook& book) { return !Storage.exists(book.path.c_str()); }

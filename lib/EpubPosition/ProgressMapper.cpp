@@ -613,6 +613,24 @@ class ParagraphStreamer final : public Print {
     }
   }
 
+  // A comment or processing instruction splits the surrounding text into two DOM text
+  // nodes (crengine keeps them apart, and ChapterXPathResolver counts them that way when
+  // it writes text()[N]), so directly inside the target element it advances the text
+  // node index exactly like a direct child element closing.
+  void onDeclarationEnd() {
+    if (nonVisibleDepth > 0 || !revPFound || revDone) return;
+    // Text directly inside the target sits at the depth the target was entered at.
+    const bool directlyInTarget = stepCount > 0
+                                      ? (matchedDepth == stepCount && htmlDepth == stepEnteredAtDepth[stepCount - 1])
+                                      : (paragraphHtmlDepth >= 0 && htmlDepth == paragraphHtmlDepth);
+    if (!directlyInTarget) return;
+    currentTextNode++;
+    if (currentTextNode == targetTextNode && revChar <= 0) {
+      targetVisChars = totalVisChars;
+      revDone = true;
+    }
+  }
+
   void onCloseTag() {
     if (nonVisibleDepth > 0) {
       nonVisibleDepth--;
@@ -782,6 +800,7 @@ class ParagraphStreamer final : public Print {
       if (c == '>' && (!declIsComment || declDashRun >= 2)) {
         globalInTag = false;
         tagState = TAG_IDLE;
+        onDeclarationEnd();
       } else {
         if (declSeen < 2) {
           declSeen++;

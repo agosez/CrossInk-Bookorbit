@@ -16,6 +16,7 @@
 
 #include "BookOrbitCredentialStore.h"
 #include "CrossPointSettings.h"
+#include "DeviceCapabilities.h"
 #include "KOReaderCredentialStore.h"
 #include "QuickActions.h"
 #include "activities/settings/SettingsActivity.h"
@@ -173,15 +174,13 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
 
   // Capture registry families by copy for the lambdas
   std::vector<std::string> sdFamilyNames;
-  std::vector<std::vector<uint8_t>> sdFamilySizes;
+
   if (registry) {
     const auto& families = registry->getFamilies();
     sdFamilyNames.reserve(families.size());
-    sdFamilySizes.reserve(families.size());
+
     std::transform(families.begin(), families.end(), std::back_inserter(sdFamilyNames),
                    [](const SdCardFontFamilyInfo& f) { return f.name; });
-    std::transform(families.begin(), families.end(), std::back_inserter(sdFamilySizes),
-                   [](const SdCardFontFamilyInfo& f) { return f.availableSizes(); });
   }
 
   s.valueGetter = [sdFamilyNames]() -> uint8_t {
@@ -197,7 +196,7 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
     return SETTINGS.fontFamily < CrossPointSettings::BUILTIN_FONT_COUNT ? SETTINGS.fontFamily : 0;
   };
 
-  s.valueSetter = [sdFamilyNames, sdFamilySizes](uint8_t v) {
+  s.valueSetter = [sdFamilyNames, registry](uint8_t v) {
     const uint8_t targetPointSize = SETTINGS.readerFontPointSize;
 
     if (v < CrossPointSettings::BUILTIN_FONT_COUNT) {
@@ -208,8 +207,10 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
     } else {
       int sdIdx = v - CrossPointSettings::BUILTIN_FONT_COUNT;
       if (sdIdx < static_cast<int>(sdFamilyNames.size())) {
-        SETTINGS.readerFontPointSize =
-            sdFamilySizes[sdIdx][closestPointSizeIndex(sdFamilySizes[sdIdx], targetPointSize)];
+        const auto* family = registry ? registry->findFamily(sdFamilyNames[sdIdx]) : nullptr;
+        const auto sizes = family ? family->availableSizes() : std::vector<uint8_t>{};
+        if (sizes.empty()) return;
+        SETTINGS.readerFontPointSize = sizes[closestPointSizeIndex(sizes, targetPointSize)];
         strncpy(SETTINGS.sdFontFamilyName, sdFamilyNames[sdIdx].c_str(), sizeof(SETTINGS.sdFontFamilyName) - 1);
         SETTINGS.sdFontFamilyName[sizeof(SETTINGS.sdFontFamilyName) - 1] = '\0';
       }
@@ -371,8 +372,10 @@ inline uint8_t shortcutRawValue(const ShortcutOptionCatalog catalog, const Cross
       switch (action) {
         case Action::IGNORE:
           return Chord::CHORD_DISABLED;
+        // Deep sleep wakes from the Power GPIO alone. A chord cannot be used
+        // as the matching wake gesture, so do not offer a misleading action.
         case Action::SLEEP:
-          return Chord::CHORD_SLEEP;
+          return SHORTCUT_OPTION_UNAVAILABLE;
         case Action::PAGE_TURN:
           return Chord::CHORD_PAGE_TURN;
         case Action::PREVIOUS_PAGE:
@@ -558,10 +561,14 @@ inline SettingInfo buildHomeButtonActionSetting(const StrId nameId, uint8_t Cros
 // #1636) so the per-entry SettingInfo cost is paid once. Read-only consumers
 // can use it directly; mutable device UI lists use getSettingsList(), which
 // returns an owned copy and can add SD-card font and dictionary options.
+inline constexpr size_t BASE_SETTINGS_CAPACITY = 102;  // 100 regular entries plus two optional tilt entries.
+
 inline const std::vector<SettingInfo>& getBaseSettingsList() {
   static const std::vector<SettingInfo> baseList = [] {
     std::vector<SettingInfo> v;
-    v.reserve(77);
+    // Reserve the maximum final size. Growing this process-lifetime vector
+    // would otherwise leave it holding roughly twice the memory it needs.
+    v.reserve(BASE_SETTINGS_CAPACITY);
     auto add = [&v](SettingInfo setting) { v.push_back(std::move(setting)); };
 
     // --- Display ---
@@ -688,9 +695,11 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
     add(SettingInfo::Toggle(StrId::STR_PINCH_FONT_RESIZE, &CrossPointSettings::pinchFontResizeEnabled,
                             "pinchFontResizeEnabled", StrId::STR_CAT_CONTROLS));
 #if CROSSINK_APP_CAP_TOUCH
-    // Two-finger swipes exist only on multi-touch hardware; on X3/X4 these rows
+    // Two-finger gestures exist only on multi-touch hardware; on X3/X4 these rows
     // were dead UI and their tables dead flash. The settings fields themselves
     // stay in CrossPointSettings, so persisted values survive either build.
+    add(SettingInfo::Toggle(StrId::STR_TWO_FINGER_ROTATION, &CrossPointSettings::twoFingerRotationEnabled,
+                            "twoFingerRotationEnabled", StrId::STR_CAT_CONTROLS));
     const std::vector<StrId> twoFingerSwipeActions = {
         StrId::STR_NOT_SET,          StrId::STR_INCREASE_BRIGHTNESS, StrId::STR_DECREASE_BRIGHTNESS,
         StrId::STR_INCREASE_WARMTH,  StrId::STR_DECREASE_WARMTH,     StrId::STR_NEXT_CHAPTER,
@@ -915,6 +924,10 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
                             StrId::STR_CUSTOMISE_STATUS_BAR));
     add(SettingInfo::Toggle(StrId::STR_BOOK_PROGRESS_PERCENTAGE, &CrossPointSettings::statusBarBookProgressPercentage,
                             "statusBarBookProgressPercentage", StrId::STR_CUSTOMISE_STATUS_BAR));
+    add(SettingInfo::Enum(StrId::STR_PERCENTAGE_FORMAT, &CrossPointSettings::statusBarBookPercentageFormat,
+                          {StrId::STR_PERCENTAGE_FORMAT_WHOLE, StrId::STR_PERCENTAGE_FORMAT_ONE_DECIMAL,
+                           StrId::STR_PERCENTAGE_FORMAT_TWO_DECIMALS},
+                          "statusBarBookPercentageFormat", StrId::STR_CUSTOMISE_STATUS_BAR));
     add(SettingInfo::Enum(StrId::STR_PROGRESS_BAR, &CrossPointSettings::statusBarProgressBar,
                           {StrId::STR_HIDE, StrId::STR_BOOK, StrId::STR_CHAPTER}, "statusBarProgressBar",
                           StrId::STR_CUSTOMISE_STATUS_BAR)
@@ -971,8 +984,15 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
         v.insert(
             insertPos + 1,
             SettingInfo::Enum(StrId::STR_TILT_PAGE_TURN_DIRECTION, &CrossPointSettings::tiltPageTurnDirection,
+#if CROSSINK_APP_DEVICE_X4CLASSIC || defined(SIMULATOR_DEVICE_X4_CLASSIC)
+                              // X4 Classic's X-axis has the opposite sign from the original X3 calibration.
+                              // Keep the stored direction, but name its physical motion accurately.
+                              {StrId::STR_TILT_DIRECTION_LEFT_RIGHT_INVERTED, StrId::STR_TILT_DIRECTION_LEFT_RIGHT,
+                               StrId::STR_TILT_DIRECTION_FORWARD_BACK, StrId::STR_TILT_DIRECTION_FORWARD_BACK_INVERTED},
+#else
                               {StrId::STR_TILT_DIRECTION_LEFT_RIGHT, StrId::STR_TILT_DIRECTION_LEFT_RIGHT_INVERTED,
                                StrId::STR_TILT_DIRECTION_FORWARD_BACK, StrId::STR_TILT_DIRECTION_FORWARD_BACK_INVERTED},
+#endif
                               "tiltPageTurnDirection", StrId::STR_CAT_CONTROLS));
       }
     } else {
@@ -1010,6 +1030,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                                     s.nameId == StrId::STR_DISABLE_TOUCHSCREEN || s.nameId == StrId::STR_NEXT_PAGE ||
                                     s.nameId == StrId::STR_PREV_PAGE || s.nameId == StrId::STR_TAP_HIDE_STATUS_BAR ||
                                     s.nameId == StrId::STR_PINCH_FONT_RESIZE ||
+                                    s.nameId == StrId::STR_TWO_FINGER_ROTATION ||
                                     s.nameId == StrId::STR_TWO_FINGER_SWIPE_UP ||
                                     s.nameId == StrId::STR_TWO_FINGER_SWIPE_DOWN ||
                                     s.nameId == StrId::STR_TWO_FINGER_SWIPE_LEFT ||
@@ -1021,6 +1042,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     v.erase(std::remove_if(v.begin(), v.end(),
                            [](const SettingInfo& s) {
                              return s.nameId == StrId::STR_PINCH_FONT_RESIZE ||
+                                    s.nameId == StrId::STR_TWO_FINGER_ROTATION ||
                                     s.nameId == StrId::STR_TWO_FINGER_SWIPE_UP ||
                                     s.nameId == StrId::STR_TWO_FINGER_SWIPE_DOWN ||
                                     s.nameId == StrId::STR_TWO_FINGER_SWIPE_LEFT ||
@@ -1067,9 +1089,11 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                            }),
             v.end());
     for (auto& setting : v) {
-      if (setting.nameId == StrId::STR_SHORT_PWR_BTN || settingKeyIs(setting, "longPwrBtn") ||
-          settingKeyIs(setting, "powerChordAction") || settingKeyIs(setting, "sideButtonChordAction")) {
+      if (setting.nameId == StrId::STR_SHORT_PWR_BTN || settingKeyIs(setting, "longPwrBtn")) {
         removeEnumRawValue(setting, CrossPointSettings::TOGGLE_HOME_BUTTON_IN_READER);
+      } else if (settingKeyIs(setting, "powerChordAction") || settingKeyIs(setting, "sideButtonChordAction")) {
+        removeEnumRawValue(setting, shortcutRawValue(ShortcutOptionCatalog::ButtonChord,
+                                                     CrossPointSettings::TOGGLE_HOME_BUTTON_IN_READER));
       }
     }
   }
@@ -1079,8 +1103,15 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
           !settingKeyIs(setting, "powerChordAction") && !settingKeyIs(setting, "sideButtonChordAction")) {
         continue;
       }
-      if (!Frontlight.present()) removeEnumRawValue(setting, CrossPointSettings::TOGGLE_FRONTLIGHT);
-      if (!gpio.hasTouch()) removeEnumRawValue(setting, CrossPointSettings::TOGGLE_TOUCHSCREEN);
+      const auto catalog = settingKeyIs(setting, "powerChordAction") || settingKeyIs(setting, "sideButtonChordAction")
+                               ? ShortcutOptionCatalog::ButtonChord
+                               : ShortcutOptionCatalog::PowerButton;
+      if (!Frontlight.present()) {
+        removeEnumRawValue(setting, shortcutRawValue(catalog, CrossPointSettings::TOGGLE_FRONTLIGHT));
+      }
+      if (!gpio.hasTouch()) {
+        removeEnumRawValue(setting, shortcutRawValue(catalog, CrossPointSettings::TOGGLE_TOUCHSCREEN));
+      }
     }
   }
   if (!Frontlight.present()) {
@@ -1202,6 +1233,10 @@ inline bool hasSettingByName(const std::vector<SettingInfo>& allSettings, StrId 
                      [nameId](const auto& setting) { return setting.nameId == nameId; });
 }
 
+inline bool hasSideButtonChordSetting(const std::vector<SettingInfo>& allSettings) {
+  return deviceSupportsSideButtonChord(gpio) && hasSettingByName(allSettings, StrId::STR_SIDE_BUTTON_CHORD);
+}
+
 inline std::vector<SettingInfo> buildControlsSettingsParentList(const std::vector<SettingInfo>& allSettings) {
   const bool hasTiltPageTurnSetting = hasSettingByName(allSettings, StrId::STR_TILT_PAGE_TURN);
   const bool hasTiltPageTurnDirectionSetting = hasSettingByName(allSettings, StrId::STR_TILT_PAGE_TURN_DIRECTION);
@@ -1232,11 +1267,13 @@ inline std::vector<SettingInfo> buildControlsSettingsParentList(const std::vecto
 inline std::vector<SettingInfo> buildControlsTapsGesturesSettingsList(const std::vector<SettingInfo>& allSettings) {
   std::vector<SettingInfo> settings;
   const bool hasPinch = hasSettingByName(allSettings, StrId::STR_PINCH_FONT_RESIZE);
+  const bool hasRotation = hasSettingByName(allSettings, StrId::STR_TWO_FINGER_ROTATION);
   const bool hasTwoFingerSwipe = hasSettingByName(allSettings, StrId::STR_TWO_FINGER_SWIPE_UP);
-  settings.reserve(3 + (hasPinch ? 1u : 0u) + (hasTwoFingerSwipe ? 1u : 0u));
+  settings.reserve(3 + (hasPinch ? 1u : 0u) + (hasRotation ? 1u : 0u) + (hasTwoFingerSwipe ? 1u : 0u));
   addSettingByName(settings, allSettings, StrId::STR_NEXT_PAGE);
   addSettingByName(settings, allSettings, StrId::STR_PREV_PAGE);
   if (hasPinch) addSettingByName(settings, allSettings, StrId::STR_PINCH_FONT_RESIZE);
+  if (hasRotation) addSettingByName(settings, allSettings, StrId::STR_TWO_FINGER_ROTATION);
   addSettingByName(settings, allSettings, StrId::STR_TAP_HIDE_STATUS_BAR);
   if (hasTwoFingerSwipe) {
     settings.push_back(SettingInfo::Submenu(StrId::STR_TWO_FINGER_SWIPE, SettingAction::ControlsTwoFingerSwipe));
@@ -1294,11 +1331,12 @@ inline std::vector<SettingInfo> buildControlsFrontButtonSettingsList(const std::
 
 inline std::vector<SettingInfo> buildControlsSideButtonSettingsList(const std::vector<SettingInfo>& allSettings) {
   std::vector<SettingInfo> settings;
-  settings.reserve(3 + (gpio.hasTouch() ? 1u : 0u));
+  const bool hasChord = hasSideButtonChordSetting(allSettings);
+  settings.reserve(3 + (hasChord ? 1u : 0u));
   addSettingByName(settings, allSettings, StrId::STR_SIDE_BTN_LAYOUT);
   addSettingByKey(settings, allSettings, "sideButtonOrientationAware");
   addSettingByKey(settings, allSettings, "sideButtonLongPress");
-  if (gpio.hasTouch()) {
+  if (hasChord) {
     addSettingByName(settings, allSettings, StrId::STR_SIDE_BUTTON_CHORD);
   }
   return settings;
