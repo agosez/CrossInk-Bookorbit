@@ -12,9 +12,11 @@ Based on CrossInk v1.6.0.
 ### Added
 
 - The BookOrbit catalog now shows the server's SmartScopes section, alongside Collections, Libraries, Authors and Series. The section is badged with how many scopes you have, the way the other sections are, and an account with no scopes simply shows an empty section.
+- Holding a book in the BookOrbit catalog (holding Confirm, or a long press on touch devices) opens a menu for it. A book not yet on the device offers Download; a book already on it offers Open, Re-download and Delete. Re-downloading replaces the book where it is, so its reading progress is kept, and the copy you had stays in place until the new one has fully arrived.
 
 ### Changed
 
+- Selecting a book in the BookOrbit catalog that is already on the device (marked with a dot) now opens it, instead of downloading it again.
 - BookOrbit settings are now read from the SD card the first time something needs them rather than on every start, the way CrossInk already defers its KOReader and OPDS settings. Waking straight back into a book skips that read entirely.
 
 ### Fixed

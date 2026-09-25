@@ -21,8 +21,11 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
+#include "activities/home/BookActions.h"
+#include "activities/home/FileBrowserActionActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/reader/BookReadingStats.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/CompactHeader.h"
 #include "components/TouchHeaderBackButton.h"
@@ -45,6 +48,11 @@ constexpr size_t MAX_LOCAL_ENTRIES = 200;
 constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 5;
 constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 1000;
 constexpr unsigned long DOWNLOAD_PROGRESS_MAX_UPDATE_MS = 5000;
+// Hold threshold for the book action menu (firmware convention, as in Recent Books).
+constexpr unsigned long LONG_PRESS_MS = 1000;
+// A re-download lands next to the book it replaces under this suffix. Not ".epub",
+// so a leftover from an interrupted run never shows up as a book.
+constexpr char REDOWNLOAD_SUFFIX[] = ".part";
 // Marker appended (right-aligned) to catalog rows whose book already exists on the
 // device. U+2022 bullet: guaranteed by the built-in fonts' default glyph intervals.
 constexpr char ON_DEVICE_MARKER[] = "\xE2\x80\xA2";
@@ -73,7 +81,7 @@ std::string catalogBookPath(const BookOrbitBookDetail& detail, const BookOrbitCa
   return BOOKORBIT_STORE.getDownloadFolder() + catalogBookFilename(detail, file);
 }
 
-// True when the catalog book already exists locally. The download index knows
+// True when the catalog book already exists locally, with its path in outPath. The download index knows
 // where past downloads landed, whatever the folder setting or the server's naming
 // template was at the time; the fallback filename heuristic covers pre-index
 // downloads in the current download location, the SD root (the old fixed location)
@@ -83,15 +91,22 @@ std::string catalogBookPath(const BookOrbitBookDetail& detail, const BookOrbitCa
 // template but missing from the index (another device, or an index dropped when the
 // server URL changed) are therefore not detected — as with books moved or renamed by
 // hand, this stays a best-effort convenience marker.
-bool bookOnDevice(const int64_t bookId, const std::string& title, const std::string& author) {
-  std::string indexedPath;
-  if (BookOrbitDownloadIndex::lookup(bookId, indexedPath)) return true;
+bool bookOnDevice(const int64_t bookId, const std::string& title, const std::string& author, std::string& outPath) {
+  if (BookOrbitDownloadIndex::lookup(bookId, outPath)) return true;
   const std::string filename = catalogBookFilename(title, author);
   const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
-  if (!folder.empty() && Storage.exists((folder + filename).c_str())) return true;
-  if (Storage.exists(filename.c_str())) return true;
-  const std::string readPath = std::string(READ_FOLDER_PREFIX) + filename;
-  return Storage.exists(readPath.c_str());
+  if (!folder.empty() && Storage.exists((folder + filename).c_str())) {
+    outPath = folder + filename;
+    return true;
+  }
+  if (Storage.exists(filename.c_str())) {
+    outPath = filename;
+    return true;
+  }
+  outPath = std::string(READ_FOLDER_PREFIX) + filename;
+  if (Storage.exists(outPath.c_str())) return true;
+  outPath.clear();
+  return false;
 }
 
 std::string bookTitleFromPath(const std::string& path) {
@@ -126,6 +141,10 @@ void BookOrbitCatalogBrowserActivity::onRowEvent(const fui::ActionEvent& event, 
   // Activation loads a new listing or starts a download; a lingering flash
   // would gray an unrelated row of whatever comes next.
   self->app.clearTapFlash();
+  if (event.longPress && self->entries[event.value].type == EntryType::BOOK) {
+    self->showBookActionMenu(/*ignoreInitialConfirmRelease=*/false);
+    return;
+  }
   self->activateSelected();
 }
 
@@ -145,6 +164,7 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   selectorIndex = 0;
   navLevel = NavLevel::Root;
   consumeConfirm = false;
+  longPressFired = false;
   errorMessage.clear();
   statusMessage = tr(STR_CHECKING_WIFI);
   BookOrbitCatalogListCache::clear();
@@ -495,7 +515,7 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
     entry.title = book.title;
     entry.subtitle = book.author;
     entry.bookId = book.id;
-    entry.onDevice = bookOnDevice(book.id, book.title, book.author);
+    entry.onDevice = bookOnDevice(book.id, book.title, book.author, entry.path);
     entries.push_back(std::move(entry));
   }
   if (!append) {
@@ -583,7 +603,8 @@ void BookOrbitCatalogBrowserActivity::performSearch(const std::string& query) {
   }
 }
 
-void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const std::string& title) {
+void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const std::string& title,
+                                                   const std::string& replacePath) {
   state = BrowserState::DOWNLOADING;
   // Truncate once, up front: render() used to re-truncate this unchanging title on
   // every progress repaint, an avoidable heap allocation racing the TLS session's
@@ -610,7 +631,11 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
     return;
   }
 
-  const std::string filename = catalogBookPath(detail, epubFile);
+  // A re-download keeps the book where it is (its reading progress and caches are
+  // keyed by that path) and streams into a side file first: downloadToFile deletes
+  // its target on failure or cancel, which must not cost the user the copy they had.
+  const std::string finalPath = replacePath.empty() ? catalogBookPath(detail, epubFile) : replacePath;
+  const std::string filename = replacePath.empty() ? finalPath : finalPath + REDOWNLOAD_SUFFIX;
   // Create the download folder and, when the server's naming template nests the book
   // ("Sprawl/<book>.epub"), every folder it asks for. mkdir's pFlag creates the
   // missing parents in one call, so this covers both at once.
@@ -699,6 +724,15 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
             static_cast<int>(result));
   }
 
+  if (result == HttpDownloader::OK && filename != finalPath) {
+    // SdFat's rename does not overwrite, so the old copy goes first.
+    Storage.remove(finalPath.c_str());
+    if (!Storage.rename(filename.c_str(), finalPath.c_str())) {
+      LOG_ERR("BookOrbit", "Could not move re-download %s into place", filename.c_str());
+      result = HttpDownloader::FILE_ERROR;
+    }
+  }
+
   const bool downloadFailed = result != HttpDownloader::OK && result != HttpDownloader::ABORTED;
   if (downloadFailed) {
     // preservePartial kept the partial file for resuming between attempts; don't
@@ -707,8 +741,8 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
   }
 
   if (result == HttpDownloader::OK) {
-    clearBookCache(filename);
-    BookOrbitDownloadIndex::record(bookId, filename);
+    clearBookCache(finalPath);
+    BookOrbitDownloadIndex::record(bookId, finalPath);
   } else if (result == HttpDownloader::ABORTED) {
     LOG_DBG("BookOrbit", "Download cancelled");
     if (goHomeAfterCancel) {
@@ -770,12 +804,7 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       loadLocalBooks(entry.sectionId);
       break;
     case EntryType::LOCAL_BOOK:
-      // Pushing the reader here would never survive: onExit() reboots while the
-      // radio is still up, so the reader is torn down before onEnter() records
-      // the book. Persist the path and let the reboot land on it instead.
-      APP_STATE.openEpubPath = entry.path;
-      APP_STATE.saveToFile();
-      silentRestartToReader();
+      openLocalBook(entry.path);
       break;
     case EntryType::FACET: {
       // Mirror BookOrbit's own plugin (paramsForEntry): author filters by the
@@ -812,9 +841,90 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       launchSearch();
       break;
     case EntryType::BOOK:
-      downloadBook(entry.bookId, entry.title);
+      if (entry.onDevice) {
+        openLocalBook(entry.path);
+      } else {
+        downloadBook(entry.bookId, entry.title);
+      }
       break;
   }
+}
+
+void BookOrbitCatalogBrowserActivity::openLocalBook(const std::string& path) {
+  // Pushing the reader here would never survive: onExit() reboots while the
+  // radio is still up, so the reader is torn down before onEnter() records
+  // the book. Persist the path and let the reboot land on it instead.
+  APP_STATE.openEpubPath = path;
+  APP_STATE.saveToFile();
+  silentRestartToReader();
+}
+
+void BookOrbitCatalogBrowserActivity::showBookActionMenu(const bool ignoreInitialConfirmRelease) {
+  if (selectorIndex < 0 || selectorIndex >= static_cast<int>(entries.size())) return;
+  const Entry& entry = entries[selectorIndex];
+  if (entry.type != EntryType::BOOK) return;
+
+  std::vector<FileBrowserActionActivity::MenuItem> items;
+  if (entry.onDevice) {
+    items.push_back({FileBrowserAction::Open, StrId::STR_OPEN});
+    items.push_back({FileBrowserAction::Redownload, StrId::STR_REDOWNLOAD});
+    items.push_back({FileBrowserAction::Delete, StrId::STR_DELETE});
+  } else {
+    items.push_back({FileBrowserAction::Download, StrId::STR_DOWNLOAD});
+  }
+
+  // Captured by index: the menu is modal, so the listing cannot change under it.
+  const size_t index = static_cast<size_t>(selectorIndex);
+  startActivityForResult(std::make_unique<FileBrowserActionActivity>(renderer, mappedInput, entry.title,
+                                                                     std::move(items), ignoreInitialConfirmRelease),
+                         [this, index](const ActivityResult& result) {
+                           longPressFired = false;
+                           if (result.isCancelled || index >= entries.size()) return;
+                           const auto* actionResult = std::get_if<FileBrowserActionResult>(&result.data);
+                           if (!actionResult) {
+                             LOG_ERR("BookOrbit", "Book action result missing");
+                             return;
+                           }
+                           // Copies: downloadBook() frees the listing these would point into.
+                           const Entry entry = entries[index];
+                           LOG_DBG("BookOrbit", "Book action %d on book %lld", actionResult->action,
+                                   static_cast<long long>(entry.bookId));
+                           switch (static_cast<FileBrowserAction>(actionResult->action)) {
+                             case FileBrowserAction::Open:
+                               openLocalBook(entry.path);
+                               return;
+                             case FileBrowserAction::Download:
+                               downloadBook(entry.bookId, entry.title);
+                               return;
+                             case FileBrowserAction::Redownload:
+                               downloadBook(entry.bookId, entry.title, entry.path);
+                               return;
+                             case FileBrowserAction::Delete:
+                               promptDeleteBook(index);
+                               return;
+                             default:
+                               return;
+                           }
+                         });
+}
+
+void BookOrbitCatalogBrowserActivity::promptDeleteBook(const size_t index) {
+  const std::string heading = tr(STR_DELETE) + std::string("? ");
+  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, entries[index].title),
+                         [this, index](const ActivityResult& result) {
+                           if (result.isCancelled || index >= entries.size()) return;
+                           Entry& entry = entries[index];
+                           BookActions::clearFileMetadata(entry.path);
+                           if (!Storage.remove(entry.path.c_str())) {
+                             LOG_ERR("BookOrbit", "Failed to delete book: %s", entry.path.c_str());
+                             return;
+                           }
+                           RECENT_BOOKS.removeByPath(entry.path);
+                           // Re-detect rather than just clearing the flag: another copy (the SD root,
+                           // /Read) may still match. The index drops its now-stale entry on lookup.
+                           entry.onDevice = bookOnDevice(entry.bookId, entry.title, entry.subtitle, entry.path);
+                           requestUpdate();
+                         });
 }
 
 void BookOrbitCatalogBrowserActivity::navigateBack() {
@@ -882,6 +992,17 @@ void BookOrbitCatalogBrowserActivity::loop() {
   if (state == BrowserState::DOWNLOADING) return;
 
   if (state == BrowserState::BROWSING) {
+    if (longPressFired) {
+      if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) longPressFired = false;
+      return;
+    }
+    // Holding Confirm on a catalog book opens its action menu instead of acting.
+    if (!entries.empty() && entries[selectorIndex].type == EntryType::BOOK &&
+        mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= LONG_PRESS_MS) {
+      longPressFired = true;
+      showBookActionMenu(/*ignoreInitialConfirmRelease=*/true);
+      return;
+    }
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       activateSelected();
       return;
@@ -1035,8 +1156,8 @@ void BookOrbitCatalogBrowserActivity::buildListScreen(UiApp::ScreenType& screen)
   props.count = static_cast<uint16_t>(items.size());
   props.selectedIndex = static_cast<int16_t>(selectorIndex);
   props.action = ACTION_ROW;
-  props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
-  props.valueInset = 8;               // air between the on-device dot and the row edge
+  props.inputMask = static_cast<uint16_t>(fui::InputTouch | fui::InputLongPress);  // physical buttons stay in loop()
+  props.valueInset = 8;  // air between the on-device dot and the row edge
   const auto rows = configureUiList(props, screen.theme(), screen.body(), UiListRowType::WithSubtitle);
   visibleRows = rows > 0 ? rows : 1;
   topIndex = scrollListBy(topIndex, 0, visibleRows, static_cast<int>(entries.size()));  // clamp to range
@@ -1117,8 +1238,9 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
     return;
   }
 
-  const bool onBook = !entries.empty() && entries[selectorIndex].type == EntryType::BOOK;
-  const char* confirmLabel = onBook ? tr(STR_DOWNLOAD) : tr(STR_OPEN);
+  const bool onRemoteBook =
+      !entries.empty() && entries[selectorIndex].type == EntryType::BOOK && !entries[selectorIndex].onDevice;
+  const char* confirmLabel = onRemoteBook ? tr(STR_DOWNLOAD) : tr(STR_OPEN);
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 

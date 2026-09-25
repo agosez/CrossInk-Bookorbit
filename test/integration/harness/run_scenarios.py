@@ -920,6 +920,96 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
             "'On device' did not find the downloaded book inside the template's folders"
 
 
+def scenario_catalog_book_actions(verbose: bool) -> None:
+    """A catalog book's action menu, opened by holding Confirm, and what Confirm does
+    once the book is on the device. Four runs on one card, each on the first book of
+    All books: the menu's single Download entry downloads it; the on-device menu's
+    Re-download replaces it in place, keeping its reading progress; a plain Confirm
+    then opens it instead of downloading it again; and the menu's Delete removes it
+    along with its cache."""
+    manifest, _ = load_seed()
+    sim = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                       manifest["kosync"]["password"], SIM_DEVICE_ID)
+    to_all_books = [
+        "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
+        "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> All books (8th row)
+        "12050:DOWN", "12400:DOWN", "12750:DOWN",
+        "13100:DOWN",
+        "13450:CONFIRM",
+    ]
+    hold_first_book = "16000:CONFIRM:1500"  # past the 1 s threshold: opens the menu
+    # The menu logs the FileBrowserAction it returns: without that, a hold that
+    # simply downloaded on release (the old behaviour) would pass steps 1 and 2.
+    action_download, action_redownload, action_delete = 20, 21, 0
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
+
+        # 1. Not on the device: the menu holds Download only, selected by default.
+        script = ";".join(to_all_books + [hold_first_book, "18500:CONFIRM", "26500:QUIT"])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=90, verbose=verbose)
+        caches = [json.loads(p.read_text())
+                  for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
+        listings = [c for c in caches if "total" in c and "sections" not in c]
+        assert listings and listings[0]["items"], f"no book listing was cached: {caches}"
+        first = listings[0]["items"][0]
+        assert f"Book action {action_download} on book {first['id']}" in output, \
+            "holding Confirm did not offer Download from the book's menu"
+        epub = next(f for f in sim.catalog_book_detail(first["id"])["files"]
+                    if f["format"].lower() == "epub")
+        sim_path = f"/Downloads/{epub['devicePath']}"
+        book = fs.fs / sim_path.lstrip("/")
+        assert book.exists(), \
+            f"the menu's Download did not fetch {first['title']!r} to {sim_path!r}"
+        original = book.read_bytes()
+
+        # 2. On the device: Re-download (second entry) replaces the file where it is.
+        # Damage it without changing its size (the download index checks the size, so
+        # the book stays recognised as on the device), and give it reading progress.
+        damaged = bytearray(original)
+        damaged[-64:] = bytes(64)
+        book.write_bytes(bytes(damaged))
+        progress = fs.epub_cache_dir(sim_path) / "progress.bin"
+        write_progress_bin(progress, 3, 2, 10)
+        script = ";".join(to_all_books + [hold_first_book, "18500:DOWN", "18900:CONFIRM", "27000:QUIT"])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=90, verbose=verbose)
+        assert f"Book action {action_redownload} on book {first['id']}" in output, \
+            "the on-device menu's second entry is not Re-download"
+        assert book.read_bytes() == original, "Re-download did not replace the damaged file"
+        epubs = sorted(p.relative_to(fs.fs).as_posix() for p in fs.fs.rglob("*.epub*"))
+        assert epubs == [sim_path.lstrip("/")], f"Re-download left other files behind: {epubs}"
+        kept = read_progress_bin(progress)
+        assert kept and (kept["spine"], kept["page"]) == (3, 2), \
+            f"Re-download lost the book's reading progress: {kept}"
+
+        # 3. A plain Confirm opens the on-device book. The catalog persists the path and
+        # silent-restarts into the reader; synthetic input does not survive that
+        # restart, so the run ends on the timeout.
+        script = ";".join(to_all_books + ["16000:CONFIRM"])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=30, verbose=verbose)
+        assert "Downloading file" not in output, "Confirm downloaded an on-device book again"
+        state = json.loads((fs.crosspoint / "state.json").read_text())
+        assert state.get("openEpubPath") == sim_path, \
+            f"Confirm did not open {sim_path!r}: state={state}"
+        assert book.read_bytes() == original, "opening the book changed the file"
+
+        # 4. Delete (third entry), then confirm (Cancel is preselected). Boot to home
+        # again first: the reader left the book open and on the recent list, which
+        # would reshape the home screen the navigation counts on.
+        for name in ("state.json", "state.bin", "recent.json", "recent.bin"):
+            (fs.crosspoint / name).unlink(missing_ok=True)
+        script = ";".join(to_all_books + [
+            hold_first_book, "18500:DOWN", "18850:DOWN", "19200:CONFIRM",
+            "21000:DOWN", "21400:CONFIRM",
+            "23500:QUIT",
+        ])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
+        assert f"Book action {action_delete} on book {first['id']}" in output, \
+            "the on-device menu's third entry is not Delete"
+        assert not book.exists(), "Delete left the book on the card"
+        assert not fs.epub_cache_dir(sim_path).exists(), "Delete left the book's cache behind"
+
+
 def scenario_bookmark_push(verbose: bool) -> None:
     """A local bookmark (store entry + minted position record) reaches the
     server and is offered to a device that has never seen it."""
@@ -959,6 +1049,7 @@ SCENARIOS = {
     "catalog_libraries_browse": scenario_catalog_libraries_browse,
     "catalog_smart_scopes_browse": scenario_catalog_smart_scopes_browse,
     "catalog_download_naming": scenario_catalog_download_naming,
+    "catalog_book_actions": scenario_catalog_book_actions,
     "catalog_hides_non_epub": scenario_catalog_hides_non_epub,
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,

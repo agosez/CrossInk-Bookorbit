@@ -34,9 +34,9 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
     std::string subtitle;   // author, for BOOK/LOCAL_BOOK entries
     std::string sectionId;  // section id (SECTION/FACET_SECTION/LOCAL_SECTION) or facet entry id (FACET)
     std::string seriesId;   // numeric series id, for FACET entries of the series facet
-    std::string path;       // SD path, for LOCAL_BOOK entries (opened in the reader)
+    std::string path;       // SD path: LOCAL_BOOK entries, and BOOK entries already on the device
     int64_t bookId = 0;
-    bool onDevice = false;  // BOOK entries: a matching file already exists on the device
+    bool onDevice = false;  // BOOK entries: a matching file already exists on the device (at `path`)
   };
 
   explicit BookOrbitCatalogBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
@@ -58,6 +58,9 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   int selectorIndex = 0;
   NavLevel navLevel = NavLevel::Root;
   bool consumeConfirm = false;
+  // Set once a Confirm hold has opened the book action menu; input is swallowed
+  // until Confirm is up again so its release does not also activate the row.
+  bool longPressFired = false;
   std::string errorMessage;
   std::string statusMessage;
   size_t downloadProgress = 0;
@@ -97,6 +100,9 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
   void buildListScreen(UiApp::ScreenType& screen);
   void activateSelected();
+  void openLocalBook(const std::string& path);
+  void showBookActionMenu(bool ignoreInitialConfirmRelease);
+  void promptDeleteBook(size_t index);
   void navigateBack();
 
   void checkAndConnectWifi();
@@ -114,6 +120,8 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   void restoreBookListAfterDownload();
   void launchSearch();
   void performSearch(const std::string& query);
-  void downloadBook(int64_t bookId, const std::string& title);
+  // replacePath: re-download over that existing on-device file instead of the
+  // server's path; the old copy is only swapped out once the new one is complete.
+  void downloadBook(int64_t bookId, const std::string& title, const std::string& replacePath = "");
   bool preventAutoSleep() override;
 };

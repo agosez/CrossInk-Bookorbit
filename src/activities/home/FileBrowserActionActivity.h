@@ -28,6 +28,10 @@ enum class FileBrowserAction : int {
   PinBootFavorite = 16,
   UnpinBootFavorite = 17,
   Rename = 18,
+  // BookOrbit catalog book rows.
+  Open = 19,
+  Download = 20,
+  Redownload = 21,
 };
 
 class FileBrowserActionActivity final : public Activity {
