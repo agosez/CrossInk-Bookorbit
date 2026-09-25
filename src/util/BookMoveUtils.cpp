@@ -8,6 +8,7 @@
 
 #include <cstring>
 
+#include "BookOrbitDownloadIndex.h"
 #include "BookmarkStore.h"
 #include "ClippingStore.h"
 #include "CrossPointState.h"
@@ -135,6 +136,7 @@ RenameMigrationResult migrateRenamedBookState(const std::string& oldPath, const 
       }
     }
     commitMetadata();
+    BookOrbitDownloadIndex::relocate(oldPath, newPath);
     return RenameMigrationResult::KeepRenamed;
   };
 
@@ -205,6 +207,7 @@ RenameMigrationResult migrateRenamedBookState(const std::string& oldPath, const 
   }
 
   commitMetadata();
+  BookOrbitDownloadIndex::relocate(oldPath, newPath);
 
   return RenameMigrationResult::Success;
 }
@@ -243,6 +246,8 @@ bool migrateMovedEpubState(const std::string& oldPath, const std::string& newPat
     APP_STATE.openEpubPath = newPath;
     APP_STATE.saveToFile();
   }
+
+  BookOrbitDownloadIndex::relocate(oldPath, newPath);
 
   return ok;
 }
