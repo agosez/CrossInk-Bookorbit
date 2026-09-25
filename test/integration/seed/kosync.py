@@ -250,6 +250,21 @@ class AdminClient:
                          self._headers(), {"bookIds": book_ids})
         return collection_id
 
+    def ensure_smart_scope(self, name: str, icon: str, rules: list[dict]) -> int:
+        """Create a SmartScope matching ``rules``, or return the existing one by name.
+
+        ``rules`` are the server's filter rules, ANDed together. A saved scope is
+        re-filtered on every query, so the catalog's smart-scopes section is a live
+        view rather than a fixed member list like a collection's.
+        """
+        for scope in request_json("GET", self.api("/smart-scopes"), self._headers(), ok=(200,)):
+            if scope.get("name") == name:
+                return int(scope["id"])
+        created = request_json("POST", self.api("/smart-scopes"), self._headers(),
+                               {"name": name, "icon": icon, "defaultSort": [],
+                                "filter": {"type": "group", "join": "AND", "rules": rules}})
+        return int(created["id"])
+
 
 # --- kosync device API (what the firmware speaks) ------------------------------
 

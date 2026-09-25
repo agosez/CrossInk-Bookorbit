@@ -41,6 +41,9 @@ IN_COLLECTION = range(40, 45)    # members of the "Integration Shelf" collection
 SEED_EPOCH = 1_756_000_000       # fixed timestamps keep reruns idempotent
 # The account's KOReader file naming template, which catalog downloads must follow.
 NAMING_PATTERN = "Catalog/{authors:first}/{authors:first} - {title}"
+# The SmartScope the catalog's smart-scopes section is browsed through; it mirrors
+# the collection above, so both sections list the same books by different means.
+SMART_SCOPE_NAME = "Integration Scope"
 
 
 def main() -> int:
@@ -126,6 +129,16 @@ def main() -> int:
     empty_collection_id = admin.ensure_collection("Zero Shelf", "book", [])
     print(f"Collections {collection_id} (Integration Shelf) and {empty_collection_id} (Zero Shelf) in place")
 
+    # A SmartScope for the catalog browser's SmartScopes section. It selects the
+    # Integration Shelf's members by collection name -- the server's collection
+    # rule matches on name, not id -- so the scope resolves to exactly the books
+    # seeded above without depending on the metadata scan, which lags ingestion
+    # and leaves most books' authors unindexed for a while.
+    scope_id = admin.ensure_smart_scope(
+        SMART_SCOPE_NAME, "sparkles",
+        [{"type": "rule", "field": "collection", "operator": "includesAny", "value": ["Integration Shelf"]}])
+    print(f"SmartScope {scope_id} ({SMART_SCOPE_NAME}) in place")
+
     # The account's KOReader file naming template. Catalog downloads must follow it,
     # so it deliberately asks for a folder the SD card does not have yet and for a
     # name unlike the "Title - Author.epub" this firmware used to hardcode.
@@ -141,6 +154,8 @@ def main() -> int:
                      "collection": {"id": collection_id, "name": "Integration Shelf",
                                     "books": collection_books},
                      "empty_collection": {"id": empty_collection_id, "name": "Zero Shelf"},
+                     "smart_scope": {"id": scope_id, "name": SMART_SCOPE_NAME,
+                                     "books": collection_books},
                      "naming_pattern": NAMING_PATTERN}
 
     for i in WITH_PROGRESS:

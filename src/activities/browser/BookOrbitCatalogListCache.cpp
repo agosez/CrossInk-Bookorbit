@@ -79,7 +79,8 @@ void appendJsonEscaped(std::string& out, const std::string& value) {
 
 std::string booksCacheKey(const BookOrbitBookQuery& query, const int page) {
   return std::string("books|") + std::to_string(page) + "|" + query.sort + "|" + query.query + "|" + query.author +
-         "|" + query.seriesId + "|" + query.series + "|" + query.collectionId + "|" + query.libraryId;
+         "|" + query.seriesId + "|" + query.series + "|" + query.collectionId + "|" + query.smartScopeId + "|" +
+         query.libraryId;
 }
 
 std::string facetCacheKey(const std::string& sectionId, const int page) {
@@ -156,16 +157,18 @@ bool loadCatalogCounts(BookOrbitCatalogCounts& outCounts) {
   outCounts.authors = doc["authors"] | -1;
   outCounts.series = doc["series"] | -1;
   outCounts.collections = doc["collections"] | -1;
+  outCounts.smartScopes = doc["smartScopes"] | -1;
   return true;
 }
 
 void saveCatalogCounts(const BookOrbitCatalogCounts& counts) {
   std::string json;
-  json.reserve(128);
-  json +=
-      "{\"totalBooks\":" + std::to_string(counts.totalBooks) + ",\"inProgress\":" + std::to_string(counts.inProgress) +
-      ",\"libraries\":" + std::to_string(counts.libraries) + ",\"authors\":" + std::to_string(counts.authors) +
-      ",\"series\":" + std::to_string(counts.series) + ",\"collections\":" + std::to_string(counts.collections) + "}";
+  json.reserve(160);  // seven keys plus their digits, so the append chain never reallocates
+  json += "{\"totalBooks\":" + std::to_string(counts.totalBooks) +
+          ",\"inProgress\":" + std::to_string(counts.inProgress) +
+          ",\"libraries\":" + std::to_string(counts.libraries) + ",\"authors\":" + std::to_string(counts.authors) +
+          ",\"series\":" + std::to_string(counts.series) + ",\"collections\":" + std::to_string(counts.collections) +
+          ",\"smartScopes\":" + std::to_string(counts.smartScopes) + "}";
   writeJsonStringFile(cachePathForKey("counts"), json);
 }
 

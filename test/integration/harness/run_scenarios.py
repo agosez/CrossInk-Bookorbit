@@ -760,6 +760,45 @@ def scenario_catalog_libraries_browse(verbose: bool) -> None:
             f"library books total wrong: {scoped[0]['total']} != {len(books)}"
 
 
+def scenario_catalog_smart_scopes_browse(verbose: bool) -> None:
+    """SmartScopes is a browsable root section, like BookOrbit's own KOReader
+    plugin: its listing names each scope, and opening one lists the books the
+    scope resolves to (the query carries the scope id in its cache key). The
+    seeded scope selects the Integration Shelf's members, so its books are the
+    collection's -- reached through a saved server-side filter rather than
+    through collection membership."""
+    manifest, _ = load_seed()
+    scope = manifest["smart_scope"]
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])  # no open book: boots to home
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
+            "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> SmartScopes (5th row,
+            "12050:DOWN", "12400:CONFIRM",                #   after Collections)
+            "14500:CONFIRM",                              # the seeded scope -> its books
+            "17500:QUIT",
+        ])
+        run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
+
+        caches = [json.loads(p.read_text())
+                  for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
+        roots = [c for c in caches if "sections" in c]
+        assert roots and any(s["id"] == "smart-scopes" for s in roots[0]["sections"]), \
+            f"SmartScopes missing from the cached root: {roots}"
+        counts = [c for c in caches if "totalBooks" in c]
+        assert counts and counts[0]["smartScopes"] == 1, \
+            f"the root's SmartScopes count is wrong: {counts}"
+        facets = [c for c in caches if "hasNext" in c]
+        assert any(i["title"] == scope["name"] for c in facets for i in c["items"]), \
+            f"the SmartScopes listing never loaded: {facets}"
+        books = [c for c in caches if "total" in c and "sections" not in c]
+        assert books, "the scope's books were never listed"
+        listed = {b["title"] for b in books[0]["items"]}
+        expected = {Path(b["file"]).stem for b in scope["books"]}
+        assert listed == expected, f"SmartScope books mismatch: {listed} != {expected}"
+
+
 def scenario_catalog_download_naming(verbose: bool) -> None:
     """A catalog download lands where the account's KOReader file naming template
     says, not under the "Title - Author.epub" this firmware used to hardcode. The
@@ -776,9 +815,10 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
         fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
         script = ";".join([
             "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
-            "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> All books (7th row,
-            "12050:DOWN", "12400:DOWN", "12750:DOWN",     #   after the facet sections)
-            "13100:CONFIRM",
+            "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> All books (8th row,
+            "12050:DOWN", "12400:DOWN", "12750:DOWN",     #   after the facet sections,
+            "13100:DOWN",                                 #   SmartScopes among them)
+            "13450:CONFIRM",
             "16000:CONFIRM",                              # first book -> download
             "24000:QUIT",
         ])
@@ -856,6 +896,7 @@ SCENARIOS = {
     "catalog_collections_browse": scenario_catalog_collections_browse,
     "catalog_empty_listing_back": scenario_catalog_empty_listing_back,
     "catalog_libraries_browse": scenario_catalog_libraries_browse,
+    "catalog_smart_scopes_browse": scenario_catalog_smart_scopes_browse,
     "catalog_download_naming": scenario_catalog_download_naming,
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,

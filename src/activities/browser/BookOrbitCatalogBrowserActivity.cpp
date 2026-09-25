@@ -241,6 +241,7 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
     if (id == "authors") return counts.authors;
     if (id == "series") return counts.series;
     if (id == "collections") return counts.collections;
+    if (id == "smart-scopes") return counts.smartScopes;
     return -1;
   };
 
@@ -248,8 +249,8 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   listFreedForDownload = false;
   for (auto& section : sections) {
     Entry entry;
-    const bool isFacet =
-        section.id == "authors" || section.id == "series" || section.id == "collections" || section.id == "libraries";
+    const bool isFacet = section.id == "authors" || section.id == "series" || section.id == "collections" ||
+                         section.id == "libraries" || section.id == "smart-scopes";
     entry.type = isFacet ? EntryType::FACET_SECTION : EntryType::SECTION;
     entry.title = section.title;
     const int count = sectionCount(section.id);
@@ -779,10 +780,10 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       silentRestartToReader();
       break;
     case EntryType::FACET: {
-      // Mirror BookOrbit's own plugin: author filters by the entry id; series
-      // prefers the numeric seriesId and sorts by series order; collections and
-      // libraries filter by their numeric id and sort by title (the server's own
-      // booksHref for both).
+      // Mirror BookOrbit's own plugin (paramsForEntry): author filters by the
+      // entry id; series prefers the numeric seriesId and sorts by series order;
+      // collections, libraries and SmartScopes filter by their numeric id and
+      // sort by title (the server's own booksHref for all three).
       BookOrbitBookQuery query;
       if (facetSectionId == "series") {
         query.sort = "series";
@@ -797,6 +798,9 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       } else if (facetSectionId == "libraries") {
         query.sort = "title";
         query.libraryId = entry.sectionId;
+      } else if (facetSectionId == "smart-scopes") {
+        query.sort = "title";
+        query.smartScopeId = entry.sectionId;
       } else {
         query.author = entry.sectionId;
       }

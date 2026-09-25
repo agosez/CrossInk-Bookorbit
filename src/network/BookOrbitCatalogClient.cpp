@@ -145,10 +145,9 @@ bool fetchJson(const std::string& url, const JsonDocument& filter, JsonDocument&
 }
 
 // Sections we can browse: direct book listings plus the
-// authors/series/collections/libraries drill-down facets. BookOrbit's smart-scope
-// facet remains out of scope.
+// authors/series/collections/libraries/smart-scopes drill-down facets.
 constexpr const char* SUPPORTED_SECTIONS[] = {
-    "recent", "continue-reading", "all-books", "authors", "series", "collections", "libraries",
+    "recent", "continue-reading", "all-books", "authors", "series", "collections", "libraries", "smart-scopes",
 };
 
 bool isSupportedSection(const std::string& sectionId) {
@@ -193,6 +192,7 @@ bool BookOrbitCatalogClient::fetchCatalogCounts(BookOrbitCatalogCounts& outCount
   filter["browseCounts"]["authors"] = true;
   filter["browseCounts"]["series"] = true;
   filter["browseCounts"]["collections"] = true;
+  filter["browseCounts"]["smartScopes"] = true;
   JsonDocument doc;
   if (!fetchJson(url, filter, doc)) return false;
 
@@ -202,6 +202,7 @@ bool BookOrbitCatalogClient::fetchCatalogCounts(BookOrbitCatalogCounts& outCount
   outCounts.authors = doc["browseCounts"]["authors"] | -1;
   outCounts.series = doc["browseCounts"]["series"] | -1;
   outCounts.collections = doc["browseCounts"]["collections"] | -1;
+  outCounts.smartScopes = doc["browseCounts"]["smartScopes"] | -1;
   return true;
 }
 
@@ -228,6 +229,9 @@ bool BookOrbitCatalogClient::fetchBooks(const BookOrbitBookQuery& query, const i
   }
   if (!query.collectionId.empty()) {
     url += "&collectionId=" + urlEncode(query.collectionId);
+  }
+  if (!query.smartScopeId.empty()) {
+    url += "&smartScopeId=" + urlEncode(query.smartScopeId);
   }
   if (!query.libraryId.empty()) {
     url += "&libraryId=" + urlEncode(query.libraryId);

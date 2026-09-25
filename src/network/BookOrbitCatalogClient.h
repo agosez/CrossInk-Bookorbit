@@ -7,9 +7,8 @@
 
 /**
  * A top-level BookOrbit catalog section (e.g. "Recently added", "Continue reading",
- * "All books", or the authors/series/collections/libraries drill-down facets).
- * BookOrbit's smart-scope browsing facet is not supported, matching CrossInk's
- * simple browse experience for OPDS.
+ * "All books", or the authors/series/collections/libraries/smart-scopes
+ * drill-down facets).
  */
 struct BookOrbitCatalogSection {
   std::string id;
@@ -57,6 +56,7 @@ struct BookOrbitBookQuery {
   std::string seriesId;      // numeric series filter (preferred when present)
   std::string series;        // series-name filter (fallback when no seriesId)
   std::string collectionId;  // numeric collection filter (facet entry id)
+  std::string smartScopeId;  // numeric SmartScope filter (facet entry id)
   std::string libraryId;     // numeric library filter; combinable with every field above
 };
 
@@ -88,6 +88,7 @@ struct BookOrbitCatalogCounts {
   int authors = -1;
   int series = -1;
   int collections = -1;
+  int smartScopes = -1;
 };
 
 /**
@@ -101,9 +102,9 @@ struct BookOrbitCatalogCounts {
  *
  * Only a simplified subset of BookOrbit's catalog is supported: the direct book
  * listings (recently added, continue reading, all books, search), the
- * authors/series/collections/libraries drill-down facets, the root's per-section
- * counts, and downloading an EPUB file from a book's detail. Smart-scope
- * drill-down, covers, ratings and read-status editing are out of scope.
+ * authors/series/collections/libraries/smart-scopes drill-down facets, the
+ * root's per-section counts, and downloading an EPUB file from a book's detail.
+ * Covers, ratings and read-status editing are out of scope.
  */
 class BookOrbitCatalogClient {
  public:

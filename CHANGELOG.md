@@ -5,6 +5,14 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.5.1.
+
+### Added
+
+- The BookOrbit catalog now shows the server's SmartScopes section, alongside Collections, Libraries, Authors and Series. The section is badged with how many scopes you have, the way the other sections are, and an account with no scopes simply shows an empty section.
+
 ## [v1.5.1+bookorbit.2] - 2026-09-21
 
 Based on CrossInk v1.5.1.
