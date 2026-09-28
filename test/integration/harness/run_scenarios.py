@@ -306,6 +306,12 @@ class SimFs:
     def set_open_book(self, sim_path: str) -> None:
         (self.crosspoint / "state.json").write_text(json.dumps({"openEpubPath": sim_path}))
 
+    def set_asleep_in_book(self, sim_path: str) -> None:
+        """As if the device went to sleep while reading: a run started with
+        wake_into_reader resumes straight into the book, at its progress.bin."""
+        (self.crosspoint / "state.json").write_text(json.dumps({
+            "openEpubPath": sim_path, "lastSleepFromReader": True, "showBootScreen": False}))
+
     def epub_cache_dir(self, sim_path: str) -> Path:
         # Epub::cachePathForFilePath: epub_<FNV-1a 64-bit of the path, decimal>.
         h = 14695981039346656037
@@ -329,10 +335,13 @@ class SimFs:
 
 
 def run_simulator(fs: SimFs, input_script: str, choice: str, timeout_s: int,
-                  verbose: bool) -> str:
+                  verbose: bool, wake_into_reader: bool = False) -> str:
     env = os.environ.copy()
     env.setdefault("SDL_VIDEODRIVER", "dummy")
     env["CROSSPOINT_SIM_INPUT_SCRIPT"] = input_script
+    if wake_into_reader:
+        # A power-button wake: with set_asleep_in_book, boot resumes the reader.
+        env["CROSSPOINT_SIM_WAKE_REASON"] = "power"
     # Firmware-side scenario hooks (see BookOrbitSyncActivity's SIMULATOR
     # blocks): they answer the sync's screens and end the run, because
     # synthetic input does not survive the silent network reboot.
@@ -376,6 +385,7 @@ FRESH_BOOK = {
     "highlight_delete": 32,
     "highlight_delete_guard": 33,
     "bookmark_pull": 34,
+    "highlight_mint_outside_paragraph": 35,
 }
 
 # Bookmarks dedupe server-side on their converted location (paragraph precision), so a
@@ -1118,6 +1128,80 @@ def scenario_bookmark_push(verbose: bool) -> None:
         f"pushed bookmark not on server; offered={[a['pos'] for a in adds]}"
 
 
+# Chapter 5 (spine 4) of the library template, test_reader_rendering_matrix.epub: highlights
+# in its heading and first list item sit outside any <p>, the markup of issue #84 (a chapter
+# made of <blockquote> text). The heading precedes every <p>, so the reader's paragraph hint
+# for it is 0, which the resolver used to reject outright: such a highlight never synced. The
+# note <p> is the control, whose position must stay exactly what the <p>-only resolver minted.
+OUTSIDE_PARAGRAPH_SPINE = 4
+OUTSIDE_PARAGRAPH_HIGHLIGHTS = [
+    {"text": "Blocks and Edge Cases", "paragraph": 0, "node": "h1[1]"},
+    {"text": "Ordered list item with enough text to wrap and check number alignment.",
+     "paragraph": 1, "node": "ol[1]/li[1]"},
+    {"text": "PASS when block-level spacing is stable and no block overlaps the next one.",
+     "paragraph": 1, "node": "p[1]"},
+]
+
+
+def scenario_highlight_mint_outside_paragraph(verbose: bool) -> None:
+    """Highlights the device saved but never positioned (what firmware before the #84
+    fix left on the card: a clipping and no position record) get minted by the reader
+    and reach the server at their precise text node, heading and list item included.
+
+    The reader positions one highlight per visit to a chapter, so the card goes through
+    one wake into the chapter per highlight; the last wake also syncs. Clippings are
+    stored in the order they must be minted, and a highlight the resolver cannot
+    position is retried first on every visit, so with the old resolver the heading
+    starves the other two and the scenario fails on all three."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["highlight_mint_outside_paragraph"]]
+    fragment = f"/body/DocFragment[{OUTSIDE_PARAGRAPH_SPINE + 1}]/body"
+    expected = {h["text"]: (f"{fragment}/{h['node']}/text()[1].0",
+                            f"{fragment}/{h['node']}/text()[1].{len(h['text'])}")
+                for h in OUTSIDE_PARAGRAPH_HIGHLIGHTS}
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        write_progress_bin(fs.epub_cache_dir(sim_path) / "progress.bin", OUTSIDE_PARAGRAPH_SPINE, 0, 1)
+        write_clipping_store(fs.clippings_store(book["hash"]), book.get("title", ""),
+                             book.get("author", ""), sim_path,
+                             [{"spine": OUTSIDE_PARAGRAPH_SPINE, "paragraph": h["paragraph"],
+                               "timestamp": 5000 + i, "text": h["text"], "chapter": "Blocks and Edge Cases"}
+                              for i, h in enumerate(OUTSIDE_PARAGRAPH_HIGHLIGHTS)])
+        store = fs.state_dir(book["hash"]) / ANNOTATION_STORE
+
+        for visit in range(len(OUTSIDE_PARAGRAPH_HIGHLIGHTS)):
+            last = visit == len(OUTSIDE_PARAGRAPH_HIGHLIGHTS) - 1
+            fs.set_asleep_in_book(sim_path)
+            # A short POWER press in the reader starts BookOrbit Sync, which uploads (and
+            # silently reboots into the sync); earlier visits only let the reader mint.
+            output = run_simulator(fs, input_script="8000:POWER:120" if last else "8000:QUIT",
+                                   choice="upload", timeout_s=90 if last else 30, verbose=verbose,
+                                   wake_into_reader=True)
+            assert "Entering activity: EpubReader" in output, f"visit {visit + 1} never opened the reader"
+            _, records = read_boa_store(store)
+            assert len(records) == visit + 1, \
+                f"visit {visit + 1} left {len(records)} positioned highlights: {records}"
+        assert "sync scenario finished" in output, "sync never reached its end marker"
+
+        _, records = read_boa_store(store)
+        by_timestamp = {r["timestamp"]: r for r in records}
+        for i, h in enumerate(OUTSIDE_PARAGRAPH_HIGHLIGHTS):
+            record = by_timestamp.get(5000 + i)
+            assert record, f"no position record for \"{h['text']}\": {records}"
+            assert (record["pos0"], record["pos1"]) == expected[h["text"]], \
+                f"\"{h['text']}\" positioned at {record['pos0']} .. {record['pos1']}"
+        clipped = {c["text"] for c in read_clipping_store(fs.clippings_store(book["hash"]))}
+        assert clipped == set(expected), f"clipping texts changed: {clipped}"
+
+    adds = annotation_adds(verify_device(manifest, "hlmint"), book["hash"])
+    for text, (pos0, pos1) in expected.items():
+        mine = [a for a in adds if a["text"] == text]
+        assert mine, f"\"{text}\" not on server; offered texts={[a['text'] for a in adds]}"
+        assert (mine[-1]["pos0"], mine[-1]["pos1"]) == (pos0, pos1), \
+            f"\"{text}\" stored at {mine[-1]['pos0']} .. {mine[-1]['pos1']} on the server"
+
+
 SCENARIOS = {
     "catalog_collections_browse": scenario_catalog_collections_browse,
     "catalog_empty_listing_back": scenario_catalog_empty_listing_back,
@@ -1132,6 +1216,7 @@ SCENARIOS = {
     "sleep_sync_cancel": scenario_sleep_sync_cancel,
     "highlight_pull": scenario_highlight_pull,
     "highlight_push": scenario_highlight_push,
+    "highlight_mint_outside_paragraph": scenario_highlight_mint_outside_paragraph,
     "highlight_delete_propagates": scenario_highlight_delete_propagates,
     "highlight_delete_guard": scenario_highlight_delete_guard,
     "bookmark_pull": scenario_bookmark_pull,

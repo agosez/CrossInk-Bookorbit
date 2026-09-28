@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "XPathBuildCommon.h"
@@ -36,13 +37,28 @@ size_t utf8SpaceLen(const unsigned char* p, const unsigned char* end) {
   return 0;
 }
 
+// The elements the server's chapter text index (BookOrbit's ChapterTextIndex) treats as block
+// boundaries. Text anywhere in <body> is highlightable -- a chapter can be all <blockquote> or
+// <div> with no <p> at all -- so the boundaries must be the server's, not just <p>.
+bool isBlockTag(const std::string_view name) {
+  static constexpr std::string_view BLOCK_TAGS[] = {
+      "address",  "article",    "aside",  "blockquote", "body", "caption", "dd", "div", "dl",  "dt",
+      "fieldset", "figcaption", "figure", "footer",     "form", "h1",      "h2", "h3",  "h4",  "h5",
+      "h6",       "header",     "hr",     "li",         "main", "nav",     "ol", "p",   "pre", "section",
+      "table",    "tbody",      "td",     "tfoot",      "th",   "thead",   "tr", "ul"};
+  for (const auto tag : BLOCK_TAGS) {
+    if (equalsTag(name, tag)) return true;
+  }
+  return false;
+}
+
 /**
  * Streams a chapter through the crengine-style whitespace collapse and hands every visible
- * codepoint of <p> content to a consumer, with the position data an xpointer needs.
+ * codepoint of its body text to a consumer, with the position data an xpointer needs.
  *
  * Both resolution passes (locate, then extract) must see byte-identical streams, so the
  * collapse lives here once: whitespace runs become one space, leading whitespace after a
- * block boundary drops, inline elements do not interrupt the flow, and paragraph breaks
+ * block boundary drops, inline elements do not interrupt the flow, and block boundaries
  * arrive as a separator that belongs to no node -- the exact model the server resolves
  * xpointer offsets against. Soft hyphens pass through as ordinary codepoints (the server
  * keeps them too); consumers that must ignore them do so themselves.
@@ -57,16 +73,16 @@ class CollapsedParagraphStream final : public Print {
   class Consumer {
    public:
     virtual ~Consumer() = default;
-    // One collapsed codepoint of paragraph text. `path`/`textNodeIndex`/`offsetInNode` locate
-    // it for buildTextXPointer; `paragraphOrdinal` is the running <p> count. Return false to
-    // stop the parse.
+    // One collapsed codepoint of body text. `path`/`textNodeIndex`/`offsetInNode` locate it
+    // for buildTextXPointer; `paragraphOrdinal` is the running <p> count, counted the way the
+    // layout counts its paragraph hint. Return false to stop the parse.
     virtual bool onCodepoint(const char* bytes, size_t byteLength, const std::vector<PathSegment>& path,
                              int textNodeIndex, uint16_t offsetInNode, int paragraphOrdinal) = 0;
-    // A paragraph boundary between two visible codepoints (belongs to no node).
+    // A block boundary between two visible codepoints (belongs to no node).
     virtual void onParagraphBreak() = 0;
   };
 
-  CollapsedParagraphStream(Consumer& consumer, const char* targetTag) : consumer(consumer), targetTag(targetTag) {
+  explicit CollapsedParagraphStream(Consumer& consumer) : consumer(consumer) {
     parser = XML_ParserCreate(nullptr);
     if (!parser) {
       LOG_ERR("KOX", "Failed to create XML parser");
@@ -138,14 +154,8 @@ class CollapsedParagraphStream final : public Print {
     textNodeCounts.push_back(0);
     atNodeBoundary = true;
 
-    if (name == targetTag) {
-      paragraphOrdinal++;
-      inParagraphDepth = depth;
-      inParagraph = true;
-      atBlockBoundary = true;
-      lastWasSpace = false;
-      if (emittedAnything) pendingParagraphBreak = true;
-    }
+    if (equalsTag(name, "p")) paragraphOrdinal++;
+    if (isBlockTag(name)) onBlockBoundary();
     if (nonVisibleDepth > 0 || isNonVisibleTextTag(name)) nonVisibleDepth++;
     depth++;
   }
@@ -165,17 +175,20 @@ class CollapsedParagraphStream final : public Print {
       path.clear();
       return;
     }
-    if (inParagraph && depth == inParagraphDepth && name == targetTag) {
-      inParagraph = false;
-    }
+    if (isBlockTag(name)) onBlockBoundary();
     if (!path.empty()) path.pop_back();
     if (!parentStates.empty()) parentStates.pop_back();
     if (!textNodeCounts.empty()) textNodeCounts.pop_back();
     atNodeBoundary = true;
   }
 
+  void onBlockBoundary() {
+    atBlockBoundary = true;
+    if (emittedAnything) pendingParagraphBreak = true;
+  }
+
   void onCharacterData(const XML_Char* data, const int len) {
-    if (!inParagraph || nonVisibleDepth > 0 || len <= 0 || textNodeCounts.empty()) {
+    if (!insideBody || nonVisibleDepth > 0 || len <= 0 || textNodeCounts.empty()) {
       return;
     }
     if (atNodeBoundary) {
@@ -221,11 +234,9 @@ class CollapsedParagraphStream final : public Print {
 
   Consumer& consumer;
   XML_Parser parser = nullptr;
-  const char* targetTag;
   bool parseOk = true;
   bool insideBody = false;
   bool stopped = false;
-  bool inParagraph = false;
   bool atNodeBoundary = true;
   bool atBlockBoundary = true;
   bool lastWasSpace = false;
@@ -233,7 +244,6 @@ class CollapsedParagraphStream final : public Print {
   bool emittedAnything = false;
   int depth = 0;
   int bodyDepth = -1;
-  int inParagraphDepth = -1;
   int nonVisibleDepth = 0;
   int paragraphOrdinal = 0;
   uint16_t emittedInNode = 0;
@@ -385,8 +395,10 @@ bool HighlightPositionResolver::findHighlightXPointers(const std::shared_ptr<Epu
   outPos0.clear();
   outPos1.clear();
   if (outSourceText) outSourceText->clear();
-  if (!epub || spineIndex < 0 || spineIndex >= epub->getSpineItemsCount() || paragraphIndex == 0 ||
-      paragraphIndex == UINT16_MAX || highlightText.empty()) {
+  // paragraphIndex 0 is a valid hint: it is the layout's <p> count, still 0 in a chapter that
+  // has no <p> before the highlight (or none at all).
+  if (!epub || spineIndex < 0 || spineIndex >= epub->getSpineItemsCount() || paragraphIndex == UINT16_MAX ||
+      highlightText.empty()) {
     return false;
   }
 
@@ -422,7 +434,7 @@ bool HighlightPositionResolver::findHighlightXPointers(const std::shared_ptr<Epu
 
   HighlightLocatePass locate(needle);
   {
-    CollapsedParagraphStream stream(locate, "p");
+    CollapsedParagraphStream stream(locate);
     if (!stream.ok() || !epub->readItemContentsToStream(href, stream, 1024) || !stream.finish()) {
       return false;
     }
@@ -446,7 +458,7 @@ bool HighlightPositionResolver::findHighlightXPointers(const std::shared_ptr<Epu
   // clipping store caps what it keeps anyway.
   HighlightExtractPass extract(best->startOrdinal, best->endOrdinal, spineIndex, highlightText.size() + 512);
   {
-    CollapsedParagraphStream stream(extract, "p");
+    CollapsedParagraphStream stream(extract);
     if (!stream.ok() || !epub->readItemContentsToStream(href, stream, 1024)) {
       return false;
     }

@@ -1,6 +1,8 @@
 add_executable(KOReaderXPathResolverTest
   KOReaderXPathResolverTest.cpp
+  HighlightPositionResolverTest.cpp
   ${REPO_ROOT}/lib/EpubPosition/ChapterXPathResolver.cpp
+  ${REPO_ROOT}/lib/EpubPosition/HighlightPositionResolver.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
   ${REPO_ROOT}/lib/expat/xmlparse.c
   ${REPO_ROOT}/lib/expat/xmlrole.c
