@@ -430,10 +430,9 @@ inline uint8_t shortcutRawValue(const ShortcutOptionCatalog catalog, const Cross
           return Chord::CHORD_TOGGLE_TOUCHSCREEN;
         case Action::QUICK_LOCK:
           return Chord::CHORD_QUICK_LOCK;
-        case Action::TOGGLE_TILT_PAGE_TURN:
-        // No chord value was ever persisted for this fork's action, so it stays
-        // off the Power+Up list rather than claiming a number upstream may use.
         case Action::BOOKORBIT_SYNC:
+          return Chord::CHORD_BOOKORBIT_SYNC;
+        case Action::TOGGLE_TILT_PAGE_TURN:
           return SHORTCUT_OPTION_UNAVAILABLE;
         default:
           return SHORTCUT_OPTION_UNAVAILABLE;

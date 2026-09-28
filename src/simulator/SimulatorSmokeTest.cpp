@@ -310,6 +310,10 @@ class SimulatorSmokeTest {
                   CrossPointSettings::CHORD_PREVIOUS_PAGE) == chordSetting->enumRawValues.end()) {
       fail("Previous Page was removed by an unrelated power-button action ID");
     }
+    if (std::find(chordSetting->enumRawValues.begin(), chordSetting->enumRawValues.end(),
+                  CrossPointSettings::CHORD_BOOKORBIT_SYNC) == chordSetting->enumRawValues.end()) {
+      fail("BookOrbit Sync is missing from the Power + Up chord setting");
+    }
     if (!gpio.hasTouch() &&
         std::find(chordSetting->enumRawValues.begin(), chordSetting->enumRawValues.end(),
                   CrossPointSettings::CHORD_TOGGLE_TOUCHSCREEN) != chordSetting->enumRawValues.end()) {

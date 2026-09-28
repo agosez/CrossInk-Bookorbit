@@ -308,6 +308,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     CHORD_TOGGLE_TOUCHSCREEN = 28,
     CHORD_PREVIOUS_PAGE = 29,
     CHORD_NEARBY_POSITION_SYNC = 30,
+    // This fork's own action, kept last like BOOKORBIT_SYNC above. If upstream
+    // appends a chord action, move this one past it: a chord set to BookOrbit
+    // Sync must then be picked again once.
+    CHORD_BOOKORBIT_SYNC = 31,
     POWER_CHORD_ACTION_COUNT
   };
 

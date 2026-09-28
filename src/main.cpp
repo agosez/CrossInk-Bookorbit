@@ -843,6 +843,8 @@ CrossPointSettings::SHORT_PWRBTN chordPowerAction(const ButtonShortcutController
       return Power::SYNC_PROGRESS;
     case Chord::NearbyPositionSync:
       return Power::NEARBY_POSITION_SYNC;
+    case Chord::BookOrbitSync:
+      return Power::BOOKORBIT_SYNC;
     case Chord::FileTransfer:
       return Power::FILE_TRANSFER;
     case Chord::CalibreWireless:

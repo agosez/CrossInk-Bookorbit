@@ -5,6 +5,14 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.6.0.
+
+### Added
+
+- BookOrbit Sync can now be assigned to the Power + Up combo, and to the Up + Down combo on devices that have it, like the other sync actions. It was only offered for the power button's short and long presses ([#85](https://github.com/agosez/CrossInk-Bookorbit/issues/85)).
+
 ## [v1.6.0+bookorbit.1] - 2026-09-25
 
 Based on CrossInk v1.6.0.

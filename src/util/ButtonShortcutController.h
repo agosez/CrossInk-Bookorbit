@@ -39,6 +39,7 @@ class ButtonShortcutController {
     ToggleTouchscreen = 28,
     PreviousPage = 29,
     NearbyPositionSync = 30,
+    BookOrbitSync = 31,
   };
 
   enum class Event : uint8_t { None, QuickLockChanged, Screenshot, PageTurn, ConfiguredAction, TouchscreenEscapeHatch };
