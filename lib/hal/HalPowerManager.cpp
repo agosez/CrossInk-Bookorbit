@@ -97,7 +97,9 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio, const bool keepPowerLatched)
   // Tear down HWCDC so the host sees a clean disconnect and the peripheral
   // doesn't hold power domains that interfere with USB-powered GPIO wake.
   // logSerial is the raw HWCDC reference; Serial is the MySerialImpl proxy
-  // (which doesn't expose end()).
+  // (which doesn't expose end()). end() drops whatever is still queued, so send the
+  // last lines first; flush() gives up at once when no host is attached.
+  logSerial.flush();
   logSerial.end();
 #endif
 
