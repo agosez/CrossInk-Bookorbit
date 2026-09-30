@@ -33,7 +33,8 @@ class BookOrbitSyncActivity final : public Activity {
                                  int currentSpineIndex, int currentPage, int totalPagesInSpine,
                                  KOReaderPosition localKoPos, std::string localChapterName,
                                  std::optional<uint16_t> currentParagraphIndex = std::nullopt, bool networkBoot = false,
-                                 uint8_t readerOrientation = CrossPointSettings::ORIENTATION_COUNT)
+                                 uint8_t readerOrientation = CrossPointSettings::ORIENTATION_COUNT,
+                                 bool sleepSync = false)
       : Activity("BookOrbitSync", renderer, mappedInput),
         epubPath(epubPath),
         currentSpineIndex(currentSpineIndex),
@@ -43,6 +44,7 @@ class BookOrbitSyncActivity final : public Activity {
         localChapterName(std::move(localChapterName)),
         networkBoot(networkBoot),
         readerOrientation(readerOrientation),
+        sleepSync(sleepSync),
         remoteProgress{},
         remotePosition{},
         localProgress(std::move(localKoPos)) {}
@@ -54,6 +56,8 @@ class BookOrbitSyncActivity final : public Activity {
   bool preventAutoSleep() override { return state == CONNECTING || state == SYNCING; }
   bool isReaderActivity() const override { return true; }
   bool allowPowerAsConfirmInReaderMode() const override { return true; }
+  // No gesture may act on a device the user sees asleep.
+  bool blocksGlobalInput() const override { return sleepSync; }
 
  private:
   enum State {
@@ -84,6 +88,16 @@ class BookOrbitSyncActivity final : public Activity {
   // this activity gets control. Keep that one value through the lightweight network
   // reboot so every sync screen matches the book. (Mirrors KOReaderSyncActivity.)
   uint8_t readerOrientation = CrossPointSettings::ORIENTATION_COUNT;
+
+  // The sync that runs behind the sleep screen (NetworkBootTarget::BOOKORBIT_SLEEP_SYNC).
+  // Nothing is drawn, so the sleep screen stays on the panel; the whole attempt runs
+  // inside the first loop() and ends in deep sleep. With nobody there to answer the choice
+  // screen, progress follows smart sync's rules and is left alone when they cannot
+  // decide. Power is the only input: the press that would wake the device cancels it.
+  bool sleepSync = false;
+  void runSleepSync();
+  // True once the sync has been abandoned for a wake press; the device is rebooting.
+  bool stopIfWoken();
 
   State state = WIFI_SELECTION;
   std::string statusMessage;

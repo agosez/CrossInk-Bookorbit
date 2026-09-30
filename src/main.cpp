@@ -93,6 +93,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
+#include "WifiCredentialStore.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
@@ -125,6 +126,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "util/Dictionary.h"
 #include "util/DictionaryRegistry.h"
 #include "util/FrontlightSchedule.h"
+#include "util/PowerButtonWakeWatcher.h"
 #include "util/ScreenshotUtil.h"
 #include "util/SleepWakePolicy.h"
 
@@ -350,6 +352,9 @@ constexpr uint32_t SILENT_REBOOT_MAGIC = 0xC1EAB007;
 constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
 constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
 constexpr uint32_t SILENT_REBOOT_READER_CLEAN_IMAGE_BASE = 1U << 0;
+// Written in place of SILENT_REBOOT_MAGIC by wakeFromSleepSync(): the next boot is the
+// power-button wake the sleep sync gave way to, not a silent restart.
+constexpr uint32_t SLEEP_SYNC_WAKE_MAGIC = 0xC1EAB027;
 constexpr uint32_t SILENT_READER_PAGE_BUILD_MAGIC = 0xC1EAB017;
 constexpr uint32_t SILENT_READER_PAGE_BUILD_AUTO_TURN = 1U << 0;
 constexpr uint32_t NETWORK_RENDER_TASK_STACK_BYTES = 8192;
@@ -367,6 +372,11 @@ using BootResume = SleepWakePolicy::Resume;
 // device back up against the user's sleep gesture. Never cleared:
 // startDeepSleep() does not return, so a set latch only ends at the wakeup reset.
 static bool deepSleepInProgress = false;
+
+// The boot that runs the BookOrbit sleep sync (NetworkBootTarget::BOOKORBIT_SLEEP_SYNC).
+// It must end in sleep, so it never starts another sleep sync.
+static bool sleepSyncBoot = false;
+static PowerButtonWakeWatcher sleepSyncWakeWatcher;
 
 static void restartWithSilentToken() {
 #ifdef SIMULATOR
@@ -525,8 +535,9 @@ bool startGlobalSyncProgress(const bool networkBootReady, const uint8_t readerOr
 // sync activities themselves, so BookOrbit support cannot regress the KOReader path).
 // networkBootReady mirrors the KOReader flow: false is a live request, which restarts
 // into a minimal network boot like KOReader does; true is the resume after that
-// restart. The payload is the BOOKORBIT_SYNC restart payload.
-bool startGlobalBookOrbitSync(const bool networkBootReady, const uint32_t payload) {
+// restart. The payload is the BOOKORBIT_SYNC restart payload. sleepSync starts the
+// sync that runs behind the sleep screen; it always comes from its own network boot.
+bool startGlobalBookOrbitSync(const bool networkBootReady, const uint32_t payload, const bool sleepSync) {
   if (!BOOKORBIT_STORE.hasCredentials()) {
     if (networkBootReady) return false;
     activityManager.pushActivity(std::make_unique<BookOrbitSettingsActivity>(renderer, mappedInputManager));
@@ -552,6 +563,7 @@ bool startGlobalBookOrbitSync(const bool networkBootReady, const uint32_t payloa
   auto epub = std::make_shared<Epub>(epubPath, "/.crosspoint");
   if (!epub->load(true, SETTINGS.embeddedStyle == 0)) {
     LOG_ERR("MAIN", "Failed to load EPUB for global BookOrbit sync: %s", epubPath.c_str());
+    if (sleepSync) return false;
     activityManager.pushActivity(std::make_unique<BookOrbitSettingsActivity>(renderer, mappedInputManager));
     return true;
   }
@@ -599,7 +611,7 @@ bool startGlobalBookOrbitSync(const bool networkBootReady, const uint32_t payloa
 
   auto syncActivity = makeUniqueNoThrow<BookOrbitSyncActivity>(
       renderer, mappedInputManager, epubPath, spineIndex, pageNumber, totalPagesInSpine, std::move(localKoPos),
-      std::move(localChapterName), paragraphIndex, networkBootReady, readerOrientation);
+      std::move(localChapterName), paragraphIndex, networkBootReady, readerOrientation, sleepSync);
   if (!syncActivity) {
     LOG_ERR("MAIN", "OOM: BookOrbit sync activity (free=%u maxAlloc=%u)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
     return false;
@@ -1209,10 +1221,104 @@ void mirrorWakeShortPressToNvs() {
 #endif
 }
 
+// Everything that follows the sleep screen and the files written for it. Shared by an
+// ordinary sleep and by the one the BookOrbit sleep sync postponed.
+static void powerDownForDeepSleep() {
+  // Last chance to sample: startDeepSleep() cuts the SD rail on X3, so nothing
+  // can be written again until the next wake.
+  BatteryDiagnosticLog::record(BatteryDiagnosticLog::Event::Sleep, BoardConfig::ACTIVE.name);
+  // All sleep-time file writes are complete. Stop SDMMC before the power path
+  // cuts peripheral rails and isolates the bus pads; SPI boards are a no-op.
+  Storage.shutdown();
+
+  putTiltSensorToSleepForDeepSleep();
+  display.deepSleep();
+  mirrorWakeShortPressToNvs();
+  LOG_DBG("MAIN", "Entering deep sleep");
+
+  powerManager.startDeepSleep(gpio, SETTINGS.keepClockInSleep != 0);
+}
+
+// Below this, a Wi-Fi session risks browning the device out in the middle of an SD write.
+constexpr uint16_t SLEEP_SYNC_MIN_BATTERY_PERCENT = 10;
+// The sleep sync's wake press when a short press wakes the device: just long enough to
+// debounce, as the watcher samples every 10 ms. Otherwise it takes the device's long press.
+constexpr unsigned long SLEEP_SYNC_SHORT_WAKE_PRESS_MS = 20;
+
+static bool shouldSyncBookOrbitBeforeSleep() {
+  if (sleepSyncBoot) return false;
+  if (!BOOKORBIT_STORE.getSyncOnSleep() || !BOOKORBIT_STORE.hasCredentials()) return false;
+  const std::string& bookPath = APP_STATE.openEpubPath;
+  if (bookPath.empty() || !FsHelpers::hasEpubExtension(bookPath) || !Storage.exists(bookPath.c_str())) return false;
+  if (WIFI_STORE.getCredentialCount() == 0) return false;
+  const uint16_t battery = powerManager.getBatteryPercentage();
+  if (battery < SLEEP_SYNC_MIN_BATTERY_PERCENT && !gpio.isUsbConnected()) {
+    LOG_INF("SLP", "Battery at %u%%: no BookOrbit sync before this sleep", static_cast<unsigned>(battery));
+    return false;
+  }
+  return true;
+}
+
+// Hands the rest of this sleep to a minimal network boot: the session that is ending
+// fragmented the heap, and Wi-Fi plus TLS need what a fresh boot leaves (see
+// silentRestartToNetwork()). Unlike the other network restarts it draws no popup, so
+// the sleep screen stays on the panel for the whole sync.
+static void restartIntoSleepSync(const bool powerHeldAtSleep) {
+  LOG_INF("SLP", "Restarting into the BookOrbit sleep sync");
+  // The light goes out with the sleep screen, not once the sync is over.
+  Frontlight.setOn(false);
+  clearSilentRestartReaderPageBuild();
+  silentRebootTarget = static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SLEEP_SYNC);
+  silentRebootPayload = powerHeldAtSleep ? BOOKORBIT_SLEEP_SYNC_PAYLOAD_POWER_HELD : 0;
+  silentRebootMagic = SILENT_REBOOT_MAGIC;
+  restartWithSilentToken();
+}
+
+static bool startBookOrbitSleepSync(const uint32_t payload) {
+  // The wake press is the one the sleeping device would have answered: any press when
+  // a short press wakes it, the long press that also unlocks Quick Lock otherwise.
+  const bool shortPressWakes = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP;
+  const unsigned long holdMs =
+      shortPressWakes ? SLEEP_SYNC_SHORT_WAKE_PRESS_MS : SETTINGS.getPowerButtonLongPressDuration();
+  // Started before Wi-Fi comes up, so its small stack is not carved out of the heap the
+  // TLS session needs. The sync blocks loop() inside Wi-Fi and TLS calls for seconds at a
+  // time, so the button handling there cannot see a press made meanwhile: this task
+  // samples it and remembers the press until the sync reaches a step it can stop at.
+  if (!sleepSyncWakeWatcher.start(holdMs, (payload & BOOKORBIT_SLEEP_SYNC_PAYLOAD_POWER_HELD) != 0)) return false;
+  return startGlobalBookOrbitSync(true, 0, true);
+}
+
+bool sleepSyncWakeRequested() { return sleepSyncWakeWatcher.wakeRequested(); }
+
+void wakeFromSleepSync() {
+  sleepSyncWakeWatcher.stop();
+  LOG_INF("SLP", "Woken during the BookOrbit sleep sync; restarting as a power-button wake");
+  clearSilentRestartReaderPageBuild();
+  silentRebootTarget = 0;
+  silentRebootPayload = 0;
+  silentRebootMagic = SLEEP_SYNC_WAKE_MAGIC;
+  restartWithSilentToken();
+}
+
+void completeSleepAfterSleepSync() {
+  // A press that landed during the last step still wakes the device.
+  if (sleepSyncWakeWatcher.wakeRequested()) wakeFromSleepSync();
+  sleepSyncWakeWatcher.stop();
+
+  HalPowerManager::Lock powerLock;
+  deepSleepInProgress = true;
+  // NTP may have just corrected the clock; the checkpoint has to hold the time the
+  // device actually went to sleep at (see WallClock).
+  WallClock::checkpoint();
+  powerDownForDeepSleep();
+}
+
 // Enter deep sleep mode
 void enterDeepSleep(bool fromTimeout) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
   APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
+  // A long-press sleep fires while Power is still down (see BOOKORBIT_SLEEP_SYNC_PAYLOAD_POWER_HELD).
+  const bool powerHeldAtSleep = gpio.isPressed(HalGPIO::BTN_POWER);
 
   const bool isQuickResumeSleep =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
@@ -1251,19 +1357,14 @@ void enterDeepSleep(bool fromTimeout) {
     }
   }
 
-  // Last chance to sample: startDeepSleep() cuts the SD rail on X3, so nothing
-  // can be written again until the next wake.
-  BatteryDiagnosticLog::record(BatteryDiagnosticLog::Event::Sleep, BoardConfig::ACTIVE.name);
-  // All sleep-time file writes are complete. Stop SDMMC before the power path
-  // cuts peripheral rails and isolates the bus pads; SPI boards are a no-op.
-  Storage.shutdown();
+  // With Sync on Sleep on, the sleep screen is up and the frame and files the wake needs
+  // are written: the device now syncs behind that screen, then comes back to sleep
+  // through completeSleepAfterSleepSync().
+  if (shouldSyncBookOrbitBeforeSleep()) {
+    restartIntoSleepSync(powerHeldAtSleep);
+  }
 
-  putTiltSensorToSleepForDeepSleep();
-  display.deepSleep();
-  mirrorWakeShortPressToNvs();
-  LOG_DBG("MAIN", "Entering deep sleep");
-
-  powerManager.startDeepSleep(gpio, SETTINGS.keepClockInSleep != 0);
+  powerDownForDeepSleep();
 }
 
 void setupDisplayAndFonts(const bool seamless, const bool loadReaderResources, const bool useReaderRenderStack) {
@@ -1373,6 +1474,8 @@ void setup() {
   // Read-and-clear so a panic later in setup() doesn't loop into silent reboot.
   // Validate the target too — RTC_NOINIT memory is uninitialized on cold boot.
   const bool isSilentReboot = (silentRebootMagic == SILENT_REBOOT_MAGIC);
+  // Power was pressed during the BookOrbit sleep sync: this boot is the wake it stands for.
+  const bool isSleepSyncWake = (silentRebootMagic == SLEEP_SYNC_WAKE_MAGIC);
   const bool isValidSilentTarget =
       silentRebootTarget <= SILENT_REBOOT_TARGET_READER || isNetworkBootTargetValue(silentRebootTarget);
   const uint32_t snapshotTarget = (isSilentReboot && isValidSilentTarget) ? silentRebootTarget : 0;
@@ -1380,6 +1483,7 @@ void setup() {
   const bool cleanImageBaseOnEntry =
       snapshotTarget == SILENT_REBOOT_TARGET_READER && (snapshotPayload & SILENT_REBOOT_READER_CLEAN_IMAGE_BASE) != 0;
   const bool isNetworkResume = snapshotTarget >= static_cast<uint32_t>(NetworkBootTarget::OTA);
+  sleepSyncBoot = snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SLEEP_SYNC);
   // KOReader Sync, OPDS, File Transfer, and Manage Fonts can render their
   // parent screens while a deferred Wi-Fi child is completing. On S3 devices,
   // keep the reader-sized render stack without loading the rest of the reader
@@ -1406,14 +1510,16 @@ void setup() {
   gpio.setSharedConfirmPowerShortPressEmitsPower(true);
   powerManager.begin();
 
-  const auto wakeupReason = gpio.getWakeupReason();
+  const auto wakeupReason = isSleepSyncWake ? HalGPIO::WakeupReason::PowerButton : gpio.getWakeupReason();
 #ifndef SIMULATOR
   const bool shortPressWakes = readWakeShortPressFromNvs();
   const bool keepLatchInSleep = readWakeKeepLatchFromNvs();
   // Only a wake from a latched deep sleep skipped the slow cold-boot path; a
   // POWERON boot with the option on already outlasted a tap.
   const unsigned long minHoldMs = (keepLatchInSleep && rawResetReason == ESP_RST_DEEPSLEEP) ? LATCHED_WAKE_HOLD_MS : 0;
-  if (wakeupReason == HalGPIO::WakeupReason::PowerButton && !gpio.verifyPowerButtonWakeup(shortPressWakes, minHoldMs)) {
+  // The sleep sync's watcher has already judged a sleep-sync wake's press.
+  if (wakeupReason == HalGPIO::WakeupReason::PowerButton && !isSleepSyncWake &&
+      !gpio.verifyPowerButtonWakeup(shortPressWakes, minHoldMs)) {
     LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
     powerManager.startDeepSleep(gpio, keepLatchInSleep);
   }
@@ -1489,7 +1595,7 @@ void setup() {
   mirrorWakeShortPressToNvs();
   // Needs SETTINGS for the clock's UTC offset, so it cannot run any earlier.
   BatteryDiagnosticLog::record(BatteryDiagnosticLog::Event::Wake, BoardConfig::ACTIVE.name,
-                               wakeupRouteName(wakeupReason));
+                               sleepSyncBoot ? "SleepSync" : wakeupRouteName(wakeupReason));
   const bool isSleepWake = wakeupReason == HalGPIO::WakeupReason::PowerButton;
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
   // Normal boot store deferral adapted from Sichroteph/YACP commit
@@ -1505,6 +1611,7 @@ void setup() {
       KOREADER_STORE.loadFromFile();
     }
     if (snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SYNC) ||
+        snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SLEEP_SYNC) ||
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::FILE_TRANSFER)) {
       BOOKORBIT_STORE.loadFromFile();
     }
@@ -1532,6 +1639,8 @@ void setup() {
       restoreLightOn = false;
     }
   }
+  // The sleep sync runs while the device looks asleep; the light went out with it.
+  if (sleepSyncBoot) restoreLightOn = false;
   Frontlight.begin(SETTINGS.frontlightBrightness, SETTINGS.frontlightWarmth, restoreLightOn);
 
   if (recoveryFirmwareMode) {
@@ -1673,6 +1782,9 @@ void setup() {
       case NetworkBootTarget::BOOKORBIT_SYNC:
         launched = startGlobalBookOrbitSync(true, snapshotPayload);
         break;
+      case NetworkBootTarget::BOOKORBIT_SLEEP_SYNC:
+        launched = startBookOrbitSleepSync(snapshotPayload);
+        break;
       case NetworkBootTarget::KOREADER_AUTH: {
 #if CROSSINK_APP_CAP_KOREADER_SYNC
         const auto mode =
@@ -1703,7 +1815,11 @@ void setup() {
         break;
       }
     }
-    if (!launched) {
+    if (!launched && sleepSyncBoot) {
+      // Nothing could be synced after all: complete the sleep it was postponing.
+      LOG_ERR("MAIN", "BookOrbit sleep sync could not start; sleeping");
+      completeSleepAfterSleepSync();
+    } else if (!launched) {
       LOG_ERR("MAIN", "Minimal network boot target failed; returning home");
       silentRestart();
     }
@@ -1732,7 +1848,8 @@ void setup() {
     activityManager.goToReader(path, false, allowFastInitialReaderRefresh);
   }
 
-  if (resume == BootResume::Silent || resume == BootResume::Network) {
+  // The sleep sync paints nothing: the sleep screen stays on the panel.
+  if ((resume == BootResume::Silent || resume == BootResume::Network) && !sleepSyncBoot) {
     // Block until the first paint physically completes. refreshDisplay()
     // waits on the panel BUSY pin so when this returns the user can see the
     // new activity. Without the wait, an edge captured by gpio.update()
@@ -1756,6 +1873,14 @@ void loop() {
   static unsigned long maxLoopDuration = 0;
   const unsigned long loopStartTime = millis();
   static unsigned long lastMemPrint = 0;
+
+  // The BookOrbit sleep sync runs whole inside its activity's first loop() and ends in
+  // deep sleep or in a wake restart. None of the routing below applies to a device the
+  // user sees asleep: the wake watcher alone answers Power.
+  if (sleepSyncBoot) {
+    activityManager.loop();
+    return;
+  }
 
   // Keep release suppression in the mapped-input layer in sync with every
   // hardware input frame. A shortcut may open an activity that never queries

@@ -17,6 +17,7 @@ void BookOrbitCredentialStore::toJson(JsonDocument& doc) const {
   doc["serverUrl"] = serverUrl;
   doc["downloadFolder"] = downloadFolder;
   doc["syncBehavior"] = static_cast<uint8_t>(syncBehavior);
+  doc["syncOnSleep"] = syncOnSleep;
 }
 
 bool BookOrbitCredentialStore::fromJson(JsonVariantConst doc) {
@@ -35,6 +36,7 @@ bool BookOrbitCredentialStore::fromJson(JsonVariantConst doc) {
   const uint8_t behavior = doc["syncBehavior"] | static_cast<uint8_t>(0);
   syncBehavior = behavior == static_cast<uint8_t>(BookOrbitSyncBehavior::SMART) ? BookOrbitSyncBehavior::SMART
                                                                                 : BookOrbitSyncBehavior::ASK_EVERY_TIME;
+  syncOnSleep = doc["syncOnSleep"] | false;
 
   return true;
 }

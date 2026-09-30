@@ -317,6 +317,8 @@ bool HalGPIO::verifyPowerButtonWakeup(const bool shortPressWakes, const unsigned
   return shortPressWakes || (heldAtFirstSample && inputMgr.isPowerButtonPhysicallyPressed());
 }
 
+bool HalGPIO::isPowerButtonPhysicallyPressed() const { return inputMgr.isPowerButtonPhysicallyPressed(); }
+
 #if FREEINK_MCU_S3
 // USB host presence via the USB-Serial-JTAG peripheral's SOF frame counter: a
 // connected host clocks 1 kHz start-of-frame packets, so the counter advancing

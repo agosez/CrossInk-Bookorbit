@@ -915,6 +915,14 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
           BOOKORBIT_STORE.saveToFile();
         },
         "boSyncBehavior", StrId::STR_BOOKORBIT_SYNC));
+    add(SettingInfo::DynamicEnum(
+        StrId::STR_BOOKORBIT_SYNC_ON_SLEEP, {StrId::STR_STATE_OFF, StrId::STR_STATE_ON},
+        [] { return static_cast<uint8_t>(BOOKORBIT_STORE.getSyncOnSleep()); },
+        [](uint8_t v) {
+          BOOKORBIT_STORE.setSyncOnSleep(v != 0);
+          BOOKORBIT_STORE.saveToFile();
+        },
+        "boSyncOnSleep", StrId::STR_BOOKORBIT_SYNC));
 
     // --- Status Bar Settings (web-only, uses StatusBarSettingsActivity) ---
     add(SettingInfo::Toggle(StrId::STR_CHAPTER_PAGE_COUNT, &CrossPointSettings::statusBarChapterPageCount,

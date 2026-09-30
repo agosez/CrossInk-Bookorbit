@@ -31,6 +31,7 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
   std::string serverUrl;
   std::string downloadFolder;  // catalog download folder, normalized ("" = SD root)
   BookOrbitSyncBehavior syncBehavior = BookOrbitSyncBehavior::ASK_EVERY_TIME;
+  bool syncOnSleep = false;
 
   BookOrbitCredentialStore() = default;
   ~BookOrbitCredentialStore() = default;
@@ -66,6 +67,16 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
   BookOrbitSyncBehavior getSyncBehavior() const {
     ensureLoaded();
     return syncBehavior;
+  }
+
+  // Sync the last opened book behind the sleep screen each time the device sleeps.
+  void setSyncOnSleep(const bool enabled) {
+    ensureLoaded();
+    syncOnSleep = enabled;
+  }
+  bool getSyncOnSleep() const {
+    ensureLoaded();
+    return syncOnSleep;
   }
 
   // Catalog download folder. Callers must pass a normalized value: "" for the SD

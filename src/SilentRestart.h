@@ -15,6 +15,9 @@ enum class NetworkBootTarget : uint32_t {
   FILE_TRANSFER = 6,
   MANAGE_FONTS = 7,
   BOOKORBIT_SYNC = 8,
+  // The BookOrbit sync that runs behind the sleep screen before deep sleep (see
+  // enterDeepSleep()). Its payload is BOOKORBIT_SLEEP_SYNC_PAYLOAD_POWER_HELD.
+  BOOKORBIT_SLEEP_SYNC = 9,
 };
 
 // BOOKORBIT_SYNC payload: bit 16 set means bits 0-15 carry the paragraph index of the
@@ -28,6 +31,10 @@ constexpr uint32_t BOOKORBIT_SYNC_PAYLOAD_HAS_PARAGRAPH = 1u << 16;
 // (Mirrors the KOReader sync orientation payload.)
 constexpr uint32_t BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_SHIFT = 17u;
 constexpr uint32_t BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_MASK = 0x7u << BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_SHIFT;
+// BOOKORBIT_SLEEP_SYNC payload: Power was still held when the device went to sleep (a
+// long-press sleep), so that press belongs to the sleep gesture and must be released
+// before a press can wake the device out of the sync.
+constexpr uint32_t BOOKORBIT_SLEEP_SYNC_PAYLOAD_POWER_HELD = 1u << 0;
 
 constexpr bool isNetworkBootTargetValue(const uint32_t value) {
   switch (static_cast<NetworkBootTarget>(value)) {
@@ -38,6 +45,7 @@ constexpr bool isNetworkBootTargetValue(const uint32_t value) {
     case NetworkBootTarget::FILE_TRANSFER:
     case NetworkBootTarget::MANAGE_FONTS:
     case NetworkBootTarget::BOOKORBIT_SYNC:
+    case NetworkBootTarget::BOOKORBIT_SLEEP_SYNC:
       return true;
   }
   return false;
@@ -49,7 +57,8 @@ static_assert(isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::KOREADER_AUTH)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::FILE_TRANSFER)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::MANAGE_FONTS)) &&
-                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SYNC)),
+                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SYNC)) &&
+                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SLEEP_SYNC)),
               "Every network boot target must pass RTC target validation");
 
 void silentRestart();                                            // home screen
@@ -58,6 +67,15 @@ void silentRestartToReader(bool cleanImageBaseOnEntry = false);  // currently-op
 void restartToHomeAfterStorageHandoff();
 void silentRestartToNetwork(NetworkBootTarget target, uint32_t payload = 0);
 void silentRestartToManageFonts();
+
+// The sleep sync (NetworkBootTarget::BOOKORBIT_SLEEP_SYNC) runs while the device looks
+// asleep, so Power is its only input: the press that would wake the device.
+bool sleepSyncWakeRequested();
+// Abandons the sleep sync for that press and boots the way a power-button wake would.
+void wakeFromSleepSync();
+// Ends the sleep sync by entering the deep sleep it postponed (or waking, if Power
+// was pressed meanwhile). The sleep screen is still on the panel and is left as is.
+void completeSleepAfterSleepSync();
 
 void armSilentRestartReaderPageBuild(const std::string& bookPath, uint16_t spineIndex, uint16_t targetPage,
                                      bool autoPageTurnActive);

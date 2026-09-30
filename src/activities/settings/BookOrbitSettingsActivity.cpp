@@ -22,13 +22,17 @@
 namespace fui = freeink::ui;
 
 namespace {
-constexpr int MENU_ITEMS = 7;
+constexpr int MENU_ITEMS = 8;
 // The folder row reuses the OPDS strings: "Download Folder" and "SD Root" are
 // generic and already translated in every language file.
-const StrId menuNames[MENU_ITEMS] = {
-    StrId::STR_USERNAME,     StrId::STR_PASSWORD,          StrId::STR_BOOKORBIT_SERVER_URL,
-    StrId::STR_AUTHENTICATE, StrId::STR_BOOKORBIT_CATALOG, StrId::STR_OPDS_DOWNLOAD_FOLDER,
-    StrId::STR_SYNC_BEHAVIOR};
+const StrId menuNames[MENU_ITEMS] = {StrId::STR_USERNAME,
+                                     StrId::STR_PASSWORD,
+                                     StrId::STR_BOOKORBIT_SERVER_URL,
+                                     StrId::STR_AUTHENTICATE,
+                                     StrId::STR_BOOKORBIT_CATALOG,
+                                     StrId::STR_OPDS_DOWNLOAD_FOLDER,
+                                     StrId::STR_SYNC_BEHAVIOR,
+                                     StrId::STR_BOOKORBIT_SYNC_ON_SLEEP};
 constexpr fui::ActionId ACTION_ROW = 1;
 
 // Mirrors OpdsServerListActivity's normalizeDownloadFolder: "" for the SD root,
@@ -184,6 +188,10 @@ void BookOrbitSettingsActivity::handleSelection() {
                                         : BookOrbitSyncBehavior::ASK_EVERY_TIME);
     BOOKORBIT_STORE.saveToFile();
     requestUpdate();
+  } else if (selectedIndex == 7) {
+    BOOKORBIT_STORE.setSyncOnSleep(!BOOKORBIT_STORE.getSyncOnSleep());
+    BOOKORBIT_STORE.saveToFile();
+    requestUpdate();
   }
 }
 
@@ -217,6 +225,8 @@ void BookOrbitSettingsActivity::buildListScreen(UiApp::ScreenType& screen) {
     } else if (i == 6) {
       values[i] = BOOKORBIT_STORE.getSyncBehavior() == BookOrbitSyncBehavior::SMART ? tr(STR_SMART_SYNC)
                                                                                     : tr(STR_ASK_EVERY_TIME);
+    } else if (i == 7) {
+      values[i] = BOOKORBIT_STORE.getSyncOnSleep() ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     } else {
       // Authenticate and Browse Catalog both need credentials to do anything.
       values[i] = hasCredentials ? "" : std::string("[") + tr(STR_SET_CREDENTIALS_FIRST) + "]";

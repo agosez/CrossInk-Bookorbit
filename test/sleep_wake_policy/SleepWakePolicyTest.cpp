@@ -39,3 +39,44 @@ TEST(SleepWakePolicy, MissingOrWrongSizedFrameIsInvalid) {
   EXPECT_FALSE(SleepWakePolicy::hasValidSavedFrame(/*exists=*/true, kExpectedFrameBytes - 1, kExpectedFrameBytes));
   EXPECT_FALSE(SleepWakePolicy::hasValidSavedFrame(/*exists=*/true, kExpectedFrameBytes + 1, kExpectedFrameBytes));
 }
+
+TEST(WakePressDetector, LatchesOnceThePressHasBeenHeldLongEnough) {
+  SleepWakePolicy::WakePressDetector detector(/*holdMs=*/400, /*heldAtStart=*/false);
+  EXPECT_FALSE(detector.update(false, 0));
+  EXPECT_FALSE(detector.update(true, 100));
+  EXPECT_FALSE(detector.update(true, 499));
+  EXPECT_TRUE(detector.update(true, 500));
+}
+
+TEST(WakePressDetector, ShortPressDoesNotCountWhenAHoldIsRequired) {
+  SleepWakePolicy::WakePressDetector detector(/*holdMs=*/400, /*heldAtStart=*/false);
+  EXPECT_FALSE(detector.update(true, 0));
+  EXPECT_FALSE(detector.update(true, 300));
+  EXPECT_FALSE(detector.update(false, 310));
+  // A new press starts a new hold rather than resuming the old one.
+  EXPECT_FALSE(detector.update(true, 320));
+  EXPECT_FALSE(detector.update(true, 700));
+  EXPECT_TRUE(detector.update(true, 720));
+}
+
+TEST(WakePressDetector, StaysLatchedAfterRelease) {
+  SleepWakePolicy::WakePressDetector detector(/*holdMs=*/20, /*heldAtStart=*/false);
+  EXPECT_FALSE(detector.update(true, 0));
+  EXPECT_TRUE(detector.update(true, 20));
+  EXPECT_TRUE(detector.update(false, 30));
+}
+
+TEST(WakePressDetector, IgnoresThePressThatPutTheDeviceToSleep) {
+  SleepWakePolicy::WakePressDetector detector(/*holdMs=*/400, /*heldAtStart=*/true);
+  EXPECT_FALSE(detector.update(true, 0));
+  EXPECT_FALSE(detector.update(true, 5000));
+  EXPECT_FALSE(detector.update(false, 5010));
+  EXPECT_FALSE(detector.update(true, 5020));
+  EXPECT_TRUE(detector.update(true, 5420));
+}
+
+TEST(WakePressDetector, ZeroHoldCountsTheFirstPressedSample) {
+  SleepWakePolicy::WakePressDetector detector(/*holdMs=*/0, /*heldAtStart=*/false);
+  EXPECT_FALSE(detector.update(false, 0));
+  EXPECT_TRUE(detector.update(true, 10));
+}

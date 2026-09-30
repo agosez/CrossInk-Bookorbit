@@ -42,6 +42,7 @@
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/SavedWifiConnect.h"
 #include "util/BookContentId.h"
 
 // This file mirrors src/activities/reader/KOReaderSyncActivity.cpp; see that file's
@@ -175,6 +176,19 @@ void wifiOff() {
   WiFi.mode(WIFI_OFF);
   delay(100);
 }
+
+#ifdef SIMULATOR
+// Integration-test hook (test/integration/): every sync outcome funnels through
+// returnToReader(), and every sleep sync through the end of runSleepSync(), once its
+// files and uploads are settled. Those are the deterministic places a scripted run can
+// end at. The state says how it went.
+void endSimulatorScenarioIfRequested(const int state) {
+  if (std::getenv("CROSSINK_SIM_BOOKORBIT_QUIT_AFTER_SYNC") != nullptr) {
+    LOG_INF("BookOrbit", "Simulator sync scenario finished (state=%d)", state);
+    std::_Exit(0);
+  }
+}
+#endif
 }  // namespace
 
 void BookOrbitSyncActivity::ensureEpubLoaded() {
@@ -241,17 +255,42 @@ void BookOrbitSyncActivity::saveProgressAndReturn(const CrossPointPosition& posi
 }
 
 void BookOrbitSyncActivity::returnToReader() {
+  // The sleep sync has no reader to go back to: runSleepSync() closes the session and
+  // puts the device back to sleep once the attempt unwinds.
+  if (sleepSync) return;
 #ifdef SIMULATOR
-  // Integration-test hook (test/integration/): every sync outcome funnels
-  // through here once its files and uploads are settled, so it is the one
-  // deterministic place a scripted run can end at. The state says how it went.
-  if (std::getenv("CROSSINK_SIM_BOOKORBIT_QUIT_AFTER_SYNC") != nullptr) {
-    LOG_INF("BookOrbit", "Simulator sync scenario finished (state=%d)", static_cast<int>(state));
-    std::_Exit(0);
-  }
+  endSimulatorScenarioIfRequested(static_cast<int>(state));
 #endif
   syncSession.reset();
   activityManager.goToReader(epubPath);
+}
+
+void BookOrbitSyncActivity::runSleepSync() {
+  LOG_INF("BookOrbit", "Sleep sync starting (free=%u maxAlloc=%u)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  sdFontSystem.releaseLoadedFont(renderer);
+  wifiActivated = true;
+  if (SavedWifiConnect::connect(&sleepSyncWakeRequested)) {
+    // The whole sync runs synchronously from here, decisions included.
+    onWifiSelectionComplete(true);
+  } else if (!stopIfWoken()) {
+    LOG_INF("BookOrbit", "Sleep sync skipped: no saved network answered");
+  }
+  syncSession.reset();
+  wifiOff();
+  LOG_INF("BookOrbit", "Sleep sync over (state=%d)", static_cast<int>(state));
+#ifdef SIMULATOR
+  endSimulatorScenarioIfRequested(static_cast<int>(state));
+#endif
+  completeSleepAfterSleepSync();
+}
+
+bool BookOrbitSyncActivity::stopIfWoken() {
+  if (!sleepSync || !sleepSyncWakeRequested()) return false;
+  // Checked only between steps, where every file the sync touches is consistent: each
+  // step is retried by the next sync, so the attempt can simply end here.
+  LOG_INF("BookOrbit", "Sleep sync cancelled: the device was woken");
+  wakeFromSleepSync();
+  return true;
 }
 
 bool BookOrbitSyncActivity::consumeInitialConfirmRelease() {
@@ -290,6 +329,7 @@ void BookOrbitSyncActivity::onWifiSelectionComplete(const bool success) {
   WallClock::now(epochBeforeNtp);
   syncTimeWithNTP();
   WallClock::markNtpSynced(epochBeforeNtp);
+  if (stopIfWoken()) return;
 
   {
     RenderLock lock(*this);
@@ -351,6 +391,7 @@ void BookOrbitSyncActivity::performSync() {
   // bookmark exchanges all follow on the same session.
   if (result == BookOrbitSyncClient::OK || result == BookOrbitSyncClient::NOT_FOUND) {
     const size_t statsAccepted = uploadQueuedStats();
+    if (stopIfWoken()) return;
 
     {
       RenderLock lock(*this);
@@ -361,12 +402,16 @@ void BookOrbitSyncActivity::performSync() {
     prepareAnnotationBatch();
     prepareBookmarkBatch();
     uploadAnnotationBatch();
+    // What the server sent is acknowledged only once applied, so stopping before that
+    // leaves it to be offered again.
+    if (stopIfWoken()) return;
     {
       RenderLock lock(*this);
       statusMessage = tr(STR_SYNCING_BOOKMARKS);
     }
     requestUpdate(true);
     uploadBookmarkBatch();
+    if (stopIfWoken()) return;
     // Applied before the returns below, not after: they leave early for a book the server holds
     // no progress for, and the highlights it just sent would leave with them.
     if (!incomingAnnotations.empty() || !incomingBookmarks.empty()) {
@@ -391,7 +436,7 @@ void BookOrbitSyncActivity::performSync() {
         statusMessage = summary;
       }
       requestUpdateAndWait();
-      delay(1500);
+      if (!sleepSync) delay(1500);
     }
     if (bookmarksSent > 0 || bookmarksAdded > 0 || bookmarksRemoved > 0) {
       char summary[96];
@@ -402,8 +447,9 @@ void BookOrbitSyncActivity::performSync() {
         statusMessage = summary;
       }
       requestUpdateAndWait();
-      delay(1500);
+      if (!sleepSync) delay(1500);
     }
+    if (stopIfWoken()) return;
 
     // Recorded before any progress push: the push is what triggers the server's session
     // estimation, and a sweep already on file is what suppresses it (and retires the
@@ -423,10 +469,11 @@ void BookOrbitSyncActivity::performSync() {
                 static_cast<int>(sweepResult), httpCode);
       }
     }
+    if (stopIfWoken()) return;
   }
 
   if (result == BookOrbitSyncClient::NOT_FOUND) {
-    if (smartSyncEnabled()) {
+    if (smartSyncEnabled() || sleepSync) {
       LOG_DBG("BookOrbit", "Smart sync: no remote progress, uploading local %.6f", localProgress.percentage);
       performUpload();
       return;
@@ -528,7 +575,7 @@ void BookOrbitSyncActivity::performSync() {
   const bool samePosition = spineDelta == 0 && std::abs(pageDelta) <= 1;
   const bool localAhead = spineDelta > 0 || (spineDelta == 0 && pageDelta > 1);
 
-  if (smartSyncEnabled()) {
+  if (smartSyncEnabled() || sleepSync) {
     const std::string stateDir = BookContentId::bookStateDir(epubPath);
     const int64_t lastSync = readLastSyncMarker(stateDir);
     LOG_DBG("BookOrbit", "Smart decision: local spine=%d page=%d, remote spine=%d page=%d, serverTs=%lld lastSync=%lld",
@@ -556,6 +603,13 @@ void BookOrbitSyncActivity::performSync() {
     } else {
       LOG_DBG("BookOrbit", "Smart sync: no sync history for this book yet, showing the choice screen");
     }
+  }
+
+  if (sleepSync) {
+    // Nobody is there to answer the choice screen; the next manual sync asks it.
+    LOG_INF("BookOrbit", "Sleep sync: progress left for the next manual sync");
+    syncSession.reset();
+    return;
   }
 
   {
@@ -1299,6 +1353,9 @@ size_t BookOrbitSyncActivity::uploadQueuedStats() {
   size_t shownTenth = 0;
 
   for (size_t offset = 0; offset < total; offset += BATCH_SIZE) {
+    // A long backlog takes a minute; the queue is only cleared once all of it is
+    // accepted, so the sleep sync can stop between batches.
+    if (stopIfWoken()) return uploaded;
     if (!BookOrbitStatsQueue::readRange(stateDir, offset, BATCH_SIZE, batch)) {
       LOG_ERR("BookOrbit", "Failed to read queued stats at event %u; keeping the queue", (unsigned)offset);
       return uploaded;
@@ -1421,6 +1478,7 @@ void BookOrbitSyncActivity::performUpload() {
   progress.device = SETTINGS.getEffectiveDeviceName();
   progress.timestamp = time(nullptr);  // NTP was synced in onWifiSelectionComplete(); BookOrbit uses this to break ties
 
+  if (stopIfWoken()) return;
   const auto result = BookOrbitSyncClient::updateProgress(progress);
 
   syncSession.reset();
@@ -1450,6 +1508,11 @@ void BookOrbitSyncActivity::performUpload() {
 void BookOrbitSyncActivity::onEnter() {
   Activity::onEnter();
   LOG_INF("BookOrbit", "BookOrbit sync starting");
+
+  // Already in its network boot, with no screen to orient or touch to route. The attempt
+  // waits for loop(): at boot this onEnter() runs inside setup(), whose frames would sit
+  // under the TLS session on the loop task's 8 KB stack.
+  if (sleepSync) return;
 
   // Sync is a reader-originated activity, but its decision prompts are not
   // reader content. Keep their touch actions available even when the reader's
@@ -1533,6 +1596,9 @@ Rect BookOrbitSyncActivity::headerBandRect() const {
 }
 
 void BookOrbitSyncActivity::render(RenderLock&&) {
+  // The sleep screen stays on the panel for the whole sleep sync.
+  if (sleepSync) return;
+
   renderer.clearScreen();
 
   auto metrics = UITheme::getInstance().getMetrics();
@@ -1694,6 +1760,11 @@ void BookOrbitSyncActivity::render(RenderLock&&) {
 }
 
 void BookOrbitSyncActivity::loop() {
+  if (sleepSync) {
+    runSleepSync();  // ends in deep sleep or in a wake restart
+    return;
+  }
+
   if (consumeInitialConfirmRelease()) {
     return;
   }

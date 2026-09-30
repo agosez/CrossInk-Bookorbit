@@ -39,8 +39,10 @@ PROGRAM = ROOT / ".pio" / "build" / "simulator" / "program"
 SIM_MAC = bytes([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01])
 SIM_DEVICE_ID = "crossink-" + SIM_MAC.hex()
 
+SHORT_PWRBTN_SLEEP = 1  # CrossPointSettings::SHORT_PWRBTN::SLEEP
 SHORT_PWRBTN_BOOKORBIT_SYNC = 33  # CrossPointSettings::SHORT_PWRBTN::BOOKORBIT_SYNC
 SYNC_BEHAVIOR_SMART = 1
+SYNC_MARKER_MAGIC = 0x424F5359  # "BOSY", BookOrbitSyncActivity's SYNC_MARKER_MAGIC
 
 CRASH_PATTERNS = ("Assertion failed", "Segmentation fault", "AddressSanitizer",
                   "UndefinedBehaviorSanitizer", "std::bad_alloc")
@@ -281,6 +283,21 @@ class SimFs:
             "credentials": [{"ssid": "SimNet", "password": "simnet"}],
         }))
 
+    def enable_sync_on_sleep(self) -> None:
+        """Sync on Sleep on, and a short Power press that puts the device to sleep."""
+        bookorbit = json.loads((self.crosspoint / "bookorbit.json").read_text())
+        bookorbit["syncOnSleep"] = True
+        (self.crosspoint / "bookorbit.json").write_text(json.dumps(bookorbit))
+        (self.crosspoint / "crossink-settings.json").write_text(json.dumps({
+            "shortPwrBtn": SHORT_PWRBTN_SLEEP,
+        }))
+
+    def write_sync_marker(self, book_hash: str, timestamp: int) -> None:
+        """Smart sync's memory of the server timestamp this device last synced at."""
+        state_dir = self.state_dir(book_hash)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "bookorbit_sync.bin").write_bytes(struct.pack("<Iq", SYNC_MARKER_MAGIC, timestamp))
+
     def add_book(self, source: Path) -> str:
         dest = self.fs / "books" / source.name
         shutil.copy2(source, dest)
@@ -482,6 +499,64 @@ def scenario_sync_progress_push(verbose: bool) -> None:
     remote = peer.get_progress(book_hash)
     assert float(remote.get("percentage", 0)) > 0.5, f"server progress not advanced: {remote}"
     assert remote.get("device_id") == SIM_DEVICE_ID, f"unexpected device id: {remote}"
+
+
+def scenario_sleep_sync_push(verbose: bool) -> None:
+    """With Sync on Sleep on, putting the device to sleep uploads the local position
+    from behind the sleep screen: sleep hands over to the sleep sync's network boot,
+    which joins the saved network on its own and follows the smart rules."""
+    manifest, _ = load_seed()
+    seeded = manifest["progress"][2]
+    source = INTEGRATION / "library" / seeded["file"]
+    book_hash = seeded["hash"]
+    peer = peer_device(manifest)
+    # Put the peer's 40% back, so every run has a position of its own to push.
+    peer.put_progress(book_hash, seeded["progress"], seeded["percentage"])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        fs.enable_sync_on_sleep()
+        sim_path = fs.add_book(source)
+        fs.set_open_book(sim_path)
+        write_progress_bin(fs.epub_cache_dir(sim_path) / "progress.bin", 4, 0, 1)
+        # This device last synced after the peer's upload, so only the local side has
+        # moved since: the smart rules upload instead of leaving it to a manual sync.
+        fs.write_sync_marker(book_hash, int(time.time()) + 3600)
+
+        # Home screen is up well before 6s; a short Power press puts it to sleep.
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="none",
+                               timeout_s=90, verbose=verbose)
+        assert "Restarting into the BookOrbit sleep sync" in output, "sleep did not hand over to the sleep sync"
+        assert "Sleep sync over" in output, "sleep sync never ran to its end"
+        assert "sync scenario finished" in output, "sleep sync never reached its end marker"
+
+    remote = peer.get_progress(book_hash)
+    assert float(remote.get("percentage", 0)) > 0.5, f"server progress not advanced: {remote}"
+    assert remote.get("device_id") == SIM_DEVICE_ID, f"unexpected device id: {remote}"
+
+
+def scenario_sleep_sync_cancel(verbose: bool) -> None:
+    """A Power press during the sleep sync cancels it and wakes the device the way a
+    power-button wake would."""
+    manifest, _ = load_seed()
+    source = INTEGRATION / "library" / manifest["progress"][3]["file"]
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        fs.enable_sync_on_sleep()
+        sim_path = fs.add_book(source)
+        fs.set_open_book(sim_path)
+        # The script replays from t=0 in every process the silent restarts exec: the
+        # 300 ms press is ignored on the home screen (Power is locked out for 2 s after
+        # boot) and lands inside the sleep sync's boot; the 2500 ms press puts the device
+        # to sleep. Woken, the device sleeps again, so the run only ends at the timeout.
+        output = run_simulator(fs, input_script="300:POWER:600;2500:POWER:120", choice="none",
+                               timeout_s=14, verbose=verbose)
+        assert "Restarting into the BookOrbit sleep sync" in output, "sleep did not hand over to the sleep sync"
+        assert "Sleep sync cancelled: the device was woken" in output, "the press did not cancel the sleep sync"
+        cancelled_at = output.index("Sleep sync cancelled")
+        assert "Wake route: PowerButton" in output[cancelled_at:], "the cancel did not boot as a power-button wake"
+        assert "Sleep sync over" not in output, "a sleep sync ran to its end despite the press"
 
 
 def scenario_highlight_pull(verbose: bool) -> None:
@@ -1053,6 +1128,8 @@ SCENARIOS = {
     "catalog_hides_non_epub": scenario_catalog_hides_non_epub,
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,
+    "sleep_sync_push": scenario_sleep_sync_push,
+    "sleep_sync_cancel": scenario_sleep_sync_cancel,
     "highlight_pull": scenario_highlight_pull,
     "highlight_push": scenario_highlight_push,
     "highlight_delete_propagates": scenario_highlight_delete_propagates,

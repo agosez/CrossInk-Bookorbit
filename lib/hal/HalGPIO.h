@@ -148,6 +148,11 @@ class HalGPIO {
   // Should only be called when wakeup reason is PowerButton.
   bool verifyPowerButtonWakeup(bool shortPressWakes, unsigned long minHoldMs = 0);
 
+  // Current electrical level of the power button, outside update()'s debounce and
+  // edge tracking. It only reads a GPIO register, so a task other than the main
+  // loop may poll it. False on boards without a power-button GPIO.
+  bool isPowerButtonPhysicallyPressed() const;
+
   // Check if USB is connected
   bool isUsbConnected() const;
 

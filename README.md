@@ -63,6 +63,16 @@ BookOrbit identifies books by the binary partial-MD5 hash of the EPUB file (the 
 
 **Settings → Controls** lets you bind _BookOrbit Sync_ to the power button (short or long press) or to a long press on Menu or Back. The action also works outside the reader: it syncs the book you last had open, or opens the BookOrbit settings if no account is configured yet.
 
+### Syncing when the device goes to sleep
+
+Turn on **Settings → System → BookOrbit Sync → Sync on Sleep** and the device syncs the book you last had open every time it goes to sleep, whether from the power button, the sleep timer or a Quick Lock timeout. The sleep screen goes up first. The device then joins a saved Wi-Fi network (the last one used first, then any other saved network in range), runs a full sync behind that screen, and finishes going to sleep. Nothing is shown while it does.
+
+- **Waking the device cancels the sync.** Press Power the way you would to wake it. The sync stops at its next step and the device wakes as usual. Whatever the sync had already sent is kept, and the rest follows on the next sync.
+- **Progress follows the Smart sync rules**, whatever **Sync Behavior** says, because nobody is there to answer the choice screen. When those rules cannot decide (the first sync of a book on this device, or both sides having moved), progress is left alone for your next manual sync. Highlights, bookmarks and reading sessions sync either way.
+- **It is skipped** when no book is open, when no Wi-Fi network is saved, and when the battery is below 10% with no charger connected.
+
+Each sync keeps Wi-Fi on for a few seconds, and longer when no saved network answers, so the option is off by default.
+
 ## Syncing highlights and bookmarks
 
 Every BookOrbit sync of a book also exchanges its highlights and bookmarks with the
@@ -141,6 +151,7 @@ The friction points of leaving the option off:
 - **The cheap mitigation is a button.** Bind _BookOrbit Sync_ to the power button under
   **Settings → Controls** and press it when you put the book down; one sync per run is all
   the accuracy needs. It is also what drains the queue, so it costs nothing extra.
+  **Sync on Sleep** does the same every time the device sleeps, with no button to press.
 - **A flat battery or a firmware flash loses the clock entirely.** The sessions queued
   before that still upload correctly as long as a sync happens in the same run, because
   they are placed relative to that sync rather than by absolute time.

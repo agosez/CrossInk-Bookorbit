@@ -17,6 +17,7 @@ Refer to https://freeink.org/llms.txt for guidance.
   - JPEGDEC stub always fails; `JPEGDEC fallback: open failed (err=-1)` is expected in simulator.
   - `esp_deep_sleep_start()` is a no-op in simulator.
   - `HalStorage` uses POSIX file access under `./fs_` and allows multiple readers, unlike real hardware.
+- `CROSSPOINT_SIM_INPUT_SCRIPT` stays set across silent re-execs and replays from t=0 in every new process; only a deep-sleep wake swaps in the `_AFTER_WAKE` script. A scripted press can therefore land inside a network boot (the integration `sleep_sync_cancel` scenario relies on it), and a script that sleeps with Sync on Sleep on loops until killed.
 
 ## Real Hardware / Storage
 
@@ -47,6 +48,8 @@ Refer to https://freeink.org/llms.txt for guidance.
 - Measured on X4 hardware (2026-07): active WiFi leaves ~65KB free; an HTTPS session (esp_http_client + crt bundle) costs ~54KB through the handshake. mbedTLS then allocates workspace per incoming TLS record (up to 16KB), so post-handshake `getMaxAllocHeap()` must stay ≥ ~16KB or reads fail mid-body against servers that send large records. Consequences: allocate transfer buffers *before* opening the connection, and launch network-heavy activities via `replaceActivity` (clears the whole activity stack — the settings screens alone hold 15-20KB) rather than pushing on top of it. `runGet` logs "Before client init"/"After open (TLS up)" heap breadcrumbs at INF for field diagnosis.
 
 ## Misc Repo Gotchas
+
+- At boot there is no current activity, so `ActivityManager::replaceActivity()` runs `onEnter()` synchronously inside `setup()`'s call chain: the launcher's locals stay resident and its frames sit under whatever `onEnter()` does, on the C3's 8 KB loop-task stack where TLS also runs. Blocking network work belongs in the activity's first `loop()`, as the BookOrbit sleep sync does (the `sleepSyncBoot` branch at the top of `loop()`).
 
 - On the X4, `RTC_NOINIT_ATTR` data does NOT survive deep sleep (every wake read as garbage), while the system clock itself DOES survive both deep sleep and software resets (RTS/EN flash resets included). Never key state to RTC memory across sleeps; persist to SD and use clock plausibility for cold-boot detection (see lib/WallClock).
 - Never range-for over a ternary of `std::initializer_list` temporaries (`for (x : cond ? std::initializer_list<T>{} : std::initializer_list<T>{a, b})`). The backing array's lifetime is NOT extended through `?:`, GCC 14 (-Os, `-Wdangling-pointer`) drops the stores into it as dead and the loop reads uninitialized stack. This is how the fork's `keepClockInSleep` gate silently disabled the X4 GPIO13 battery-latch release for every value of the flag (v1.5.0+bookorbit.1 → 2026-09-13, now a plain `if` around the loop): the board never powered off in sleep, the clock kept running, standby drained. Only the direct form `for (x : {a, b})` is safe; gate with an `if` around the loop instead.
