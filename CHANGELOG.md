@@ -5,13 +5,13 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
-## [v1.6.0+bookorbit.2] - 2026-09-30
+## [v1.6.0+bookorbit.2] - 2026-10-01
 
 Based on CrossInk v1.6.0.
 
 ### Added
 
-- **Sync on Sleep**: with this new BookOrbit option turned on, the device syncs the book you last had open each time it goes to sleep (progress, highlights, bookmarks and reading sessions). The sync runs behind the sleep screen, then the device finishes going to sleep. Waking the device during the sync cancels it. Progress is resolved the way Smart sync resolves it, and a conflict is left for your next manual sync ([#74](https://github.com/agosez/CrossInk-Bookorbit/issues/74)).
+- **Sync on Sleep**: with this new BookOrbit option turned on, the device syncs the book you last had open each time it goes to sleep (progress, highlights, bookmarks and reading sessions). The sync runs behind the sleep screen, which is drawn again once it is over because it loses some contrast meanwhile, then the device finishes going to sleep. Waking the device during the sync cancels it. Progress is resolved the way Smart sync resolves it, and a conflict is left for your next manual sync ([#74](https://github.com/agosez/CrossInk-Bookorbit/issues/74)).
 - BookOrbit Sync can now be assigned to the Power + Up combo, and to the Up + Down combo on devices that have it, like the other sync actions. It was only offered for the power button's short and long presses ([#85](https://github.com/agosez/CrossInk-Bookorbit/issues/85)).
 
 ### Fixed

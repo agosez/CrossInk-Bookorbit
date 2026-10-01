@@ -754,11 +754,12 @@ void ActivityManager::goToReaderAndRunMenuAction(std::string path, const uint8_t
   goToReader(std::move(path));
 }
 
-void ActivityManager::goToSleep(bool fromTimeout) {
+void ActivityManager::goToSleep(bool fromTimeout, bool recordForRedraw) {
   const bool canSnapshotOverlay = currentActivity && currentActivity->canSnapshotForSleepOverlay();
   const GfxRenderer::Orientation sleepPopupOrientation = renderer.getOrientation();
-  replaceActivity(std::make_unique<SleepActivity>(renderer, mappedInput, canSnapshotOverlay, getCurrentBookPath(),
-                                                  fromTimeout, sleepPopupOrientation));
+  replaceActivity(std::make_unique<SleepActivity>(
+      renderer, mappedInput, canSnapshotOverlay, getCurrentBookPath(), fromTimeout, sleepPopupOrientation,
+      recordForRedraw ? SleepScreenPass::RecordForRedraw : SleepScreenPass::Normal));
   loop();  // Important: sleep screen must be rendered immediately, the caller will go to sleep right after this returns
 }
 

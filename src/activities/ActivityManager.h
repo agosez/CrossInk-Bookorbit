@@ -127,7 +127,9 @@ class ActivityManager {
   void goToReader(std::string path, bool suppressBackRelease = false, bool allowFastInitialRefresh = false,
                   bool cleanImageBaseOnEntry = false);
   void goToReaderAndRunMenuAction(std::string path, uint8_t action);
-  void goToSleep(bool fromTimeout = false);
+  // recordForRedraw: the BookOrbit sleep sync follows and draws the sleep screen again
+  // (see SleepScreenPass).
+  void goToSleep(bool fromTimeout = false, bool recordForRedraw = false);
   void goToBoot();
   void goToFullScreenMessage(std::string message, EpdFontFamily::Style style = EpdFontFamily::REGULAR);
   void goToCrashReport();

@@ -16,7 +16,7 @@ enum class NetworkBootTarget : uint32_t {
   MANAGE_FONTS = 7,
   BOOKORBIT_SYNC = 8,
   // The BookOrbit sync that runs behind the sleep screen before deep sleep (see
-  // enterDeepSleep()). Its payload is BOOKORBIT_SLEEP_SYNC_PAYLOAD_POWER_HELD.
+  // enterDeepSleep()). Its payload holds the BOOKORBIT_SLEEP_SYNC_PAYLOAD_* bits.
   BOOKORBIT_SLEEP_SYNC = 9,
 };
 
@@ -35,6 +35,9 @@ constexpr uint32_t BOOKORBIT_SYNC_PAYLOAD_ORIENTATION_MASK = 0x7u << BOOKORBIT_S
 // long-press sleep), so that press belongs to the sleep gesture and must be released
 // before a press can wake the device out of the sync.
 constexpr uint32_t BOOKORBIT_SLEEP_SYNC_PAYLOAD_POWER_HELD = 1u << 0;
+// BOOKORBIT_SLEEP_SYNC payload: the sleep screen is the Quick Resume frame, which the sync
+// displays again from the saved file rather than drawing it (see SleepScreenPass).
+constexpr uint32_t BOOKORBIT_SLEEP_SYNC_PAYLOAD_QUICK_RESUME = 1u << 1;
 
 constexpr bool isNetworkBootTargetValue(const uint32_t value) {
   switch (static_cast<NetworkBootTarget>(value)) {

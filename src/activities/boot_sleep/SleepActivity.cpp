@@ -385,8 +385,7 @@ bool selectPinnedSleepImage(SleepImageMode mode, SleepImageSelection& selection)
   return false;
 }
 
-bool selectRandomSleepImage(SleepImageMode mode, SleepImageSelection& selection, bool validateBmpHeaders = false,
-                            bool bmpOnly = false) {
+bool pickRandomSleepImage(SleepImageMode mode, SleepImageSelection& selection, bool validateBmpHeaders, bool bmpOnly) {
   FsFile dir;
   std::string sleepDir;
   if (!resolvePreferredSleepDirectory(sleepDir)) return false;
@@ -498,14 +497,111 @@ bool selectRandomSleepImage(SleepImageMode mode, SleepImageSelection& selection,
   return true;
 }
 
+// What SleepScreenPass::RecordForRedraw leaves for the SleepScreenPass::Redraw that follows.
+constexpr char REDRAW_IMAGE_FILE[] = "/.crosspoint/sleep_redraw_image.txt";
+constexpr char REDRAW_OVERLAY_BACKGROUND_FILE[] = "/.crosspoint/sleep_redraw_background.bin";
+// The random image the sleep screen last drew, and the one a redraw must draw instead of
+// picking again. Set by SleepActivity::onEnter() around the render.
+std::string lastRandomSleepImage;
+std::string replayedRandomSleepImage;
+
+bool selectRandomSleepImage(SleepImageMode mode, SleepImageSelection& selection, bool validateBmpHeaders = false,
+                            bool bmpOnly = false) {
+  if (!replayedRandomSleepImage.empty()) {
+    // Once only: should the recorded image fail now, the fallbacks pick as usual.
+    std::string replayed;
+    replayed.swap(replayedRandomSleepImage);
+    const bool isPng = isPngSleepImagePath(replayed);
+    if ((!isPng || (mode == SleepImageMode::Overlay && !bmpOnly)) && Storage.exists(replayed.c_str())) {
+      selection.path = std::move(replayed);
+      selection.isPng = isPng;
+      return true;
+    }
+  }
+  if (!pickRandomSleepImage(mode, selection, validateBmpHeaders, bmpOnly)) return false;
+  lastRandomSleepImage = selection.path;
+  return true;
+}
+
 }  // namespace
 
 void SleepActivity::onEnter() {
   Activity::onEnter();
-  const bool renderQuickResume =
-      SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
-      (fromTimeout &&
-       SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
+  if (pass == SleepScreenPass::Redraw) {
+    loadRedrawRecord();
+  } else if (pass == SleepScreenPass::RecordForRedraw) {
+    lastRandomSleepImage.clear();
+    recordOverlayBackground();
+  }
+  renderSleepScreen();
+  if (pass == SleepScreenPass::RecordForRedraw) recordRandomImage();
+}
+
+bool SleepActivity::rendersQuickResume() const {
+  return SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
+         (fromTimeout &&
+          SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
+}
+
+// A Page Overlay is drawn over the screen shown before sleep, which the sync boot never
+// draws: keep it for the redraw. The frame buffer still holds it at this point.
+void SleepActivity::recordOverlayBackground() const {
+  if (Storage.exists(REDRAW_OVERLAY_BACKGROUND_FILE)) Storage.remove(REDRAW_OVERLAY_BACKGROUND_FILE);
+  if (SETTINGS.sleepScreen != CrossPointSettings::SLEEP_SCREEN_MODE::OVERLAY || !canSnapshotOverlayBackground ||
+      rendersQuickResume()) {
+    return;
+  }
+  FsFile file;
+  if (!Storage.openFileForWrite("SLP", REDRAW_OVERLAY_BACKGROUND_FILE, file)) return;
+  const size_t written = file.write(renderer.getFrameBuffer(), renderer.getBufferSize());
+  file.close();
+  if (written != renderer.getBufferSize()) {
+    LOG_ERR("SLP", "Short write of the overlay background for the sleep screen redraw");
+    Storage.remove(REDRAW_OVERLAY_BACKGROUND_FILE);
+  }
+}
+
+void SleepActivity::recordRandomImage() const {
+  if (Storage.exists(REDRAW_IMAGE_FILE)) Storage.remove(REDRAW_IMAGE_FILE);
+  if (lastRandomSleepImage.empty()) return;
+  FsFile file;
+  if (!Storage.openFileForWrite("SLP", REDRAW_IMAGE_FILE, file)) return;
+  file.write(reinterpret_cast<const uint8_t*>(lastRandomSleepImage.data()), lastRandomSleepImage.size());
+  file.close();
+}
+
+// Both records serve one redraw only, so they are removed once read.
+void SleepActivity::loadRedrawRecord() {
+  // Longer than any path the SD card holds; guards against a corrupt record.
+  constexpr size_t MAX_RECORDED_PATH = 512;
+  replayedRandomSleepImage.clear();
+  FsFile file;
+  if (Storage.exists(REDRAW_IMAGE_FILE) && Storage.openFileForRead("SLP", REDRAW_IMAGE_FILE, file)) {
+    const size_t size = file.fileSize();
+    if (size > 0 && size <= MAX_RECORDED_PATH) {
+      replayedRandomSleepImage.resize(size);
+      if (file.read(&replayedRandomSleepImage[0], size) != static_cast<int>(size)) {
+        replayedRandomSleepImage.clear();
+      }
+    }
+    file.close();
+    Storage.remove(REDRAW_IMAGE_FILE);
+  }
+
+  if (Storage.exists(REDRAW_OVERLAY_BACKGROUND_FILE) &&
+      Storage.openFileForRead("SLP", REDRAW_OVERLAY_BACKGROUND_FILE, file)) {
+    const size_t size = renderer.getBufferSize();
+    overlayBackgroundLoaded = file.read(renderer.getFrameBuffer(), size) == static_cast<int>(size);
+    file.close();
+    Storage.remove(REDRAW_OVERLAY_BACKGROUND_FILE);
+  }
+  // The overlay goes over the recorded screen, or over a blank one like a first pass
+  // that had no screen to keep.
+  canSnapshotOverlayBackground = overlayBackgroundLoaded;
+}
+
+void SleepActivity::renderSleepScreen() {
+  const bool renderQuickResume = rendersQuickResume();
 
   // Sleep screens draw directly, outside ActivityManager's normal render path.
   // Quick Resume retains the current screen, so preserve its Night Mode output;
@@ -526,13 +622,15 @@ void SleepActivity::onEnter() {
     RECENT_BOOKS.ensureLoaded();
   }
 
-  overlayBackgroundBufferStored =
-      sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::OVERLAY && renderer.storeBwBuffer();
+  // A redraw's background is already in the frame buffer, and no popup goes over it.
+  overlayBackgroundBufferStored = sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::OVERLAY &&
+                                  !overlayBackgroundLoaded && renderer.storeBwBuffer();
 
   // X4 Pro and X4 Classic share a panel that can retain this high-contrast
   // transient update beneath the final OEM-style sleep refresh. Render only
   // the final sleep frame on that panel family.
-  const bool showSleepPopup = !BoardConfig::isX4Pro() && !CROSSINK_APP_DEVICE_X4CLASSIC;
+  const bool showSleepPopup =
+      pass != SleepScreenPass::Redraw && !BoardConfig::isX4Pro() && !CROSSINK_APP_DEVICE_X4CLASSIC;
   // Show the popup in the orientation that was visible before reader exit restores
   // global settings. Reset to portrait afterwards so sleep screen layout stays unchanged.
   if (APP_STATE.lastSleepFromReader) {
@@ -956,6 +1054,8 @@ void SleepActivity::renderOverlaySleepScreen() const {
   // that snapshot is unavailable in the reader, rebuild from the saved position.
   if (overlayBackgroundBufferStored) {
     renderer.restoreBwBuffer();
+    backgroundAvailable = true;
+  } else if (overlayBackgroundLoaded) {
     backgroundAvailable = true;
   } else if (shouldUseReaderPageBackground && !path.empty()) {
     backgroundWasRebuilt = renderSavedReaderPage();

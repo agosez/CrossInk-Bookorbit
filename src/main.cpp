@@ -97,6 +97,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
+#include "activities/boot_sleep/SleepActivity.h"
 #include "activities/home/BookActions.h"
 #include "activities/reader/BookOrbitSyncActivity.h"
 #include "activities/reader/EpubReaderUtils.h"
@@ -377,6 +378,8 @@ static bool deepSleepInProgress = false;
 // It must end in sleep, so it never starts another sleep sync.
 static bool sleepSyncBoot = false;
 static PowerButtonWakeWatcher sleepSyncWakeWatcher;
+// Set from BOOKORBIT_SLEEP_SYNC_PAYLOAD_QUICK_RESUME.
+static bool sleepSyncAfterQuickResumeSleep = false;
 
 static void restartWithSilentToken() {
 #ifdef SIMULATOR
@@ -1263,18 +1266,20 @@ static bool shouldSyncBookOrbitBeforeSleep() {
 // fragmented the heap, and Wi-Fi plus TLS need what a fresh boot leaves (see
 // silentRestartToNetwork()). Unlike the other network restarts it draws no popup, so
 // the sleep screen stays on the panel for the whole sync.
-static void restartIntoSleepSync(const bool powerHeldAtSleep) {
+static void restartIntoSleepSync(const bool powerHeldAtSleep, const bool isQuickResumeSleep) {
   LOG_INF("SLP", "Restarting into the BookOrbit sleep sync");
   // The light goes out with the sleep screen, not once the sync is over.
   Frontlight.setOn(false);
   clearSilentRestartReaderPageBuild();
   silentRebootTarget = static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SLEEP_SYNC);
-  silentRebootPayload = powerHeldAtSleep ? BOOKORBIT_SLEEP_SYNC_PAYLOAD_POWER_HELD : 0;
+  silentRebootPayload = (powerHeldAtSleep ? BOOKORBIT_SLEEP_SYNC_PAYLOAD_POWER_HELD : 0) |
+                        (isQuickResumeSleep ? BOOKORBIT_SLEEP_SYNC_PAYLOAD_QUICK_RESUME : 0);
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   restartWithSilentToken();
 }
 
 static bool startBookOrbitSleepSync(const uint32_t payload) {
+  sleepSyncAfterQuickResumeSleep = (payload & BOOKORBIT_SLEEP_SYNC_PAYLOAD_QUICK_RESUME) != 0;
   // The wake press is the one the sleeping device would have answered: any press when
   // a short press wakes it, the long press that also unlocks Quick Lock otherwise.
   const bool shortPressWakes = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP;
@@ -1300,8 +1305,38 @@ void wakeFromSleepSync() {
   restartWithSilentToken();
 }
 
+// The sleep screen loses contrast while the sync runs behind it: draw it again over the
+// faded one. The Quick Resume frame is the page shown before sleep, which this boot never
+// drew, so it is displayed again from its file, which stays for the wake. Any other
+// screen is drawn again from what the first pass recorded (see SleepScreenPass), directly
+// rather than through the activity stack: the sleep sync activity calling this is still
+// running.
+static void redrawSleepScreenAfterSleepSync() {
+  LOG_INF("SLP", "Drawing the sleep screen again after the BookOrbit sleep sync");
+  if (sleepSyncAfterQuickResumeSleep) {
+    HalFile file;
+    if (!Storage.openFileForRead("SLP", SLEEP_FRAME_FILE, file)) return;
+    const size_t bufferSize = display.getBufferSize();
+    const size_t bytesRead = file.read(display.getFrameBuffer(), bufferSize);
+    file.close();
+    if (bytesRead != bufferSize) {
+      LOG_ERR("SLP", "Quick Resume frame came up short; leaving the sleep screen as is");
+      return;
+    }
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH, true);
+    return;
+  }
+  SleepActivity sleepScreen(renderer, mappedInputManager, false, APP_STATE.openEpubPath, false,
+                            GfxRenderer::Orientation::Portrait, SleepScreenPass::Redraw);
+  sleepScreen.onEnter();
+  sleepScreen.onExit();
+}
+
 void completeSleepAfterSleepSync() {
-  // A press that landed during the last step still wakes the device.
+  // A press that landed during the last step still wakes the device, and so does one
+  // made while the sleep screen is drawn again.
+  if (sleepSyncWakeWatcher.wakeRequested()) wakeFromSleepSync();
+  redrawSleepScreenAfterSleepSync();
   if (sleepSyncWakeWatcher.wakeRequested()) wakeFromSleepSync();
   sleepSyncWakeWatcher.stop();
 
@@ -1330,10 +1365,14 @@ void enterDeepSleep(bool fromTimeout) {
 
   APP_STATE.saveToFile();
 
+  // Decided before the sleep screen is drawn: the sleep sync draws it again once over,
+  // and this first pass records what that second one needs (see SleepScreenPass).
+  const bool syncBeforeSleep = shouldSyncBookOrbitBeforeSleep();
+
   // Commit to sleeping before goToSleep() runs the outgoing activity's onExit():
   // a WiFi activity would otherwise silentRestart() here and reboot instead.
   deepSleepInProgress = true;
-  activityManager.goToSleep(fromTimeout);
+  activityManager.goToSleep(fromTimeout, syncBeforeSleep);
 
   // Checkpoint the wall clock at the last possible moment: if deep sleep loses
   // timekeeping on this hardware, the wake-time restore is then only off by the
@@ -1360,8 +1399,8 @@ void enterDeepSleep(bool fromTimeout) {
   // With Sync on Sleep on, the sleep screen is up and the frame and files the wake needs
   // are written: the device now syncs behind that screen, then comes back to sleep
   // through completeSleepAfterSleepSync().
-  if (shouldSyncBookOrbitBeforeSleep()) {
-    restartIntoSleepSync(powerHeldAtSleep);
+  if (syncBeforeSleep) {
+    restartIntoSleepSync(powerHeldAtSleep, isQuickResumeSleep);
   }
 
   powerDownForDeepSleep();
