@@ -238,6 +238,10 @@ void addAuthHeaders(HTTPClient& http) {
   http.addHeader("Accept", "application/json");
   http.addHeader("x-auth-user", BOOKORBIT_STORE.getUsername().c_str());
   http.addHeader("x-auth-key", BOOKORBIT_STORE.getMd5Password().c_str());
+  if (BOOKORBIT_STORE.hasCfCredentials()) {
+    http.addHeader("CF-Access-Client-Id", BOOKORBIT_STORE.getCfClientId().c_str());
+    http.addHeader("CF-Access-Client-Secret", BOOKORBIT_STORE.getCfClientSecret().c_str());
+  }
 }
 
 bool isHttpsUrl(const std::string& url) { return url.rfind("https://", 0) == 0; }
@@ -310,6 +314,10 @@ int sendBookOrbitRequest(const char* method, const std::string& url, const JsonB
   http.addHeader("Accept", "application/json");
   http.addHeader("x-auth-user", BOOKORBIT_STORE.getUsername());
   http.addHeader("x-auth-key", BOOKORBIT_STORE.getMd5Password());
+  if (BOOKORBIT_STORE.hasCfCredentials()) {
+    http.addHeader("CF-Access-Client-Id", BOOKORBIT_STORE.getCfClientId());
+    http.addHeader("CF-Access-Client-Secret", BOOKORBIT_STORE.getCfClientSecret());
+  }
   if (payload != nullptr) {
     http.addHeader("Content-Type", "application/json");
   }
