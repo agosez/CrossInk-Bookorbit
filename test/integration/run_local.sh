@@ -13,6 +13,11 @@ cd "$(dirname "$0")/../.."
 command -v docker >/dev/null 2>&1 || PATH="$HOME/.docker/bin:$PATH"
 PIO="${PIO:-pio}"
 
+# The book dock is a bind mount: the seeder fills it from the host and the
+# server, running as its own user, empties it. On Linux, Docker would create a
+# missing folder owned by root, closed to both.
+mkdir -p test/integration/library-dock
+chmod a+rwx test/integration/library-dock
 docker compose -f test/integration/docker-compose.yml up -d --wait
 
 # Idempotent: regenerates nothing when the library exists, reseeds nothing the
