@@ -65,6 +65,8 @@ PIO=~/.platformio/penv/bin/pio test/integration/run_local.sh
 
 # or step by step:
 python3 test/integration/seed/make_library.py          # one-time / fixture changes
+mkdir -p test/integration/library-dock                 # Linux: before Docker makes it root's
+chmod a+rwx test/integration/library-dock
 docker compose -f test/integration/docker-compose.yml up -d --wait
 python3 test/integration/seed/seed.py                  # idempotent
 pio run -e simulator
@@ -80,12 +82,19 @@ from a database it recognizes as already seeded without duplicating anything.
 ## Continuous integration
 
 The `integration` job in [ci.yml](../../.github/workflows/ci.yml) runs the same
-chain on ubuntu: SDL2 + PlatformIO, the simulator built after applying
+chain on ubuntu: SDL2, OpenSSL + PlatformIO (two Linux-only link flags go in
+through `PLATFORMIO_BUILD_FLAGS`), the simulator built after applying
 [platformio.local.example.ini](../../platformio.local.example.ini) (cold-build
 include fix) and [ci/patch_simulator_package.py](ci/patch_simulator_package.py)
 (HAL shims the fetched simulator package does not carry yet — the patcher is
 idempotent and becomes a no-op as upstream catches up), then compose up, seed,
 scenarios, compose down.
+
+It is the only Linux build of the simulator, and the package is fetched
+unpinned, so it is also where an upstream simulator change shows first: a
+patcher step that reports `anchor not found` means upstream rewrote the code
+that step edits. Check whether it now carries the fix in its own words, and add
+that spelling to the step's markers.
 
 ## Scenario inventory
 
