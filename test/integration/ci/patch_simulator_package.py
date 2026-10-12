@@ -68,10 +68,14 @@ uint16_t runningPartitionChipId() { return 0xFFFF; }
 """
 
 
-def patch(path: Path, marker: str, transform) -> bool:
-    """Apply ``transform`` unless ``marker`` is already present. True = changed."""
+def patch(path: Path, marker: str | tuple[str, ...], transform) -> bool:
+    """Apply ``transform`` unless ``marker`` is already present. True = changed.
+
+    Pass several markers when upstream may carry the same fix in its own words.
+    """
     text = path.read_text()
-    if marker in text:
+    markers = (marker,) if isinstance(marker, str) else marker
+    if any(m in text for m in markers):
         return False
     updated = transform(text)
     if updated == text:
@@ -123,7 +127,9 @@ def patch_env(env: str) -> None:
     # 4. The firmware starts Wi-Fi scans asynchronously and treats anything but
     #    WIFI_SCAN_RUNNING (-1) as a failed start; the results are then read
     #    from scanComplete(), which already reports the fake networks.
-    if patch(src / "WiFi.h", "return -1; // WIFI_SCAN_RUNNING", lambda t: t.replace(
+    #    Upstream 4586bee fixes it too, spelled differently; the file defines
+    #    WIFI_SCAN_RUNNING either way, so the name alone cannot be the marker.
+    if patch(src / "WiFi.h", ("return -1; // WIFI_SCAN_RUNNING", "return async ? -1 :"), lambda t: t.replace(
             "    (void)async;\n    (void)show_hidden;",
             "    if (async)\n      return -1; // WIFI_SCAN_RUNNING\n    (void)show_hidden;", 1)):
         changed.append("async scanNetworks")

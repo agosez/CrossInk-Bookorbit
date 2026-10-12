@@ -174,10 +174,10 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Install SDL2
+      - name: Install SDL2 and OpenSSL
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev
+          sudo apt-get install -y libsdl2-dev libssl-dev
 
       - name: Apply the simulator cold-build overrides
         # The fetched simulator package needs an include-path fix (see the
@@ -188,6 +188,11 @@ jobs:
           python3 test/integration/ci/patch_simulator_package.py
 
       - name: Build the simulator
+        # On Linux the simulator package computes MD5 with OpenSSL (CommonCrypto
+        # on macOS), which platformio.ini does not link. PlatformIO appends this
+        # variable to the environment's build_flags.
+        env:
+          PLATFORMIO_BUILD_FLAGS: -lcrypto
         run: pio run -e simulator
 
       - name: Start the BookOrbit server
