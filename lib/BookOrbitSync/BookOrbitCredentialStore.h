@@ -30,6 +30,8 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
   std::string password;
   std::string serverUrl;
   std::string downloadFolder;  // catalog download folder, normalized ("" = SD root)
+  std::string cfClientId;      // Cloudflare Zero Trust Access service token Client ID
+  std::string cfClientSecret;  // Cloudflare Zero Trust Access service token Client Secret
   BookOrbitSyncBehavior syncBehavior = BookOrbitSyncBehavior::ASK_EVERY_TIME;
   bool syncOnSleep = false;
 
@@ -93,6 +95,22 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
 
   // Clear credentials
   void clearCredentials();
+
+  // Cloudflare Zero Trust service credentials
+  void setCfCredentials(const std::string& clientId, const std::string& clientSecret);
+  const std::string& getCfClientId() const {
+    ensureLoaded();
+    return cfClientId;
+  }
+  const std::string& getCfClientSecret() const {
+    ensureLoaded();
+    return cfClientSecret;
+  }
+  bool hasCfCredentials() const {
+    ensureLoaded();
+    return !cfClientId.empty() && !cfClientSecret.empty();
+  }
+  void clearCfCredentials();
 
   // Server URL management
   void setServerUrl(const std::string& url);

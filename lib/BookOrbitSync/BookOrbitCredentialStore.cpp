@@ -18,6 +18,12 @@ void BookOrbitCredentialStore::toJson(JsonDocument& doc) const {
   doc["downloadFolder"] = downloadFolder;
   doc["syncBehavior"] = static_cast<uint8_t>(syncBehavior);
   doc["syncOnSleep"] = syncOnSleep;
+  if (!cfClientId.empty()) {
+    doc["cfClientId"] = cfClientId;
+  }
+  if (!cfClientSecret.empty()) {
+    doc["cfClientSecret_obf"] = obfuscation::obfuscateToBase64(cfClientSecret);
+  }
 }
 
 bool BookOrbitCredentialStore::fromJson(JsonVariantConst doc) {
@@ -38,6 +44,16 @@ bool BookOrbitCredentialStore::fromJson(JsonVariantConst doc) {
                                                                                 : BookOrbitSyncBehavior::ASK_EVERY_TIME;
   syncOnSleep = doc["syncOnSleep"] | false;
 
+  std::string clientId = doc["cfClientId"] | "";
+  obfuscation::DecodeStatus cfSecretStatus = obfuscation::DecodeStatus::INVALID;
+  // Try obfuscated secret first; if absent or unreadable, fall back to plaintext.
+  // deobfuscateFromBase64("") returns EMPTY, so a missing key falls back to plaintext if it exists.
+  std::string clientSecret = obfuscation::deobfuscateFromBase64(doc["cfClientSecret_obf"] | "", &cfSecretStatus);
+  if (cfSecretStatus == obfuscation::DecodeStatus::INVALID || cfSecretStatus == obfuscation::DecodeStatus::EMPTY) {
+    clientSecret = doc["cfClientSecret"] | "";
+  }
+  setCfCredentials(clientId, clientSecret);
+
   return true;
 }
 
@@ -46,6 +62,13 @@ void BookOrbitCredentialStore::setCredentials(const std::string& user, const std
   username = user;
   password = pass;
   LOG_DBG("BOS", "Set credentials for user: %s", user.c_str());
+}
+
+void BookOrbitCredentialStore::setCfCredentials(const std::string& clientId, const std::string& clientSecret) {
+  ensureLoaded();
+  cfClientId = clientId;
+  cfClientSecret = clientSecret;
+  LOG_DBG("BOS", "Set CF credentials: id=%s", clientId.empty() ? "(none)" : clientId.c_str());
 }
 
 std::string BookOrbitCredentialStore::getMd5Password() const {
@@ -73,6 +96,14 @@ void BookOrbitCredentialStore::clearCredentials() {
   password.clear();
   saveToFile();
   LOG_DBG("BOS", "Cleared BookOrbit credentials");
+}
+
+void BookOrbitCredentialStore::clearCfCredentials() {
+  ensureLoaded();
+  cfClientId.clear();
+  cfClientSecret.clear();
+  saveToFile();
+  LOG_DBG("BOS", "Cleared CF credentials");
 }
 
 void BookOrbitCredentialStore::setServerUrl(const std::string& url) {
