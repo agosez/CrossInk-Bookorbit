@@ -9,6 +9,17 @@ namespace {
 // (e.g. GET {server}/api/v1/koreader/users/auth), unlike a plain koreader-sync
 // server which serves them at the root.
 constexpr char API_PREFIX[] = "/api/v1/koreader";
+
+// A token pasted from the Cloudflare dashboard easily carries a stray space or line break,
+// which would otherwise go out inside the header line and fail the check with no clue why.
+std::string trimmed(const std::string& value) {
+  constexpr char WHITESPACE[] = " \t\r\n";
+  const size_t first = value.find_first_not_of(WHITESPACE);
+  if (first == std::string::npos) {
+    return "";
+  }
+  return value.substr(first, value.find_last_not_of(WHITESPACE) - first + 1);
+}
 }  // namespace
 
 void BookOrbitCredentialStore::toJson(JsonDocument& doc) const {
@@ -44,15 +55,18 @@ bool BookOrbitCredentialStore::fromJson(JsonVariantConst doc) {
                                                                                 : BookOrbitSyncBehavior::ASK_EVERY_TIME;
   syncOnSleep = doc["syncOnSleep"] | false;
 
-  std::string clientId = doc["cfClientId"] | "";
+  setCfClientId(doc["cfClientId"] | "");
+  // Unlike the password, this field has no legacy encoding to accept: a value that does not
+  // validate is another device's file or a hand edit, and decoding it yields random bytes.
   obfuscation::DecodeStatus cfSecretStatus = obfuscation::DecodeStatus::INVALID;
-  // Try obfuscated secret first; if absent or unreadable, fall back to plaintext.
-  // deobfuscateFromBase64("") returns EMPTY, so a missing key falls back to plaintext if it exists.
-  std::string clientSecret = obfuscation::deobfuscateFromBase64(doc["cfClientSecret_obf"] | "", &cfSecretStatus);
-  if (cfSecretStatus == obfuscation::DecodeStatus::INVALID || cfSecretStatus == obfuscation::DecodeStatus::EMPTY) {
-    clientSecret = doc["cfClientSecret"] | "";
+  std::string cfSecret = obfuscation::deobfuscateFromBase64(doc["cfClientSecret_obf"] | "", &cfSecretStatus);
+  if (cfSecretStatus != obfuscation::DecodeStatus::VALIDATED) {
+    if (cfSecretStatus != obfuscation::DecodeStatus::EMPTY) {
+      LOG_ERR("BOS", "Ignoring unreadable Cloudflare Access client secret");
+    }
+    cfSecret.clear();
   }
-  setCfCredentials(clientId, clientSecret);
+  setCfClientSecret(cfSecret);
 
   return true;
 }
@@ -64,11 +78,31 @@ void BookOrbitCredentialStore::setCredentials(const std::string& user, const std
   LOG_DBG("BOS", "Set credentials for user: %s", user.c_str());
 }
 
-void BookOrbitCredentialStore::setCfCredentials(const std::string& clientId, const std::string& clientSecret) {
+void BookOrbitCredentialStore::setCfClientId(const std::string& clientId) {
   ensureLoaded();
-  cfClientId = clientId;
-  cfClientSecret = clientSecret;
-  LOG_DBG("BOS", "Set CF credentials: id=%s", clientId.empty() ? "(none)" : clientId.c_str());
+  cfClientId = trimmed(clientId);
+  if (cfClientId.empty()) {
+    cfClientSecret.clear();
+  }
+  LOG_DBG("BOS", "Set Cloudflare Access client ID: %s", cfClientId.empty() ? "(none)" : cfClientId.c_str());
+}
+
+void BookOrbitCredentialStore::setCfClientSecret(const std::string& clientSecret) {
+  ensureLoaded();
+  cfClientSecret = trimmed(clientSecret);
+}
+
+bool BookOrbitCredentialStore::sendsCfAccessToken() const {
+  ensureLoaded();
+  if (cfClientId.empty() || cfClientSecret.empty()) {
+    return false;
+  }
+  // Same rule as getBaseUrl(): an address without a scheme is reached over https.
+  if (serverUrl.find("://") != std::string::npos && serverUrl.rfind("https://", 0) != 0) {
+    LOG_ERR("BOS", "Cloudflare Access token not sent: the server URL is not https");
+    return false;
+  }
+  return true;
 }
 
 std::string BookOrbitCredentialStore::getMd5Password() const {
@@ -96,14 +130,6 @@ void BookOrbitCredentialStore::clearCredentials() {
   password.clear();
   saveToFile();
   LOG_DBG("BOS", "Cleared BookOrbit credentials");
-}
-
-void BookOrbitCredentialStore::clearCfCredentials() {
-  ensureLoaded();
-  cfClientId.clear();
-  cfClientSecret.clear();
-  saveToFile();
-  LOG_DBG("BOS", "Cleared CF credentials");
 }
 
 void BookOrbitCredentialStore::setServerUrl(const std::string& url) {

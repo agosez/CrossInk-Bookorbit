@@ -590,7 +590,7 @@ inline SettingInfo buildSideButtonActionSetting(const StrId nameId, uint8_t Cros
 // #1636) so the per-entry SettingInfo cost is paid once. Read-only consumers
 // can use it directly; mutable device UI lists use getSettingsList(), which
 // returns an owned copy and can add SD-card font and dictionary options.
-// The count is this fork's: upstream's entries plus the five BookOrbit ones and the clock
+// The count is this fork's: upstream's entries plus the seven BookOrbit ones and the clock
 // latch toggle. Nine gesture entries (two-finger and edge) are compiled only for touch
 // devices, the five KOReader account entries only with its build switch, and two tilt
 // entries are added at run time on boards with the sensor.
@@ -600,7 +600,7 @@ inline constexpr size_t BASE_SETTINGS_KOREADER_ENTRIES = 5;
 inline constexpr size_t BASE_SETTINGS_KOREADER_ENTRIES = 0;
 #endif
 inline constexpr size_t BASE_SETTINGS_CAPACITY =
-    99 + 2 + (CROSSINK_APP_CAP_TOUCH ? 9 : 0) + BASE_SETTINGS_KOREADER_ENTRIES;
+    101 + 2 + (CROSSINK_APP_CAP_TOUCH ? 9 : 0) + BASE_SETTINGS_KOREADER_ENTRIES;
 
 const std::vector<SettingInfo>& getBaseSettingsList();
 

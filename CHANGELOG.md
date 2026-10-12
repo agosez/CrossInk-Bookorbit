@@ -5,13 +5,20 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.6.1.
+
+### Added
+
+- A BookOrbit server published behind Cloudflare Access can now be reached. Enter a Cloudflare service token — its Client ID and Client Secret — under BookOrbit Sync in the web settings, and the device presents it with every sync and catalog request (contributed by chaos2007).
+
 ## [v1.6.1+bookorbit.1] - 2026-10-05
 
 Based on CrossInk v1.6.1.
 
 ### Added
 
-- Support for Cloudflare Zero Trust (Cloudflare Access) Service Tokens for BookOrbit servers behind a tunnel. When configured in `/.crosspoint/bookorbit.json`, `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers are automatically attached to all BookOrbit sync and catalog requests.
 - The Cover Grid home screen, new in CrossInk v1.6.1 on devices with PSRAM, has a BookOrbit tab once an account is set up, next to Library and OPDS.
 - The date can be shown on devices without a clock chip, like the clock already could. CrossInk v1.6.1 lets you place a clock and a date in the status bars; both are offered on every device, and the date appears once the device has set its time over Wi-Fi.
 
