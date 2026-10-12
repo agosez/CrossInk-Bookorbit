@@ -38,6 +38,22 @@ That URL is what the device asks for below. The preconfigured plugin offered on 
 
 Credentials live on the SD card in `/.crosspoint/bookorbit.json`, obfuscated with the device's hardware MAC — the same scheme CrossInk uses for KOReader credentials.
 
+#### Cloudflare Zero Trust (Cloudflare Access)
+
+If your BookOrbit server is behind a Cloudflare Zero Trust tunnel with an Access Service Token policy, add your service credentials to `/.crosspoint/bookorbit.json`:
+
+```json
+{
+  "username": "your_koreader_username",
+  "password_obf": "your_koreader_password",
+  "serverUrl": "https://books.example.com",
+  "cfClientId": "xxxx.access",
+  "cfClientSecret": "yyyy"
+}
+```
+
+The device attaches the required `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers to all BookOrbit requests. Plaintext secrets are automatically obfuscated with the device's hardware MAC on next save (`cfClientSecret_obf`).
+
 ## Syncing reading progress
 
 Open a book, then **Menu → Bookmarks tab → BookOrbit Sync**. The device compares the position stored on the server with your local one — chapter, page, percentage and the device name that last uploaded — and offers two choices:
