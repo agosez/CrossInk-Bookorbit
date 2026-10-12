@@ -353,6 +353,22 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
           BOOKORBIT_STORE.saveToFile();
         },
         "boServerUrl", StrId::STR_BOOKORBIT_SYNC));
+    // Cloudflare Access service token: far too long for the on-screen keyboard, so these two
+    // have no counterpart in BookOrbitSettingsActivity.
+    add(SettingInfo::DynamicString(
+        StrId::STR_BOOKORBIT_CF_CLIENT_ID, [] { return BOOKORBIT_STORE.getCfClientId(); },
+        [](const std::string& v) {
+          BOOKORBIT_STORE.setCfClientId(v);
+          BOOKORBIT_STORE.saveToFile();
+        },
+        "boCfClientId", StrId::STR_BOOKORBIT_SYNC));
+    add(SettingInfo::DynamicString(
+        StrId::STR_BOOKORBIT_CF_CLIENT_SECRET, [] { return BOOKORBIT_STORE.getCfClientSecret(); },
+        [](const std::string& v) {
+          BOOKORBIT_STORE.setCfClientSecret(v);
+          BOOKORBIT_STORE.saveToFile();
+        },
+        "boCfClientSecret", StrId::STR_BOOKORBIT_SYNC));
     add(SettingInfo::DynamicEnum(
         StrId::STR_SYNC_BEHAVIOR, {StrId::STR_ASK_EVERY_TIME, StrId::STR_SMART_SYNC},
         [] { return static_cast<uint8_t>(BOOKORBIT_STORE.getSyncBehavior()); },

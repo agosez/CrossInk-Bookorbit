@@ -44,16 +44,16 @@ std::string urlEncode(const std::string& s) {
 }
 
 HttpDownloader::HeaderList authHeaders() {
-  HttpDownloader::HeaderList headers = {
-      {"Accept", "application/json"},
-      // We cannot decompress responses; keep proxies from picking gzip for us.
-      {"Accept-Encoding", "identity"},
-      {"x-auth-user", BOOKORBIT_STORE.getUsername()},
-      {"x-auth-key", BOOKORBIT_STORE.getMd5Password()},
-  };
-  if (BOOKORBIT_STORE.hasCfCredentials()) {
-    headers.push_back({"CF-Access-Client-Id", BOOKORBIT_STORE.getCfClientId()});
-    headers.push_back({"CF-Access-Client-Secret", BOOKORBIT_STORE.getCfClientSecret()});
+  HttpDownloader::HeaderList headers;
+  headers.reserve(6);
+  headers.emplace_back("Accept", "application/json");
+  // We cannot decompress responses; keep proxies from picking gzip for us.
+  headers.emplace_back("Accept-Encoding", "identity");
+  headers.emplace_back("x-auth-user", BOOKORBIT_STORE.getUsername());
+  headers.emplace_back("x-auth-key", BOOKORBIT_STORE.getMd5Password());
+  if (BOOKORBIT_STORE.sendsCfAccessToken()) {
+    headers.emplace_back("CF-Access-Client-Id", BOOKORBIT_STORE.getCfClientId());
+    headers.emplace_back("CF-Access-Client-Secret", BOOKORBIT_STORE.getCfClientSecret());
   }
   return headers;
 }

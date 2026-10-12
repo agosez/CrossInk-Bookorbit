@@ -30,8 +30,8 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
   std::string password;
   std::string serverUrl;
   std::string downloadFolder;  // catalog download folder, normalized ("" = SD root)
-  std::string cfClientId;      // Cloudflare Zero Trust Access service token Client ID
-  std::string cfClientSecret;  // Cloudflare Zero Trust Access service token Client Secret
+  std::string cfClientId;      // Cloudflare Access service token, Client ID half
+  std::string cfClientSecret;  // Cloudflare Access service token, Client Secret half
   BookOrbitSyncBehavior syncBehavior = BookOrbitSyncBehavior::ASK_EVERY_TIME;
   bool syncOnSleep = false;
 
@@ -96,8 +96,11 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
   // Clear credentials
   void clearCredentials();
 
-  // Cloudflare Zero Trust service credentials
-  void setCfCredentials(const std::string& clientId, const std::string& clientSecret);
+  // Cloudflare Access service token, for a server published behind a Cloudflare tunnel.
+  // Both halves are stored trimmed. The web settings never show the secret back, so it
+  // cannot be blanked there on its own: emptying the Client ID is what forgets the token.
+  void setCfClientId(const std::string& clientId);
+  void setCfClientSecret(const std::string& clientSecret);
   const std::string& getCfClientId() const {
     ensureLoaded();
     return cfClientId;
@@ -106,11 +109,10 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
     ensureLoaded();
     return cfClientSecret;
   }
-  bool hasCfCredentials() const {
-    ensureLoaded();
-    return !cfClientId.empty() && !cfClientSecret.empty();
-  }
-  void clearCfCredentials();
+  // True when the token goes out with requests to the configured server: both halves are
+  // set and the server is reached over https. A Cloudflare tunnel always is, and the
+  // secret must not travel in clear to a plain http address.
+  bool sendsCfAccessToken() const;
 
   // Server URL management
   void setServerUrl(const std::string& url);

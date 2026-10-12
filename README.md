@@ -38,21 +38,17 @@ That URL is what the device asks for below. The preconfigured plugin offered on 
 
 Credentials live on the SD card in `/.crosspoint/bookorbit.json`, obfuscated with the device's hardware MAC — the same scheme CrossInk uses for KOReader credentials.
 
-#### Cloudflare Zero Trust (Cloudflare Access)
+### Behind Cloudflare Access
 
-If your BookOrbit server is behind a Cloudflare Zero Trust tunnel with an Access Service Token policy, add your service credentials to `/.crosspoint/bookorbit.json`:
+If your server is published through a Cloudflare tunnel with an Access policy in front of it, Cloudflare stops the device's requests before they reach BookOrbit. Give the device a [service token](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/) to let it through:
 
-```json
-{
-  "username": "your_koreader_username",
-  "password_obf": "your_koreader_password",
-  "serverUrl": "https://books.example.com",
-  "cfClientId": "xxxx.access",
-  "cfClientSecret": "yyyy"
-}
-```
+1. In Cloudflare Zero Trust, create a service token and allow it on your BookOrbit application with a policy whose action is **Service Auth**.
+2. On the device, start **File Transfer** and open `http://<device-ip>/settings` in a browser.
+3. Under **BookOrbit Sync**, fill in **Cloudflare Access Client ID** and **Cloudflare Access Client Secret**, then save. The secret is never shown back; emptying the Client ID removes the token from the device.
 
-The device attaches the required `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers to all BookOrbit requests. Plaintext secrets are automatically obfuscated with the device's hardware MAC on next save (`cfClientSecret_obf`).
+The device then presents the token with every BookOrbit request, as the `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers. It does so only when the server URL is `https://`.
+
+> Give the reader a service token of its own, allowed on BookOrbit only. Its secret is kept on the SD card the way your password is — obfuscated, not encrypted — and the device does not verify the server's certificate. A token that opens nothing else can be revoked without touching the rest of your setup.
 
 ## Syncing reading progress
 
