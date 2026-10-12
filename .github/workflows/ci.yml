@@ -200,7 +200,13 @@ jobs:
         run: pio run -e simulator
 
       - name: Start the BookOrbit server
-        run: docker compose -f test/integration/docker-compose.yml up -d --wait
+        # The book dock is a bind mount: the seeder fills it from the host and
+        # the server, running as its own user, empties it. Left to Docker, the
+        # folder would be created owned by root and closed to both.
+        run: |
+          mkdir -p test/integration/library-dock
+          chmod a+rwx test/integration/library-dock
+          docker compose -f test/integration/docker-compose.yml up -d --wait
 
       - name: Seed the server
         run: |
