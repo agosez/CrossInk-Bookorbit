@@ -188,11 +188,15 @@ jobs:
           python3 test/integration/ci/patch_simulator_package.py
 
       - name: Build the simulator
-        # On Linux the simulator package computes MD5 with OpenSSL (CommonCrypto
-        # on macOS), which platformio.ini does not link. PlatformIO appends this
-        # variable to the environment's build_flags.
+        # Two things platformio.ini leaves to macOS. On Linux the simulator
+        # package computes MD5 with OpenSSL (CommonCrypto on macOS), which has to
+        # be linked. And GNU ld pulls in the package's firmware_link_stubs.o,
+        # whose MySerialImpl and uzlib checksum definitions repeat the ones
+        # lib/Logging and lib/uzlib already carry; the macOS linker never loads
+        # that object. The bodies are the same, so either copy will do.
+        # PlatformIO appends this variable to the environment's build_flags.
         env:
-          PLATFORMIO_BUILD_FLAGS: -lcrypto
+          PLATFORMIO_BUILD_FLAGS: -lcrypto -Wl,--allow-multiple-definition
         run: pio run -e simulator
 
       - name: Start the BookOrbit server
