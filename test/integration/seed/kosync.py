@@ -282,6 +282,25 @@ class AdminClient:
         (409) is fine."""
         upload_file(self.api(f"/books/{book_id}/files"), self._headers(), path)
 
+    def epub_file_id(self, book_id: int) -> int:
+        """The id of a book's EPUB file, which the web reader's own endpoints are keyed on."""
+        detail = request_json("GET", self.api(f"/books/{book_id}"), self._headers(), ok=(200,))
+        return next(int(f["id"]) for f in detail["files"] if f["format"].lower() == "epub")
+
+    def save_web_progress(self, file_id: int, xpointer: str, percentage: float) -> None:
+        """What BookOrbit's web reader posts two seconds after it lands on a position,
+        the one it opens a book at included: the position as a KOReader xpointer and a
+        0-100 percentage. The server dates the save with its own clock, and serves it
+        to devices as ``bookorbit-web`` for as long as it is the newest thing it holds."""
+        request_json("POST", self.api(f"/books/files/{file_id}/progress"), self._headers(),
+                     {"cfi": None, "percentage": percentage, "koreaderProgress": xpointer})
+
+    def reset_progress(self, file_id: int) -> None:
+        """Clear the file's reading progress, as BookOrbit's own interface does. Until a
+        device has pushed the start position, the server serves devices the start of the
+        book dated now, as ``bookorbit-web``, and holds back any other position they push."""
+        request_json("DELETE", self.api(f"/books/files/{file_id}/progress"), self._headers(), ok=(200, 204))
+
     def ensure_smart_scope(self, name: str, icon: str, rules: list[dict]) -> int:
         """Create a SmartScope matching ``rules``, or return the existing one by name.
 

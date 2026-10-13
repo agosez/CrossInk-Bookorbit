@@ -44,6 +44,7 @@
 #include "fontIds.h"
 #include "network/SavedWifiConnect.h"
 #include "util/BookContentId.h"
+#include "util/BookOrbitSmartSync.h"
 
 // This file mirrors src/activities/reader/KOReaderSyncActivity.cpp; see that file's
 // comments for the rationale behind the heap/TLS-related steps. Kept as a separate,
@@ -179,29 +180,29 @@ TouchActionButtons::Layout noRemoteProgressActionLayout(const Rect& screen, cons
   return TouchActionButtons::vertical(container, buttonCount);
 }
 
-// Smart sync's memory: the server progress timestamp this device saw at the
-// end of its last successful sync of this book, one 12-byte file beside the
-// book's stats queue. It answers the one question the automatic decision
-// needs -- has the server moved since we were last here? -- which progress
-// percentages alone cannot
-// 0 means "unknown", and unknown always falls back to the choice screen.
+// Smart sync's memory: what this device saw at the end of its last successful
+// sync of this book, one 18-byte file beside the book's stats queue. It holds
+// the server's progress timestamp and the position both sides were left at,
+// which together answer the one question the automatic decision needs -- has
+// the server moved since we were last here? -- and that progress percentages
+// alone cannot. No readable marker means no history, and no history always
+// falls back to the choice screen.
 constexpr char SYNC_MARKER_FILE[] = "/bookorbit_sync.bin";
-constexpr uint32_t SYNC_MARKER_MAGIC = 0x424F5359;  // "BOSY"
 
-int64_t readLastSyncMarker(const std::string& bookCachePath) {
-  if (bookCachePath.empty()) return 0;  // book not hashable: no history is the honest answer
+BookOrbitSmartSync::Marker readSyncMarker(const std::string& bookCachePath) {
+  if (bookCachePath.empty()) return {};  // book not hashable: no history is the honest answer
   const std::string path = bookCachePath + SYNC_MARKER_FILE;
   FsFile file;
-  if (!Storage.openFileForRead("BookOrbit", path.c_str(), file)) return 0;
-  uint32_t magic = 0;
-  int64_t timestamp = 0;
-  const bool ok = file.read(&magic, sizeof(magic)) == sizeof(magic) &&
-                  file.read(&timestamp, sizeof(timestamp)) == sizeof(timestamp) && magic == SYNC_MARKER_MAGIC;
+  if (!Storage.openFileForRead("BookOrbit", path.c_str(), file)) return {};
+  uint8_t raw[BookOrbitSmartSync::MARKER_SIZE];
+  const int length = file.read(raw, sizeof(raw));
   file.close();
-  return ok && timestamp > 0 ? timestamp : 0;
+  if (length <= 0) return {};
+  return BookOrbitSmartSync::decodeMarker(raw, static_cast<size_t>(length));
 }
 
-void writeLastSyncMarker(const std::string& bookCachePath, const int64_t timestamp) {
+void writeSyncMarker(const std::string& bookCachePath, const int64_t timestamp,
+                     const BookOrbitSmartSync::Position& position) {
   if (timestamp <= 0) return;         // nothing learned; keep whatever history exists
   if (bookCachePath.empty()) return;  // book not hashable: nowhere safe to write
   const std::string path = bookCachePath + SYNC_MARKER_FILE;
@@ -210,12 +211,13 @@ void writeLastSyncMarker(const std::string& bookCachePath, const int64_t timesta
     LOG_ERR("BookOrbit", "Could not write sync marker %s", path.c_str());
     return;
   }
-  const bool ok = file.write(&SYNC_MARKER_MAGIC, sizeof(SYNC_MARKER_MAGIC)) == sizeof(SYNC_MARKER_MAGIC) &&
-                  file.write(&timestamp, sizeof(timestamp)) == sizeof(timestamp);
+  uint8_t raw[BookOrbitSmartSync::MARKER_SIZE];
+  BookOrbitSmartSync::encodeMarker(BookOrbitSmartSync::makeMarker(timestamp, position), raw);
+  const bool ok = file.write(raw, sizeof(raw)) == sizeof(raw);
   file.close();
   if (!ok) {
-    // A short marker fails the magic/size check on read, so a partial write
-    // degrades to "unknown", never to a wrong date.
+    // What a short write leaves behind could still read as a date without its
+    // position; removing it degrades to "unknown" instead.
     LOG_ERR("BookOrbit", "Short write on sync marker %s", path.c_str());
     Storage.remove(path.c_str());
   }
@@ -313,7 +315,8 @@ void BookOrbitSyncActivity::saveProgressAndReturn(const CrossPointPosition& posi
   RecentBookProgress::saveCachedEpubPercent(*epub, position.spineIndex, position.pageNumber, pageCount);
   // Manual applies record the marker too, so the history smart sync reads is
   // already there the day the option gets switched on.
-  writeLastSyncMarker(BookContentId::bookStateDir(epubPath), remoteProgress.timestamp);
+  writeSyncMarker(BookContentId::bookStateDir(epubPath), remoteProgress.timestamp,
+                  {position.spineIndex, position.pageNumber, pageCount});
   returnToReader();
 }
 
@@ -632,39 +635,38 @@ void BookOrbitSyncActivity::performSync() {
                                                                 static_cast<float>(remotePosition.totalPages - 1)
                                                           : 0.0f;
   remoteLocalPercent = epub->calculateProgress(remotePosition.spineIndex, remoteIntra);
-  const int spineDelta = currentSpineIndex - remotePosition.spineIndex;
-  const int pageDelta = (spineDelta == 0) ? (currentPage - remotePosition.pageNumber) : 0;
-  // The xpath mapping is exact to about one page, so within a page the sides agree.
-  const bool samePosition = spineDelta == 0 && std::abs(pageDelta) <= 1;
-  const bool localAhead = spineDelta > 0 || (spineDelta == 0 && pageDelta > 1);
+  const BookOrbitSmartSync::Position local{currentSpineIndex, currentPage, totalPagesInSpine};
+  const BookOrbitSmartSync::Position remote{remotePosition.spineIndex, remotePosition.pageNumber,
+                                            remotePosition.totalPages};
 
   if (smartSyncEnabled() || sleepSync) {
     const std::string stateDir = BookContentId::bookStateDir(epubPath);
-    const int64_t lastSync = readLastSyncMarker(stateDir);
-    LOG_DBG("BookOrbit", "Smart decision: local spine=%d page=%d, remote spine=%d page=%d, serverTs=%lld lastSync=%lld",
-            currentSpineIndex, currentPage, remotePosition.spineIndex, remotePosition.pageNumber,
-            (long long)remoteProgress.timestamp, (long long)lastSync);
-    if (samePosition) {
-      // Both sides agree; refresh the marker so the next visit still knows
-      // whether the server moved in the meantime.
-      writeLastSyncMarker(stateDir, remoteProgress.timestamp);
-      completeAlreadySynced();
-      return;
-    }
-    if (remoteProgress.timestamp > 0 && lastSync > 0) {
-      // Act only when the position order and the time order tell the same story
-      const bool serverMoved = remoteProgress.timestamp > lastSync;
-      if (!localAhead && serverMoved) {
+    const BookOrbitSmartSync::Marker lastSync = readSyncMarker(stateDir);
+    LOG_DBG("BookOrbit",
+            "Smart decision: local spine=%d page=%d, remote spine=%d page=%d/%d, serverTs=%lld; last sync ts=%lld "
+            "spine=%u page=%u/%u",
+            local.spineIndex, local.pageNumber, remote.spineIndex, remote.pageNumber, remote.pageCount,
+            (long long)remoteProgress.timestamp, (long long)lastSync.timestamp, (unsigned)lastSync.spineIndex,
+            (unsigned)lastSync.pageNumber, (unsigned)lastSync.pageCount);
+    switch (BookOrbitSmartSync::decide(local, remote, remoteProgress.timestamp, lastSync)) {
+      case BookOrbitSmartSync::Decision::AlreadySynced:
+        // Both sides agree; refresh the marker so the next visit still knows
+        // whether the server moved in the meantime.
+        writeSyncMarker(stateDir, remoteProgress.timestamp, BookOrbitSmartSync::furtherOf(local, remote));
+        completeAlreadySynced();
+        return;
+      case BookOrbitSmartSync::Decision::ApplyRemote:
         saveProgressAndReturn(remotePosition);
         return;
-      }
-      if (localAhead && !serverMoved) {
+      case BookOrbitSmartSync::Decision::UploadLocal:
         performUpload();
         return;
-      }
-      LOG_DBG("BookOrbit", "Smart sync: progress and dates disagree, showing the choice screen");
-    } else {
-      LOG_DBG("BookOrbit", "Smart sync: no sync history for this book yet, showing the choice screen");
+      case BookOrbitSmartSync::Decision::AskNoHistory:
+        LOG_DBG("BookOrbit", "Smart sync: no sync history for this book yet, showing the choice screen");
+        break;
+      case BookOrbitSmartSync::Decision::AskConflict:
+        LOG_DBG("BookOrbit", "Smart sync: progress and sync history disagree, showing the choice screen");
+        break;
     }
   }
 
@@ -678,7 +680,7 @@ void BookOrbitSyncActivity::performSync() {
   {
     RenderLock lock(*this);
     state = SHOWING_RESULT;
-    selectedOption = localAhead ? 1 : 0;  // 1 = Upload local, 0 = Apply remote
+    selectedOption = BookOrbitSmartSync::isAhead(local, remote) ? 1 : 0;  // 1 = Upload local, 0 = Apply remote
   }
   requestUpdate(true);
 }
@@ -1557,7 +1559,8 @@ void BookOrbitSyncActivity::performUpload() {
     return;
   }
 
-  writeLastSyncMarker(BookContentId::bookStateDir(epubPath), progress.timestamp);
+  writeSyncMarker(BookContentId::bookStateDir(epubPath), progress.timestamp,
+                  {currentSpineIndex, currentPage, totalPagesInSpine});
   {
     RenderLock lock(*this);
     state = UPLOAD_COMPLETE;

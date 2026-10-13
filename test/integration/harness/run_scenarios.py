@@ -30,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 INTEGRATION = ROOT / "test" / "integration"
 sys.path.insert(0, str(INTEGRATION / "seed"))
-from kosync import BASE_URL, KosyncDevice, kodatetime, partial_md5  # noqa: E402
+from kosync import BASE_URL, AdminClient, KosyncDevice, kodatetime, partial_md5  # noqa: E402
 
 PROGRAM = ROOT / ".pio" / "build" / "simulator" / "program"
 
@@ -42,7 +42,8 @@ SIM_DEVICE_ID = "crossink-" + SIM_MAC.hex()
 SHORT_PWRBTN_SLEEP = 1  # CrossPointSettings::SHORT_PWRBTN::SLEEP
 SHORT_PWRBTN_BOOKORBIT_SYNC = 37  # CrossPointSettings::SHORT_PWRBTN::BOOKORBIT_SYNC
 SYNC_BEHAVIOR_SMART = 1
-SYNC_MARKER_MAGIC = 0x424F5359  # "BOSY", BookOrbitSyncActivity's SYNC_MARKER_MAGIC
+SYNC_MARKER_MAGIC = 0x424F5359  # "BOSY", BookOrbitSmartSync::MARKER_MAGIC
+SYNC_MARKER_FILE = "bookorbit_sync.bin"
 
 CRASH_PATTERNS = ("Assertion failed", "Segmentation fault", "AddressSanitizer",
                   "UndefinedBehaviorSanitizer", "std::bad_alloc")
@@ -292,11 +293,27 @@ class SimFs:
             "shortPwrBtn": SHORT_PWRBTN_SLEEP,
         }))
 
-    def write_sync_marker(self, book_hash: str, timestamp: int) -> None:
-        """Smart sync's memory of the server timestamp this device last synced at."""
+    def write_sync_marker(self, book_hash: str, timestamp: int,
+                          position: tuple[int, int, int] | None = None) -> None:
+        """Smart sync's memory of this device's last sync of the book: the server
+        timestamp it saw and, unless written by a release that did not record it,
+        the position both sides were left at (spine, page, page count)."""
         state_dir = self.state_dir(book_hash)
         state_dir.mkdir(parents=True, exist_ok=True)
-        (state_dir / "bookorbit_sync.bin").write_bytes(struct.pack("<Iq", SYNC_MARKER_MAGIC, timestamp))
+        data = struct.pack("<Iq", SYNC_MARKER_MAGIC, timestamp)
+        if position is not None:
+            data += struct.pack("<HHH", *position)
+        (state_dir / SYNC_MARKER_FILE).write_bytes(data)
+
+    def read_sync_marker(self, book_hash: str) -> dict | None:
+        path = self.state_dir(book_hash) / SYNC_MARKER_FILE
+        raw = path.read_bytes() if path.exists() else b""
+        if len(raw) < 12 or struct.unpack_from("<I", raw)[0] != SYNC_MARKER_MAGIC:
+            return None
+        marker: dict = {"timestamp": struct.unpack_from("<q", raw, 4)[0], "position": None}
+        if len(raw) >= 18:
+            marker["position"] = struct.unpack_from("<HHH", raw, 12)
+        return marker
 
     def add_book(self, source: Path) -> str:
         dest = self.fs / "books" / source.name
@@ -433,6 +450,25 @@ def bookmark_adds(device: KosyncDevice, book_hash: str) -> list[dict]:
     return resp["results"][0]["toApply"]["add"]
 
 
+def web_session(manifest: dict, book: dict) -> tuple[AdminClient, int]:
+    """BookOrbit's own web API as the seeded user, and the id it knows the book's EPUB
+    file by."""
+    admin = AdminClient(BASE_URL)
+    admin.login(manifest["user"]["username"], manifest["user"]["password"])
+    # A book is titled by its file name until the server's metadata scan reaches it.
+    ids = admin.find_book_ids([book["title"], Path(book["file"]).stem])
+    assert ids, f"the server does not list {book['file']}"
+    return admin, admin.epub_file_id(next(iter(ids.values())))
+
+
+def open_in_web_reader(manifest: dict, book: dict, xpointer: str, percentage: float) -> None:
+    """Open the book in BookOrbit's web reader and close it without reading. The
+    reader saves the position it lands on two seconds after opening, which dates the
+    server's position as of now although nobody read anything."""
+    admin, file_id = web_session(manifest, book)
+    admin.save_web_progress(file_id, xpointer, percentage)
+
+
 def reset_sim_bookmarks(manifest: dict, book_hash: str) -> None:
     """Detach the simulator's fixed device id from every bookmark on this book, so the
     next peer bookmark is offered to it again (the server offers a bookmark only to
@@ -548,6 +584,150 @@ def scenario_sleep_sync_push(verbose: bool) -> None:
     remote = peer.get_progress(book_hash)
     assert float(remote.get("percentage", 0)) > 0.5, f"server progress not advanced: {remote}"
     assert remote.get("device_id") == SIM_DEVICE_ID, f"unexpected device id: {remote}"
+
+
+def scenario_sleep_sync_after_web_open(verbose: bool) -> None:
+    """Opening a book in BookOrbit's web reader between two device syncs must not hold
+    back the next sleep sync (issue #91). The web reader saves the position it opens
+    at, so the server's date moves while its position does not: the device's further
+    position is uploaded instead of being left for a manual sync. Two runs on one
+    card, so the second sync decides on the history the first one wrote."""
+    manifest, _ = load_seed()
+    seeded = manifest["progress"][4]
+    source = INTEGRATION / "library" / seeded["file"]
+    book_hash = seeded["hash"]
+    peer = peer_device(manifest)
+    # The peer's 40% is the newest thing on the server again, whatever earlier runs left.
+    peer.put_progress(book_hash, seeded["progress"], seeded["percentage"])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        sim_path = fs.add_book(source)
+        fs.set_open_book(sim_path)
+        progress_bin = fs.epub_cache_dir(sim_path) / "progress.bin"
+
+        # 1. A manual sync from chapter 4: a first sync has no history, so the choice
+        # screen comes up and the device's position is uploaded.
+        write_progress_bin(progress_bin, 3, 0, 1)
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "first sync never reached its end marker"
+        marker = fs.read_sync_marker(book_hash)
+        assert marker and marker["position"] == (3, 0, 1), \
+            f"the upload did not record the synced position: {marker}"
+
+        # 2. The web reader opens the book where the device left it and saves the
+        # start of its own page, here the start of that chapter. Guard on the fixture
+        # itself: the server must now serve that save, dated after the device's sync.
+        served: dict = {}
+        for _ in range(10):
+            open_in_web_reader(manifest, seeded, "/body/DocFragment[4]/body/p[1]/text().0", 45)
+            served = peer.get_progress(book_hash)
+            if int(served.get("timestamp", 0)) > marker["timestamp"]:
+                break
+            time.sleep(1)
+        assert served.get("device_id") == "bookorbit-web", f"the web reader's save is not served: {served}"
+        assert int(served["timestamp"]) > marker["timestamp"], \
+            f"the web reader's save is not dated after the device's sync: {served} vs {marker}"
+
+        # 3. Read on to the last chapter, then put the device to sleep.
+        write_progress_bin(progress_bin, 4, 0, 1)
+        fs.enable_sync_on_sleep()
+        fs.set_open_book(sim_path)
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="none",
+                               timeout_s=90, verbose=verbose)
+        assert "Sleep sync over" in output, "sleep sync never ran to its end"
+        assert "progress left for the next manual sync" not in output, \
+            "a web reader that only opened the book held back the device's progress"
+
+    remote = peer.get_progress(book_hash)
+    assert remote.get("device_id") == SIM_DEVICE_ID, f"the device's position was not uploaded: {remote}"
+    assert float(remote.get("percentage", 0)) > 0.5, f"server progress not advanced: {remote}"
+
+
+def scenario_sleep_sync_conflict(verbose: bool) -> None:
+    """Another reader really read further since this device's last sync, and so did
+    this device: nobody is there to arbitrate, so the sleep sync leaves both positions
+    alone. The guard on the scenario above, which must not turn into "the device
+    always wins"."""
+    manifest, _ = load_seed()
+    seeded = manifest["progress"][5]
+    source = INTEGRATION / "library" / seeded["file"]
+    book_hash = seeded["hash"]
+    peer = peer_device(manifest)
+    now = int(time.time())
+    # The peer is in chapter 4 since a moment ago.
+    peer.put_progress(book_hash, "/body/DocFragment[4]/body/p[1]/text().0", 0.70, timestamp=now)
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        fs.enable_sync_on_sleep()
+        sim_path = fs.add_book(source)
+        fs.set_open_book(sim_path)
+        # This device last synced an hour ago in chapter 3, and has reached chapter 5.
+        write_progress_bin(fs.epub_cache_dir(sim_path) / "progress.bin", 4, 0, 1)
+        fs.write_sync_marker(book_hash, now - 3600, position=(2, 0, 1))
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="none",
+                               timeout_s=90, verbose=verbose)
+        assert "Sleep sync over" in output, "sleep sync never ran to its end"
+        assert "Sleep sync: progress left for the next manual sync" in output, \
+            "the sleep sync settled a conflict on its own"
+        marker = fs.read_sync_marker(book_hash)
+        assert marker and marker["position"] == (2, 0, 1), f"an unsettled sync rewrote its history: {marker}"
+
+    remote = peer.get_progress(book_hash)
+    assert remote.get("device_id") == manifest["peer_device_id"], \
+        f"the other reader's position was overwritten: {remote}"
+
+
+def scenario_sleep_sync_keeps_progress_reset(verbose: bool) -> None:
+    """The book's progress was reset in BookOrbit since this device's last sync. The
+    server serves that as the start of the book, dated now and under the web reader's
+    id, and holds back what a device uploads over it until that device has been to the
+    start. The sleep sync must not take it for a web reader that only opened the book:
+    the device is further on, and its position stays where it is, unsent."""
+    manifest, _ = load_seed()
+    seeded = manifest["progress"][6]
+    source = INTEGRATION / "library" / seeded["file"]
+    book_hash = seeded["hash"]
+    peer = peer_device(manifest)
+    last_sync = int(time.time()) - 3600
+
+    try:
+        admin, file_id = web_session(manifest, seeded)
+        admin.reset_progress(file_id)
+        served = peer.get_progress(book_hash)
+        assert served.get("device_id") == "bookorbit-web" and float(served.get("percentage", 1)) == 0, \
+            f"the server does not serve the reset: {served}"
+
+        with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+            fs = SimFs(Path(tmp), manifest["kosync"])
+            fs.enable_sync_on_sleep()
+            sim_path = fs.add_book(source)
+            fs.set_open_book(sim_path)
+            # This device last synced an hour ago in chapter 4, and has reached chapter 5.
+            write_progress_bin(fs.epub_cache_dir(sim_path) / "progress.bin", 4, 0, 1)
+            fs.write_sync_marker(book_hash, last_sync, position=(3, 0, 1))
+
+            output = run_simulator(fs, input_script="6000:POWER:120", choice="none",
+                                   timeout_s=90, verbose=verbose)
+            assert "Sleep sync over" in output, "sleep sync never ran to its end"
+            assert "Sleep sync: progress left for the next manual sync" in output, \
+                "the sleep sync did not leave a progress reset to the user"
+            # An upload would have rewritten the device's history.
+            marker = fs.read_sync_marker(book_hash)
+            assert marker == {"timestamp": last_sync, "position": (3, 0, 1)}, \
+                f"the sleep sync settled a progress reset on its own: {marker}"
+
+        served = peer.get_progress(book_hash)
+        assert served.get("device_id") == "bookorbit-web" and float(served.get("percentage", 1)) == 0, \
+            f"the reset is no longer served: {served}"
+    finally:
+        # Lift the reset for the next run: the server drops it once a device has pushed
+        # the start position and then another one.
+        peer.put_progress(book_hash, "/body/DocFragment[1]/body", 0.0)
+        peer.put_progress(book_hash, seeded["progress"], seeded["percentage"])
 
 
 def scenario_sleep_sync_cancel(verbose: bool) -> None:
@@ -1217,6 +1397,9 @@ SCENARIOS = {
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,
     "sleep_sync_push": scenario_sleep_sync_push,
+    "sleep_sync_after_web_open": scenario_sleep_sync_after_web_open,
+    "sleep_sync_conflict": scenario_sleep_sync_conflict,
+    "sleep_sync_keeps_progress_reset": scenario_sleep_sync_keeps_progress_reset,
     "sleep_sync_cancel": scenario_sleep_sync_cancel,
     "highlight_pull": scenario_highlight_pull,
     "highlight_push": scenario_highlight_push,

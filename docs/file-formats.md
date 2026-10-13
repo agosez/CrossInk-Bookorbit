@@ -686,6 +686,49 @@ Binary layout (all little-endian):
   - `[14]` `flags` (`uint8_t`, bit0 = clock was approximate / not NTP-confirmed)
   - `[15]` reserved
 
+## `bookorbit_sync.bin`
+
+`bookorbit_sync.bin` is BookOrbit Smart sync's memory of a book, in the book's
+content-keyed state directory (`/.crosspoint/book_<contentHash>/`): what this device saw
+at the end of its last successful sync of the book. Every sync that settles the progress
+rewrites it (an upload, an applied server position, or both sides found at the same
+place), whichever Sync Behavior is selected. A sync that leaves the choice to the user,
+or that the sleep sync leaves for a manual sync, does not touch it.
+
+The file carries no version field: the two layouts share their magic and differ by
+length, the second being the first with a position appended. A release that only knows
+the first layout reads its 12 bytes of a longer file and ignores the rest.
+
+### Version 2
+
+Adds the position the sync left both sides at, in local pages. It is what tells a server
+position that only changed its date (BookOrbit's web reader saves the position a book
+opens at) from one that moved: the next sync counts the server as not having moved when
+its position, mapped into local pages, is in this spine item at or before this page, one
+page of tolerance included.
+`pageNumber` is a fraction of `pageCount`, so it still means the same place after the
+chapter is laid out again with another page count.
+
+Binary layout (all little-endian), 18 bytes:
+
+- `[0-3]` magic (`uint32_t`, `0x424F5359`, ASCII `YSOB` on disk)
+- `[4-11]` `timestamp` (`int64_t`, the server's progress timestamp in UTC epoch seconds:
+  the one it reported for an applied or matching position, the one this device sent
+  with an upload)
+- `[12-13]` `spineIndex` (`uint16_t`)
+- `[14-15]` `pageNumber` (`uint16_t`, zero-based page in that spine item)
+- `[16-17]` `pageCount` (`uint16_t`, page count of that spine item when the position was
+  recorded; `0` means no position, and the file reads as version 1)
+
+### Version 1
+
+Written up to v1.6.1+bookorbit.1: the first 12 bytes of version 2, the date alone. Still
+read; until the book's next settled sync rewrites it, the server counts as having moved
+whenever its timestamp is newer.
+
+A file shorter than 12 bytes, with another magic or with a timestamp of 0 or less, is no
+history at all: Smart sync then asks, and the sleep sync leaves the progress alone.
+
 ## `/.crosspoint/bookorbit_downloads.bin`
 
 ### Version 1
