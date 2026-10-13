@@ -5,17 +5,17 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
-## [Unreleased]
+## [v1.6.1+bookorbit.2] - 2026-10-13
 
 Based on CrossInk v1.6.1.
-
-### Fixed
-
-- Opening a book in BookOrbit's web reader between two syncs no longer holds back the device's progress. The web reader saves the position it opens at, so the server's position got a new date although nobody had read a page. Sync on Sleep took that date for reading on another device, saw a conflict with the pages read on the device since, and left the progress for a manual sync without saying so; Smart sync showed the choice screen. The device now also remembers the position its last sync left both sides at, and a server position found in that chapter, at or before that page, no longer counts as the server having moved. A real conflict is still left for you to settle: someone having read further elsewhere, or having gone back to an earlier chapter, while the device read on too. A book already held back this way needs one manual sync, after which it syncs on its own again ([#91](https://github.com/agosez/CrossInk-Bookorbit/issues/91)).
 
 ### Added
 
 - A BookOrbit server published behind Cloudflare Access can now be reached. Enter a Cloudflare service token — its Client ID and Client Secret — under BookOrbit Sync in the web settings, and the device presents it with every sync and catalog request (contributed by chaos2007).
+
+### Fixed
+
+- Opening a book in BookOrbit's web reader between two syncs no longer holds back the device's progress. The web reader saves the position it opens at, so the server's position got a new date although nobody had read a page. Sync on Sleep took that date for reading on another device, saw a conflict with the pages read on the device since, and left the progress for a manual sync without saying so; Smart sync showed the choice screen. The device now also remembers the position its last sync left both sides at, and a server position found in that chapter, at or before that page, no longer counts as the server having moved. A real conflict is still left for you to settle: someone having read further elsewhere, or having gone back to an earlier chapter, while the device read on too. A book already held back this way needs one manual sync, after which it syncs on its own again ([#91](https://github.com/agosez/CrossInk-Bookorbit/issues/91)).
 
 ## [v1.6.1+bookorbit.1] - 2026-10-05
 
