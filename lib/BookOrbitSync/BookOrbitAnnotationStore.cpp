@@ -6,6 +6,8 @@
 
 #include <algorithm>
 
+#include "BookOrbitSidecarState.h"
+
 namespace {
 constexpr char STORE_FILENAME[] = "/bookorbit_annotations.bin";
 // 4-byte magic + 4-byte watermark, then one length-prefixed record per highlight. Bump the
@@ -138,6 +140,10 @@ bool BookOrbitAnnotationStore::advanceWatermark(const std::string& bookCachePath
   if (!readFile(path, watermark, records)) return false;
   if (timestamp <= watermark) return true;
   return writeFile(path, timestamp, records);
+}
+
+bool BookOrbitAnnotationStore::markExchanged(const std::string& bookCachePath) {
+  return advanceWatermark(bookCachePath, BOOKORBIT_EXCHANGED_WATERMARK);
 }
 
 bool BookOrbitAnnotationStore::retain(const std::string& bookCachePath, const std::vector<BookOrbitClippingRef>& keep) {

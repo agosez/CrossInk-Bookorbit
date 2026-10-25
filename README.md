@@ -116,6 +116,13 @@ Details worth knowing:
   progressively as you read, one chapter per visit, and start syncing from there.
 - A highlight's stored text is capped at 4 KB; an extremely long web highlight is drawn
   up to where that cap cuts its text.
+- The device draws every highlight the same way. Notes, colors and styles added on the
+  web stay on the server, and a highlight that came from the server is never sent back.
+- BookOrbit 3.5.0 tracks highlights per book file rather than per device, so after the
+  server is upgraded, the first syncs of each book receive back every highlight it
+  already had, 8 per sync. They are recognized and nothing is duplicated.
+- With BookOrbit 3.5.0 or later, a book that lost all its highlights or bookmarks on the
+  device (a wiped card, say) gets them back from the server at its next sync.
 
 ## Reading statistics
 

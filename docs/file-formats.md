@@ -613,8 +613,19 @@ which the reader re-stamps as chapters are opened. Capped at 256 records, matchi
 
 Binary layout (all little-endian):
 
+The watermark also records whether the file has been through an exchange: it stays `0`
+until the first exchange that goes through, which sets it to `1` when no upload moved it
+further. `1` is 1970-01-01 00:00:01 and hides no highlight. A sync reports the key set of
+a file that has been through an exchange as BookOrbit's `known` sidecar state, which
+BookOrbit 3.5.0 needs to honour the deletion of every synced highlight of a book instead
+of reading it as a lost copy. The mark lives in this file so that it is lost exactly
+when the records are: a file started over by a new highlight is not `known` until it has
+been through an exchange itself. Highlights received from the server are never uploaded
+(their clippings have no word range), so the watermark only ever follows highlights made
+on the device.
+
 - `[0-3]` magic + version: ASCII `BOA1`
-- `[4-7]` `watermark` (`uint32_t`, newest highlight timestamp the server has accepted, `0` when nothing has been sent)
+- `[4-7]` `watermark` (`uint32_t`, newest highlight timestamp the server has accepted; `1` after an exchange that sent nothing; `0` until the first exchange)
 - Repeated variable-length records:
   - `[0-3]` `timestamp` (`uint32_t`, `Clipping::timestamp`, seconds since boot; part of the join key)
   - `[4-7]` `identityEpoch` (`uint32_t`, the datetime the server keys on, real UTC epoch seconds)
@@ -645,8 +656,11 @@ reports it in the exchange acknowledgment.
 
 Binary layout (all little-endian):
 
+The watermark marks a file that has been through an exchange the same way as in
+`bookorbit_annotations.bin`.
+
 - `[0-3]` magic + version: ASCII `BOB1`
-- `[4-7]` `watermark` (`uint32_t`, newest identityEpoch the server has accepted)
+- `[4-7]` `watermark` (`uint32_t`, newest identityEpoch the server has accepted; `1` after an exchange that sent nothing; `0` until the first exchange)
 - Repeated variable-length records:
   - `[0-3]` `timestamp` (`uint32_t`, the bookmark's creation epoch; part of the join key)
   - `[4-7]` `identityEpoch` (`uint32_t`)

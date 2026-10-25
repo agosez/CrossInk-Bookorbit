@@ -81,12 +81,24 @@ class BookOrbitAnnotationStore {
    */
   static bool readAll(const std::string& bookCachePath, std::vector<BookOrbitAnnotationRecord>& out);
 
-  // The newest identityEpoch the server has accepted, 0 when nothing has been sent.
+  // The newest identityEpoch the server has accepted, 0 until this store has been through an
+  // exchange (see markExchanged).
   static uint32_t readWatermark(const std::string& bookCachePath);
 
   // Advances the watermark. Never moves it backwards: a clock that lost time must not make
   // the next sync re-offer highlights the server already holds.
   static bool advanceWatermark(const std::string& bookCachePath, uint32_t timestamp);
+
+  /**
+   * Record that this store has been through an exchange, which is what lets a sync report its
+   * key set as BookOrbit's "known" sidecar state (see bookOrbitSidecarState).
+   *
+   * The mark is the watermark leaving 0, for BOOKORBIT_EXCHANGED_WATERMARK when no upload moved
+   * it: it must be lost exactly when the records are, so it lives in their file. Does nothing
+   * for a store that does not exist -- there is nothing a key set could be built from -- and
+   * returns false then.
+   */
+  static bool markExchanged(const std::string& bookCachePath);
 
   /**
    * Drop records whose highlight no longer exists locally.

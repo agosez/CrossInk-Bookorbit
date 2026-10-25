@@ -171,6 +171,8 @@ class BookOrbitSyncActivity final : public Activity {
   uint32_t pendingBookmarkWatermark = 0;
   std::vector<BookOrbitAnnotationKey> pendingBookmarkKeys;
   bool pendingBookmarkKeysComplete = false;
+  BookOrbitSidecarState pendingBookmarkSidecar = BookOrbitSidecarState::Unstated;
+  bool bookmarkStoreUnmarked = false;
   std::vector<BookOrbitIncomingBookmark> incomingBookmarks;
   uint16_t bookmarksSent = 0;
   uint16_t bookmarksAdded = 0;
@@ -188,6 +190,12 @@ class BookOrbitSyncActivity final : public Activity {
   // Fixed-width rows rather than a container of strings, so the whole set is one allocation.
   std::vector<BookOrbitAnnotationKey> pendingAnnotationKeys;
   bool pendingKeysComplete = false;
+  BookOrbitSidecarState pendingAnnotationSidecar = BookOrbitSidecarState::Unstated;
+  // A readable store whose watermark is still 0: the exchange that goes through marks it (see
+  // BookOrbitAnnotationStore::markExchanged), so the next sync can report it as known.
+  bool annotationStoreUnmarked = false;
+  // Asked of the server once per boot, before the batches are prepared (see acceptsSidecarState).
+  bool serverAcceptsSidecar = false;
   // Above this, the key set and its JSON stop fitting beside a TLS session, so it is not sent
   // and the server is told the set is incomplete instead of being left to infer deletions.
   static constexpr size_t MAX_KEYS_PER_SYNC = 64;

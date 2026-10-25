@@ -141,6 +141,17 @@ class BookOrbitSyncClient {
                              uint32_t annotationsUpserted);
 
   /**
+   * Whether the server takes `sidecarState` on the highlight and bookmark exchanges: the
+   * "sidecarState" capability of GET /plugin/version, BookOrbit 3.5.0 and later.
+   *
+   * Asked once per boot, and only a definite answer is kept: the capability list, or a 404 from
+   * a server with no such route. A transport failure or a server error answers false for this
+   * sync and asks again on the next one. Leaving the field out is always safe; sending it to a
+   * server that does not know it fails the whole exchange with HTTP 400.
+   */
+  static bool acceptsSidecarState();
+
+  /**
    * Send one batch of local highlight changes to BookOrbit's annotation exchange
    * (POST /plugin/annotations/exchange).
    *
@@ -153,9 +164,14 @@ class BookOrbitSyncClient {
    * Keep batches at BOOKORBIT_ANNOTATION_BATCH; the payload has to fit beside an open TLS
    * session.
    *
+   * Since BookOrbit 3.5.0 the server keeps this state per device and book file, not per device:
+   * the first exchange after a server upgrade offers back every highlight of the book, this
+   * device's own included, as if it were a new device.
+   *
    * @param documentHash The binary partial-MD5 document hash
    * @param deviceModel Human-readable device name reported alongside the annotations
-   * @param keys The device's full key set, or count=0/complete=false to suppress deletions
+   * @param keys The device's full key set, or count=0/complete=false to suppress deletions; its
+   *             sidecar state goes out only when stated (see acceptsSidecarState)
    * @param changes Annotations to send (may be empty when only `keys` needs to go out)
    * @param changeCount Number of annotations
    * @param outUnmatched Set when the server does not recognise this document at all

@@ -5,6 +5,23 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.6.1.
+
+### Added
+
+- With BookOrbit 3.5.0 or later, a book whose highlights or bookmarks were all lost on the device, with a wiped SD card for instance, gets them back from the server at its next sync. They used to stay on the server without ever coming back.
+
+### Fixed
+
+- Highlights and bookmarks sync correctly with BookOrbit 3.5.0, which changed how the server keeps track of what each device holds:
+  - Deleting every synced highlight, or every synced bookmark, of a book on the device deletes them on the server too. BookOrbit 3.5.0 took that sync for a lost copy of the book: it kept them all and sent them back to the device.
+  - A highlight that came from the server is never sent back to it. BookOrbit 3.5.0 would have read the note and style that the device does not show as removed: a note written on the web was erased, the highlight turned plain, and its range on the server shrank to nothing.
+  - The first sync of each book after the server moves to BookOrbit 3.5.0 offers every highlight of the book back to the device, its own included. A highlight longer than about 2,000 characters is no longer added a second time then.
+  - The sync summary counts only the highlights and bookmarks it actually added, not those the server sent again while they were already on the device.
+- When two highlights for the same paragraph arrive from the server in the same sync, the second one now waits for the next sync. Both used to land, but the first one was left out of every later sync, and the book stopped sending the deletions made on the device.
+
 ## [v1.6.1+bookorbit.2] - 2026-10-13
 
 Based on CrossInk v1.6.1.

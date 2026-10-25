@@ -30,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 INTEGRATION = ROOT / "test" / "integration"
 sys.path.insert(0, str(INTEGRATION / "seed"))
-from kosync import BASE_URL, AdminClient, KosyncDevice, kodatetime, partial_md5  # noqa: E402
+from kosync import BASE_URL, AdminClient, KosyncDevice, kodatetime, partial_md5, request_json  # noqa: E402
 
 PROGRAM = ROOT / ".pio" / "build" / "simulator" / "program"
 
@@ -113,13 +113,19 @@ def _fixed_str(s: str, size: int) -> bytes:
 def write_clipping_store(path: Path, title: str, author: str, book_path: str,
                          clippings: list[dict]) -> None:
     """Clipping store v4: header then per record 8×u16, u32 timestamp,
-    u32 layoutSignature, u16 tableSelection, char[48] chapter, u16 textLen, text."""
+    u32 layoutSignature, u16 tableSelection, char[48] chapter, u16 textLen, text.
+
+    A highlight made on the device covers at least one word, so give such a clipping a
+    nonzero "wordCount": the firmware tells the ones it received from the server by
+    their empty word range, and never uploads those."""
     blob = struct.pack("<BH", 4, len(clippings))
     blob += _pack_str(title) + _pack_str(author) + _pack_str(book_path)
     for c in clippings:
         text = c["text"].encode()
+        word_count = c.get("wordCount", 0)
         blob += struct.pack("<8H", c["spine"], c.get("startPage", 0), c.get("endPage", 0),
-                            c.get("pageCount", 0), 0, 0, 0, c.get("paragraph", 0xFFFF))
+                            c.get("pageCount", 0), 0, max(word_count - 1, 0), word_count,
+                            c.get("paragraph", 0xFFFF))
         blob += struct.pack("<II", c["timestamp"], c.get("layoutSignature", 0))
         blob += struct.pack("<H", c.get("tableSelection", 0xFFFF))  # UINT16_MAX: not a table cell
         blob += _fixed_str(c.get("chapter", ""), CHAPTER_TITLE_MAX)
@@ -140,7 +146,7 @@ def read_clipping_store(path: Path) -> list[dict]:
     book_path, offset = _read_str(raw, offset)
     out = []
     for _ in range(count):
-        spine, _sp, _ep, _pc, _sw, _ew, _wc, paragraph = struct.unpack_from("<8H", raw, offset)
+        spine, _sp, _ep, _pc, _sw, _ew, word_count, paragraph = struct.unpack_from("<8H", raw, offset)
         offset += 16
         timestamp, _sig = struct.unpack_from("<II", raw, offset)
         offset += 8
@@ -153,7 +159,7 @@ def read_clipping_store(path: Path) -> list[dict]:
         text = raw[offset:offset + text_len].decode(errors="replace")
         offset += text_len
         out.append({"spine": spine, "paragraph": paragraph, "timestamp": timestamp,
-                    "chapter": chapter, "text": text})
+                    "chapter": chapter, "text": text, "wordCount": word_count})
     return out
 
 
@@ -408,6 +414,10 @@ FRESH_BOOK = {
     "highlight_delete_guard": 33,
     "bookmark_pull": 34,
     "highlight_mint_outside_paragraph": 35,
+    "highlight_delete_all": 36,
+    "highlight_note": 37,
+    "bookmark_delete_all": 38,
+    "highlight_reoffer": 39,
 }
 
 # Bookmarks dedupe server-side on their converted location (paragraph precision), so a
@@ -436,6 +446,13 @@ def verify_device(manifest: dict, tag: str) -> KosyncDevice:
                        manifest["kosync"]["password"], f"crossink-verify-{tag}-{int(time.time())}")
     dev.auth()
     return dev
+
+
+def server_accepts_sidecar_state(device: KosyncDevice) -> bool:
+    """BookOrbit 3.5.0 and later: the exchanges take `sidecarState`, and a lost copy can be
+    asked back. Older servers reject the field with HTTP 400."""
+    info = request_json("GET", device.api("/plugin/version"), device._headers(), ok=(200,))
+    return "sidecarState" in info.get("capabilities", [])
 
 
 def annotation_adds(device: KosyncDevice, book_hash: str) -> list[dict]:
@@ -802,7 +819,7 @@ def scenario_highlight_push(verbose: bool) -> None:
         write_clipping_store(fs.clippings_store(book["hash"]), book.get("title", ""),
                              book.get("author", ""), sim_path,
                              [{"spine": 1, "paragraph": 2, "timestamp": 4242,
-                               "text": text, "chapter": "Chapter"}])
+                               "text": text, "chapter": "Chapter", "wordCount": len(text.split())}])
         write_boa_store(fs.state_dir(book["hash"]) / ANNOTATION_STORE, 0, [{
             "timestamp": 4242, "identityEpoch": now, "spine": 1, "paragraph": 2,
             "pos0": "/body/DocFragment[2]/body/p[2]/text().0",
@@ -893,10 +910,142 @@ def scenario_highlight_delete_guard(verbose: bool) -> None:
         assert "sync scenario finished" in output, "second sync never finished"
         assert "No highlight sync history" in output, \
             "guard log missing: deletions may have been reported over a lost store"
+        # Nothing left on the device: the "new" sidecar state asks BookOrbit (3.5.0 and
+        # later) to offer back everything this copy had, and it does.
+        if server_accepts_sidecar_state(peer):
+            clippings = read_clipping_store(fs.clippings_store(book["hash"]))
+            assert any(c["text"] == text for c in clippings), \
+                f"the lost highlight was not offered back; texts={[c['text'] for c in clippings]}"
 
     adds = annotation_adds(verify_device(manifest, "hlguard"), book["hash"])
     assert any(a["text"] == text for a in adds), \
         "server highlight was erased despite the lost local store"
+
+
+def scenario_highlight_delete_all_propagates(verbose: bool) -> None:
+    """Deleting every synced highlight of a book deletes them on the server. BookOrbit
+    3.5.0 reads a complete key set that keeps none of a device's highlights (two at
+    least) as a lost copy and offers them all back, unless the device says its copy is
+    "known". These highlights all came from the server, so the store their first sync
+    started must already count as exchanged."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["highlight_delete_all"]]
+    now = int(time.time())
+    texts = [f"Doomed pair {i} {now}" for i in (1, 2)]
+    peer = peer_device(manifest)
+    peer.exchange_annotations(book["hash"], keys=[], keys_complete=False, changes=[{
+        "datetime": kodatetime(now + i),
+        "pos0": f"/body/DocFragment[3]/body/p[{i + 2}]/text().0",
+        "pos1": f"/body/DocFragment[3]/body/p[{i + 2}]/text().{len(text)}",
+        "text": text,
+        "chapter": "Chapter",
+    } for i, text in enumerate(texts)])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "first sync never finished"
+        clippings = read_clipping_store(fs.clippings_store(book["hash"]))
+        assert all(any(c["text"] == t for c in clippings) for t in texts), "setup: highlights never arrived"
+
+        write_clipping_store(fs.clippings_store(book["hash"]), "", "", sim_path,
+                             [c for c in clippings if c["text"] not in texts])
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "second sync never finished"
+        clippings = read_clipping_store(fs.clippings_store(book["hash"]))
+        assert not any(c["text"] in texts for c in clippings), "the deleted highlights came back"
+
+    adds = annotation_adds(verify_device(manifest, "hldelall"), book["hash"])
+    assert not any(a["text"] in texts for a in adds), \
+        f"deleted highlights still on server: {[a['text'] for a in adds]}"
+
+
+def scenario_highlight_reoffer_no_duplicate(verbose: bool) -> None:
+    """The device's own highlight offered back as new is recognised, not added twice.
+    BookOrbit 3.5.0 keeps sync state per device and book file, so the first exchange
+    after a server upgrade offers every highlight of a book back like this; here the
+    simulator's state is reset by sending "new" in its name. The text is longer than
+    the device keeps of an incoming highlight, so only the identity can match it."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["highlight_reoffer"]]
+    sim = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                       manifest["kosync"]["password"], SIM_DEVICE_ID)
+    sim.auth()
+    if not server_accepts_sidecar_state(sim):
+        print("  (skipped: this server keeps state per device and cannot be asked to re-offer)")
+        return
+    now = int(time.time())
+    text = f"Long local highlight {now} " + "lorem ipsum dolor " * 140  # ~2.5 KB, past the 2 KB cut
+    pos0 = "/body/DocFragment[2]/body/p[3]/text().0"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        write_clipping_store(fs.clippings_store(book["hash"]), book.get("title", ""),
+                             book.get("author", ""), sim_path,
+                             [{"spine": 1, "paragraph": 3, "timestamp": 4343,
+                               "text": text, "chapter": "Chapter", "wordCount": len(text.split())}])
+        write_boa_store(fs.state_dir(book["hash"]) / ANNOTATION_STORE, 0, [{
+            "timestamp": 4343, "identityEpoch": now, "spine": 1, "paragraph": 3,
+            "pos0": pos0, "pos1": f"/body/DocFragment[2]/body/p[3]/text().{len(text)}",
+        }])
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "first sync never finished"
+
+        sim.exchange_annotations(book["hash"], keys=[], keys_complete=False, changes=[], sidecar_state="new")
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "second sync never finished"
+        mine = [c for c in read_clipping_store(fs.clippings_store(book["hash"]))
+                if c["text"].startswith(f"Long local highlight {now} ")]
+        assert len(mine) == 1, f"the re-offered highlight was added again: {len(mine)} copies"
+
+
+def scenario_highlight_note_survives(verbose: bool) -> None:
+    """A highlight received from the server is never sent back: it carries a note this
+    device does not show, and BookOrbit 3.5.0 merges an upload field by field, so the
+    missing note would read as deleted. The watermark is rewound after the first sync,
+    the state in which such a highlight used to be re-sent (a local highlight waiting
+    to upload kept the watermark from covering it)."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["highlight_note"]]
+    now = int(time.time())
+    text = f"Annotated highlight {now}"
+    note = f"Peer note {now}"
+    peer = peer_device(manifest)
+    peer.exchange_annotations(book["hash"], keys=[], keys_complete=False, changes=[{
+        "datetime": kodatetime(now),
+        "pos0": "/body/DocFragment[3]/body/p[2]/text().0",
+        "pos1": f"/body/DocFragment[3]/body/p[2]/text().{len(text)}",
+        "text": text,
+        "note": note,
+        "chapter": "Chapter",
+    }])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, _, _ = make_fs(tmp, manifest, book)
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "first sync never finished"
+        clippings = read_clipping_store(fs.clippings_store(book["hash"]))
+        assert any(c["text"] == text for c in clippings), "setup: highlight never arrived"
+
+        store = fs.state_dir(book["hash"]) / ANNOTATION_STORE
+        _, records = read_boa_store(store)
+        write_boa_store(store, 0, records)
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "second sync never finished"
+
+    adds = annotation_adds(verify_device(manifest, "hlnote"), book["hash"])
+    mine = [a for a in adds if a["text"] == text]
+    assert mine, f"highlight missing on the server; texts={[a['text'] for a in adds]}"
+    assert mine[0].get("note") == note, f"the server lost the note: {mine[0]}"
 
 
 def scenario_bookmark_pull(verbose: bool) -> None:
@@ -926,6 +1075,42 @@ def scenario_bookmark_pull(verbose: bool) -> None:
         bookmarks = read_bookmark_store(fs.bookmarks_store(book["hash"]))
         assert any(b["spine"] == 1 for b in bookmarks), \
             f"bookmark did not land in chapter 2: {bookmarks}"
+
+
+def scenario_bookmark_delete_all_propagates(verbose: bool) -> None:
+    """Deleting every synced bookmark of a book deletes them on the server: BookOrbit
+    3.5.0 applies the same lost-copy reading to bookmarks as to highlights (see
+    scenario_highlight_delete_all_propagates). A fresh book, so no earlier run left the
+    simulator linked to anything here."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["bookmark_delete_all"]]
+    now = int(time.time())
+    # Different chapters: the server dedupes bookmarks on their converted location.
+    positions = ["/body/DocFragment[2]/body/p[1]/text().0", "/body/DocFragment[3]/body/p[1]/text().0"]
+    peer = peer_device(manifest)
+    peer.exchange_bookmarks(book["hash"], keys=[], keys_complete=False,
+                            changes=[{"datetime": kodatetime(now + i), "pos": pos}
+                                     for i, pos in enumerate(positions)])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "first sync never finished"
+        _, records = read_bob_store(fs.state_dir(book["hash"]) / BOOKMARK_STORE)
+        assert {r["pos"] for r in records} >= set(positions), f"setup: bookmarks never arrived: {records}"
+
+        write_bookmark_store(fs.bookmarks_store(book["hash"]), "", "", sim_path, [])
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "second sync never finished"
+        bookmarks = read_bookmark_store(fs.bookmarks_store(book["hash"]))
+        assert not bookmarks, f"the deleted bookmarks came back: {bookmarks}"
+
+    adds = bookmark_adds(verify_device(manifest, "bmdelall"), book["hash"])
+    assert not any(a["pos"] in positions for a in adds), \
+        f"deleted bookmarks still on server: {[a['pos'] for a in adds]}"
 
 
 def scenario_catalog_collections_browse(verbose: bool) -> None:
@@ -1350,7 +1535,8 @@ def scenario_highlight_mint_outside_paragraph(verbose: bool) -> None:
         write_clipping_store(fs.clippings_store(book["hash"]), book.get("title", ""),
                              book.get("author", ""), sim_path,
                              [{"spine": OUTSIDE_PARAGRAPH_SPINE, "paragraph": h["paragraph"],
-                               "timestamp": 5000 + i, "text": h["text"], "chapter": "Blocks and Edge Cases"}
+                               "timestamp": 5000 + i, "text": h["text"], "chapter": "Blocks and Edge Cases",
+                               "wordCount": len(h["text"].split())}
                               for i, h in enumerate(OUTSIDE_PARAGRAPH_HIGHLIGHTS)])
         store = fs.state_dir(book["hash"]) / ANNOTATION_STORE
 
@@ -1406,7 +1592,11 @@ SCENARIOS = {
     "highlight_mint_outside_paragraph": scenario_highlight_mint_outside_paragraph,
     "highlight_delete_propagates": scenario_highlight_delete_propagates,
     "highlight_delete_guard": scenario_highlight_delete_guard,
+    "highlight_delete_all_propagates": scenario_highlight_delete_all_propagates,
+    "highlight_note_survives": scenario_highlight_note_survives,
+    "highlight_reoffer_no_duplicate": scenario_highlight_reoffer_no_duplicate,
     "bookmark_pull": scenario_bookmark_pull,
+    "bookmark_delete_all_propagates": scenario_bookmark_delete_all_propagates,
     "bookmark_push": scenario_bookmark_push,
 }
 

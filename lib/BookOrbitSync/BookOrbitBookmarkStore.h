@@ -45,11 +45,15 @@ class BookOrbitBookmarkStore {
   // sync history, and a sync must not report an empty-complete key set from it.
   static bool readAll(const std::string& bookCachePath, std::vector<BookOrbitBookmarkRecord>& out);
 
+  // 0 until this store has been through an exchange (see markExchanged).
   static uint32_t readWatermark(const std::string& bookCachePath);
 
   // Never moves backwards: a clock that lost time must not make the next sync re-offer
   // bookmarks the server already holds.
   static bool advanceWatermark(const std::string& bookCachePath, uint32_t timestamp);
+
+  // Same mark, same reasons as BookOrbitAnnotationStore::markExchanged.
+  static bool markExchanged(const std::string& bookCachePath);
 
   /**
    * Drop records whose bookmark no longer exists locally. Orphans would fill the file and,

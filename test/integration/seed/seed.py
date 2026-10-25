@@ -127,6 +127,7 @@ def main() -> int:
             print("Server bootstrapped by someone else; trying login anyway")
         admin.login(USER["username"], USER["password"])
     admin.ensure_koreader_credentials(**KOSYNC)
+    admin.show_audio_only_books()
     print("KOReader sync credentials in place")
 
     library_id, folder_id = admin.ensure_library("Integration", "/data/library")

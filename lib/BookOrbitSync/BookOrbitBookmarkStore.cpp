@@ -6,6 +6,8 @@
 
 #include <algorithm>
 
+#include "BookOrbitSidecarState.h"
+
 namespace {
 constexpr char STORE_FILENAME[] = "/bookorbit_bookmarks.bin";
 // 4-byte magic + 4-byte watermark, then one length-prefixed record per bookmark. A file whose
@@ -127,6 +129,10 @@ bool BookOrbitBookmarkStore::advanceWatermark(const std::string& bookCachePath, 
   if (!readFile(path, watermark, records)) return false;
   if (timestamp <= watermark) return true;
   return writeFile(path, timestamp, records);
+}
+
+bool BookOrbitBookmarkStore::markExchanged(const std::string& bookCachePath) {
+  return advanceWatermark(bookCachePath, BOOKORBIT_EXCHANGED_WATERMARK);
 }
 
 bool BookOrbitBookmarkStore::retain(const std::string& bookCachePath, const std::vector<uint32_t>& keepTimestamps) {

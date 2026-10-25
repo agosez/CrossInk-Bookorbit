@@ -196,6 +196,15 @@ class AdminClient:
         request_json("PATCH", self.api("/koreader/credentials"), self._headers(),
                      {"username": username, "password": password}, ok=(200,))
 
+    def show_audio_only_books(self) -> None:
+        """Let the plugin catalog list audiobook-only books. BookOrbit 3.5.0 hides them by
+        default, which would leave the firmware's own EPUB filter untested. Older servers
+        list them anyway and reject the unknown field with HTTP 400."""
+        status, body = _request("PATCH", self.api("/koreader/credentials"), self._headers(),
+                                {"hideAudioOnlyBooks": False})
+        if status not in (200, 400):
+            raise HttpError("PATCH", self.api("/koreader/credentials"), status, body)
+
     def ensure_library(self, name: str, folder_path: str) -> tuple[int, int]:
         """Returns (libraryId, folderId), creating the library when none exists."""
         libraries = request_json("GET", self.api("/libraries"), self._headers(), ok=(200,))
@@ -384,23 +393,27 @@ class KosyncDevice:
         return request_json("PUT", self.api("/syncs/progress"), self._headers(), payload)
 
     def exchange_annotations(self, document_hash: str, keys: list[dict], keys_complete: bool,
-                             changes: list[dict]) -> dict:
+                             changes: list[dict], sidecar_state: str | None = None) -> dict:
         """Mirror of BookOrbitSyncClient::exchangeAnnotations. ``keys`` entries are
         {"k": md5, "dt": datetime}; ``changes`` entries carry datetime/pos0/pos1/text
-        (drawer and posFormat are filled in here)."""
+        (drawer and posFormat are filled in here). ``sidecar_state`` is "known" or "new"
+        (BookOrbit 3.5.0 and later), left out when None."""
         for change in changes:
             change.setdefault("drawer", "lighten")
             change.setdefault("posFormat", "xpointer")
+        book: dict[str, Any] = {
+            "hash": document_hash,
+            "keysComplete": keys_complete,
+            "keys": keys,
+            "changes": changes,
+        }
+        if sidecar_state is not None:
+            book["sidecarState"] = sidecar_state
         payload = {
             "deviceId": self.device_id,
             "deviceModel": self.device_model,
             "pluginVersion": self.plugin_version,
-            "books": [{
-                "hash": document_hash,
-                "keysComplete": keys_complete,
-                "keys": keys,
-                "changes": changes,
-            }],
+            "books": [book],
         }
         return request_json("POST", self.api("/plugin/annotations/exchange"),
                             self._headers(), payload)

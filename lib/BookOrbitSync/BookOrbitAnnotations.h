@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <string>
 
+#include "BookOrbitSidecarState.h"
+
 /**
  * Wire types for BookOrbit's two-way annotation exchange.
  *
@@ -78,6 +80,8 @@ struct BookOrbitAnnotationKeys {
   const BookOrbitAnnotationKey* rows = nullptr;
   size_t count = 0;
   bool complete = true;
+  // Goes out with the keys, so it follows the same first-request-only rule.
+  BookOrbitSidecarState sidecar = BookOrbitSidecarState::Unstated;
 };
 
 /**
