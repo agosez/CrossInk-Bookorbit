@@ -973,11 +973,17 @@ void ActivityManager::goToBrowser() {
   }
 }
 
-void ActivityManager::goToBookOrbitCatalog() {
+bool ActivityManager::goToBookOrbitCatalog(const bool resumeDownload) {
   // Replace (not push): clearing the activity stack under the browser frees the
   // 15-20KB of headroom the TLS session needs on the C3 (see .claude/CONTEXT.md).
   // The browser exits via goHome, so there is no stack to return to.
-  replaceActivity(std::make_unique<BookOrbitCatalogBrowserActivity>(renderer, mappedInput));
+  auto browser = makeUniqueNoThrow<BookOrbitCatalogBrowserActivity>(renderer, mappedInput, resumeDownload);
+  if (!browser) {
+    LOG_ERR("ACT", "OOM: BookOrbit catalog (free=%u maxAlloc=%u)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    return false;
+  }
+  replaceActivity(std::move(browser));
+  return true;
 }
 
 void ActivityManager::goToBookOrbitAuth() {

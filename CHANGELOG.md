@@ -5,6 +5,15 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.6.1.
+
+### Fixed
+
+- Downloading a book from the BookOrbit catalog no longer fails partway with "Download failed" on the X3 and X4. Browsing the catalog left too little memory in one piece for the secure connection, so the transfer stopped after a few percent, every time. The reader now restarts before each download, downloads the book, and comes back to the same list on the same book, after a success, a failure or a cancel. Each download takes a few seconds longer while the reader restarts and reconnects to Wi-Fi. The X4 Pro, X4 Classic and Sticky have the memory to spare and download as before ([#96](https://github.com/agosez/CrossInk-Bookorbit/issues/96)).
+- BookOrbit syncs and catalog downloads, and OPDS browsing and downloads, ask the server to send its secure data in small pieces. A server that agrees, as most nginx and Apache setups do, no longer makes the reader find a large block of free memory for each piece, which is what made these transfers fail on a reader short of memory.
+
 ## [v1.6.1+bookorbit.3] - 2026-10-25
 
 Based on CrossInk v1.6.1.

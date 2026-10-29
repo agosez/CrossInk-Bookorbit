@@ -13,6 +13,7 @@ constexpr char BOOKORBIT_LIST_CACHE_DIR[] = "/.crosspoint/bookorbit_lists";
 constexpr char BOOKORBIT_LIST_CACHE_PREFIX[] = "bookorbit_list_";
 constexpr char BOOKORBIT_LIST_CACHE_SUFFIX[] = ".json";
 constexpr size_t BOOKORBIT_CACHE_PATH_CAP = 180;
+constexpr char BOOKORBIT_DOWNLOAD_RESUME_PATH[] = "/.crosspoint/bookorbit_download.json";
 
 bool writeJsonStringFile(const std::string& path, const std::string& text) {
   FsFile file;
@@ -253,5 +254,92 @@ void saveBooksPage(const BookOrbitBookQuery& query, const int page, const BookOr
   json += "]}";
   writeJsonStringFile(cachePathForKey(booksCacheKey(query, page)), json);
 }
+
+bool saveDownloadResume(const BookOrbitDownloadResume& resume) {
+  std::string json;
+  json.reserve(512);  // the keys alone take ~250 bytes; one allocation covers typical titles
+  const auto addString = [&json](const char* key, const std::string& value) {
+    json += ",\"";
+    json += key;
+    json += "\":";
+    appendJsonEscaped(json, value);
+  };
+  const auto addNumber = [&json](const char* key, const long long value) {
+    json += ",\"";
+    json += key;
+    json += "\":";
+    json += std::to_string(value);
+  };
+  json += "{\"booksFromFacet\":";
+  json += resume.booksFromFacet ? "true" : "false";
+  addNumber("bookId", resume.bookId);
+  addNumber("fileId", resume.fileId);
+  addString("title", resume.title);
+  addString("path", resume.path);
+  addString("sort", resume.listQuery.sort);
+  addString("readStatus", resume.listQuery.readStatus);
+  addString("query", resume.listQuery.query);
+  addString("author", resume.listQuery.author);
+  addString("seriesId", resume.listQuery.seriesId);
+  addString("series", resume.listQuery.series);
+  addString("collectionId", resume.listQuery.collectionId);
+  addString("smartScopeId", resume.listQuery.smartScopeId);
+  addString("libraryId", resume.listQuery.libraryId);
+  addString("listTitle", resume.listTitle);
+  addNumber("listPage", resume.listPage);
+  addNumber("selectorIndex", resume.selectorIndex);
+  addNumber("topIndex", resume.topIndex);
+  addString("facetSectionId", resume.facetSectionId);
+  addString("facetTitle", resume.facetTitle);
+  addNumber("facetPage", resume.facetPage);
+  json += "}";
+  return writeJsonStringFile(BOOKORBIT_DOWNLOAD_RESUME_PATH, json);
+}
+
+bool takeDownloadResume(BookOrbitDownloadResume& outResume) {
+  std::string json;
+  const bool read = readJsonStringFile(BOOKORBIT_DOWNLOAD_RESUME_PATH, json);
+  Storage.remove(BOOKORBIT_DOWNLOAD_RESUME_PATH);
+  if (!read) {
+    LOG_ERR("BookOrbit", "No download to resume at %s", BOOKORBIT_DOWNLOAD_RESUME_PATH);
+    return false;
+  }
+
+  JsonDocument doc;
+  if (deserializeJson(doc, json) != DeserializationError::Ok) {
+    LOG_ERR("BookOrbit", "Unreadable download resume file");
+    return false;
+  }
+  const auto field = [&doc](const char* key) { return std::string(doc[key] | ""); };
+  outResume = BookOrbitDownloadResume{};
+  outResume.bookId = doc["bookId"] | int64_t{0};
+  outResume.fileId = doc["fileId"] | int64_t{0};
+  outResume.title = field("title");
+  outResume.path = field("path");
+  outResume.listQuery.sort = field("sort");
+  outResume.listQuery.readStatus = field("readStatus");
+  outResume.listQuery.query = field("query");
+  outResume.listQuery.author = field("author");
+  outResume.listQuery.seriesId = field("seriesId");
+  outResume.listQuery.series = field("series");
+  outResume.listQuery.collectionId = field("collectionId");
+  outResume.listQuery.smartScopeId = field("smartScopeId");
+  outResume.listQuery.libraryId = field("libraryId");
+  outResume.listTitle = field("listTitle");
+  outResume.listPage = doc["listPage"] | 1;
+  outResume.booksFromFacet = doc["booksFromFacet"] | false;
+  outResume.selectorIndex = doc["selectorIndex"] | 0;
+  outResume.topIndex = doc["topIndex"] | 0;
+  outResume.facetSectionId = field("facetSectionId");
+  outResume.facetTitle = field("facetTitle");
+  outResume.facetPage = doc["facetPage"] | 1;
+  if (outResume.fileId == 0 || outResume.path.empty()) {
+    LOG_ERR("BookOrbit", "Download resume file names no file to fetch");
+    return false;
+  }
+  return true;
+}
+
+void discardDownloadResume() { Storage.remove(BOOKORBIT_DOWNLOAD_RESUME_PATH); }
 
 }  // namespace BookOrbitCatalogListCache

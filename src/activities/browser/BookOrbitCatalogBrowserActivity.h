@@ -39,7 +39,10 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
     bool onDevice = false;  // BOOK entries: a matching file already exists on the device (at `path`)
   };
 
-  explicit BookOrbitCatalogBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
+  // downloadBoot: launched by the BOOKORBIT_DOWNLOAD network boot, to run the download
+  // saved before the restart (see downloadBook()).
+  explicit BookOrbitCatalogBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
+                                           bool downloadBoot = false);
 
   void onEnter() override;
   void onExit() override;
@@ -52,6 +55,18 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   // 24 interaction slots cover the densest page at the smallest UI scale.
   using UiApp = freeink::ui::FreeInkApp<24, 4>;
 
+  // The transfer a BOOKORBIT_DOWNLOAD boot runs once Wi-Fi is up; fileId 0 when none.
+  struct PendingDownload {
+    int64_t bookId = 0;
+    int64_t fileId = 0;
+    std::string title;
+    std::string path;
+  };
+
+  // A minimal network boot never brought up the rest of the app, so leaving the
+  // catalog from one restarts even when Wi-Fi never came up.
+  const bool downloadBoot;
+  PendingDownload pendingDownload;
   ButtonNavigator buttonNavigator;
   BrowserState state = BrowserState::LOADING;
   std::vector<Entry> entries;
@@ -123,5 +138,12 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   // replacePath: re-download over that existing on-device file instead of the
   // server's path; the old copy is only swapped out once the new one is complete.
   void downloadBook(int64_t bookId, const std::string& title, const std::string& replacePath = "");
+  void showDownloadScreen(const std::string& title);
+  // Saves the download and the listing, then restarts into the BOOKORBIT_DOWNLOAD
+  // boot. False when this device downloads in place instead.
+  bool restartForDownload(int64_t bookId, int64_t fileId, const std::string& title, const std::string& path);
+  void runPendingDownload(bool wifiConnected);
+  // The transfer itself, then the listing it freed is rebuilt.
+  void transferBook(int64_t bookId, int64_t fileId, const std::string& finalPath);
   bool preventAutoSleep() override;
 };

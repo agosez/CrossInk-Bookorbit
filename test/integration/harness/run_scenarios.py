@@ -1335,9 +1335,17 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
             "13100:DOWN",                                 #   SmartScopes among them)
             "13450:CONFIRM",
             "16000:CONFIRM",                              # first book -> download
-            "24000:QUIT",
+            "24000:QUIT",                                 # only reached if no restart dropped it
         ])
-        run_simulator(fs, input_script=script, choice="apply", timeout_s=90, verbose=verbose)
+        # The simulator's X4 profile has no PSRAM, so the download restarts into a
+        # boot of its own and the second script drives that boot.
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=90, verbose=verbose,
+                               after_reboot_script="12000:QUIT")
+        assert "Restarting into the download of book" in output, "the download did not restart first"
+        resumed = output.index("Restarting into the download of book")
+        assert "Minimal network boot ready: target=10" in output[resumed:], "no download boot after the restart"
+        assert "Downloading file" in output[resumed:], "the download boot did not run the transfer"
+        assert not (fs.crosspoint / "bookorbit_download.json").exists(), "the download was left to resume"
 
         # The book that was downloaded is the first row of the listing the browser
         # cached, so the expectation follows the device's own view of the catalog
@@ -1395,13 +1403,17 @@ def scenario_catalog_book_actions(verbose: bool) -> None:
     # The menu logs the FileBrowserAction it returns: without that, a hold that
     # simply downloaded on release (the old behaviour) would pass steps 1 and 2.
     action_download, action_redownload, action_delete = 22, 23, 0
+    # A download restarts into a boot of its own (the X4 profile has no PSRAM),
+    # which drops the first script: this one ends that boot.
+    after_download = "12000:QUIT"
 
     with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
         fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
 
         # 1. Not on the device: the menu holds Download only, selected by default.
         script = ";".join(to_all_books + [hold_first_book, "18500:CONFIRM", "26500:QUIT"])
-        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=90, verbose=verbose)
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=90, verbose=verbose,
+                               after_reboot_script=after_download)
         caches = [json.loads(p.read_text())
                   for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
         listings = [c for c in caches if "total" in c and "sections" not in c]
@@ -1426,7 +1438,8 @@ def scenario_catalog_book_actions(verbose: bool) -> None:
         progress = fs.epub_cache_dir(sim_path) / "progress.bin"
         write_progress_bin(progress, 3, 2, 10)
         script = ";".join(to_all_books + [hold_first_book, "18500:DOWN", "18900:CONFIRM", "27000:QUIT"])
-        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=90, verbose=verbose)
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=90, verbose=verbose,
+                               after_reboot_script=after_download)
         assert f"Book action {action_redownload} on book {first['id']}" in output, \
             "the on-device menu's second entry is not Re-download"
         assert book.read_bytes() == original, "Re-download did not replace the damaged file"

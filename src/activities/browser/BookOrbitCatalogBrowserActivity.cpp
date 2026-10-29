@@ -1,5 +1,6 @@
 #include "BookOrbitCatalogBrowserActivity.h"
 
+#include <BoardConfig.h>
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
@@ -131,8 +132,10 @@ bool hasEpubFile(const BookOrbitBookDetail& detail, BookOrbitCatalogFile& outFil
 }
 }  // namespace
 
-BookOrbitCatalogBrowserActivity::BookOrbitCatalogBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
+BookOrbitCatalogBrowserActivity::BookOrbitCatalogBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
+                                                                 const bool downloadBoot)
     : Activity("BookOrbitCatalogBrowser", renderer, mappedInput),
+      downloadBoot(downloadBoot),
       uiTarget(makeUiTarget(renderer)),
       app(uiTarget, uiTarget.deviceContext()) {}
 
@@ -169,7 +172,26 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   longPressFired = false;
   errorMessage.clear();
   statusMessage = tr(STR_CHECKING_WIFI);
-  BookOrbitCatalogListCache::clear();
+  pendingDownload = PendingDownload{};
+
+  // A download boot comes back to the listing it left, whose pages are still in the
+  // list cache; any other entry starts a fresh catalog session.
+  BookOrbitDownloadResume resume;
+  if (downloadBoot && BookOrbitCatalogListCache::takeDownloadResume(resume)) {
+    navLevel = NavLevel::Books;
+    listQuery = std::move(resume.listQuery);
+    listTitle = std::move(resume.listTitle);
+    listPage = resume.listPage;
+    booksFromFacet = resume.booksFromFacet;
+    selectorIndex = resume.selectorIndex;
+    topIndex = resume.topIndex;
+    facetSectionId = std::move(resume.facetSectionId);
+    facetTitle = std::move(resume.facetTitle);
+    facetPage = resume.facetPage;
+    pendingDownload = {resume.bookId, resume.fileId, std::move(resume.title), std::move(resume.path)};
+  } else {
+    BookOrbitCatalogListCache::clear();
+  }
 
   if (!BOOKORBIT_STORE.hasCredentials()) {
     state = BrowserState::ERROR;
@@ -192,6 +214,8 @@ void BookOrbitCatalogBrowserActivity::onExit() {
     WiFi.disconnect(false);
     delay(30);
     silentRestart();
+  } else if (downloadBoot) {
+    silentRestart();
   }
 }
 
@@ -210,6 +234,10 @@ void BookOrbitCatalogBrowserActivity::launchWifiSelection() {
 }
 
 void BookOrbitCatalogBrowserActivity::onWifiSelectionComplete(const bool connected) {
+  if (pendingDownload.fileId != 0) {
+    runPendingDownload(connected);
+    return;
+  }
   if (!connected) {
     onGoHome();
     return;
@@ -605,8 +633,7 @@ void BookOrbitCatalogBrowserActivity::performSearch(const std::string& query) {
   }
 }
 
-void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const std::string& title,
-                                                   const std::string& replacePath) {
+void BookOrbitCatalogBrowserActivity::showDownloadScreen(const std::string& title) {
   state = BrowserState::DOWNLOADING;
   // Truncate once, up front: render() used to re-truncate this unchanging title on
   // every progress repaint, an avoidable heap allocation racing the TLS session's
@@ -615,6 +642,11 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
   downloadProgress = downloadTotal = 0;
   goHomeAfterCancel = false;
   requestUpdate(true);
+}
+
+void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const std::string& title,
+                                                   const std::string& replacePath) {
+  showDownloadScreen(title);
 
   BookOrbitBookDetail detail;
   if (!BookOrbitCatalogClient::fetchBookDetail(bookId, detail)) {
@@ -654,7 +686,64 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
     }
   }
 
-  LOG_DBG("BookOrbit", "Downloading file %lld -> %s", static_cast<long long>(epubFile.id), finalPath.c_str());
+  if (restartForDownload(bookId, epubFile.id, title, finalPath)) return;
+  transferBook(bookId, epubFile.id, finalPath);
+}
+
+bool BookOrbitCatalogBrowserActivity::restartForDownload(const int64_t bookId, const int64_t fileId,
+                                                         const std::string& title, const std::string& path) {
+#if FREEINK_MCU_C3
+  BookOrbitDownloadResume resume;
+  resume.bookId = bookId;
+  resume.fileId = fileId;
+  resume.title = title;
+  resume.path = path;
+  resume.listQuery = listQuery;
+  resume.listTitle = listTitle;
+  resume.listPage = listPage;
+  resume.booksFromFacet = booksFromFacet;
+  resume.selectorIndex = selectorIndex;
+  resume.topIndex = topIndex;
+  resume.facetSectionId = facetSectionId;
+  resume.facetTitle = facetTitle;
+  resume.facetPage = facetPage;
+  if (!BookOrbitCatalogListCache::saveDownloadResume(resume)) {
+    LOG_ERR("BookOrbit", "Cannot save the download for its restart; downloading in place");
+    return false;
+  }
+  LOG_INF("BookOrbit", "Restarting into the download of book %lld", static_cast<long long>(bookId));
+  silentRestartToNetwork(NetworkBootTarget::BOOKORBIT_DOWNLOAD);
+  // Only returns when deep sleep is already under way, which ends this session anyway.
+  BookOrbitCatalogListCache::discardDownloadResume();
+  return true;
+#else
+  (void)bookId;
+  (void)fileId;
+  (void)title;
+  (void)path;
+  return false;
+#endif
+}
+
+void BookOrbitCatalogBrowserActivity::runPendingDownload(const bool wifiConnected) {
+  const PendingDownload job = std::move(pendingDownload);
+  pendingDownload = PendingDownload{};
+  if (!wifiConnected) {
+    // Backing out of Wi-Fi cancels the download: back to the listing, from the cache.
+    restoreBookListAfterDownload();
+    requestUpdate();
+    return;
+  }
+  showDownloadScreen(job.title);
+  transferBook(job.bookId, job.fileId, job.path);
+}
+
+void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const int64_t fileId,
+                                                   const std::string& finalPath) {
+  // The heap the TLS session starts from: what tells a fragmented session from a
+  // clean download boot in a field log.
+  LOG_INF("BookOrbit", "Downloading file %lld -> %s (free=%u maxAlloc=%u)", static_cast<long long>(fileId),
+          finalPath.c_str(), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 
   bool cancelRequested = false;
   auto pollCancel = [this, &cancelRequested] {
@@ -713,7 +802,7 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
     }
     downloadOptions.resumePartial = attempt > 0;
     result = BookOrbitCatalogClient::downloadFile(
-        epubFile.id, finalPath,
+        fileId, finalPath,
         [this, &lastRenderedPercent, &lastProgressUpdateMs, &percent, &now](const size_t downloaded,
                                                                             const size_t total) {
           downloadProgress = downloaded;
@@ -1211,7 +1300,9 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
     CompactHeader::drawTitle(renderer, headerTitle.c_str());
   }
 
-  if (state == BrowserState::CHECK_WIFI || state == BrowserState::LOADING) {
+  // WIFI_SELECTION: the Wi-Fi screen is only pushed on the next loop, and a network
+  // boot paints the catalog before that, with no listing loaded yet.
+  if (state == BrowserState::CHECK_WIFI || state == BrowserState::LOADING || state == BrowserState::WIFI_SELECTION) {
     renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, statusMessage.c_str());
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
