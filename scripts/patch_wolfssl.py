@@ -56,7 +56,7 @@ SHRINK_PATCHED = f"""    {SHRINK_MARKER}
 #else
 {SHRINK_ORIGINAL}#endif
 """
-env.Append(CPPDEFINES=["FREEINK_WOLFSSL_RETAIN_INPUT_BUFFER"])
+env.Append(CPPDEFINES=["FREEINK_WOLFSSL_RETAIN_INPUT_BUFFER", "FREEINK_WOLFSSL_RELEASE_EMPTY_INPUT_BUFFER"])
 
 
 def patch_input_buffer_shrink(path: Path) -> None:
@@ -71,8 +71,49 @@ def patch_input_buffer_shrink(path: Path) -> None:
     print(f"Patched wolfSSL input buffer: {path.relative_to(PROJECT_DIR)}")
 
 
+# Retention above means GrowInputBuffer can be asked to grow an already-dynamic
+# buffer: it allocates the larger buffer before freeing the old one, so a
+# bigger record partway through a transfer needs both allocations live at
+# once. On a PSRAM-less C3 that doubles the peak contiguous block a server's
+# oversized record requires, and fails with MEMORY_E even though the smaller,
+# already-consumed old buffer is not actually needed anymore. Release it first
+# when nothing still refers into it.
+GROW_MARKER = "/* CrossInk: release a consumed input buffer before growing it */"
+GROW_ORIGINAL = """    tmp = (byte*)XMALLOC(size + usedLength + align,
+                             ssl->heap, DYNAMIC_TYPE_IN_BUFFER);
+    WOLFSSL_MSG("growing input buffer");
+"""
+# A separate flag lets an older build disable this change even when its
+# dependency cache still contains the patched source.
+GROW_PATCHED = f"""    {GROW_MARKER}
+#if defined(FREEINK_WOLFSSL_RELEASE_EMPTY_INPUT_BUFFER)
+    /* No unread ciphertext or pending plaintext may refer to this buffer.
+     * ShrinkInputBuffer zeroes/frees it and restores valid static-buffer state,
+     * including on allocation failure below. Records that fit never get here. */
+    if (ssl->buffers.inputBuffer.dynamicFlag && usedLength == 0 &&
+            ssl->buffers.inputBuffer.length == ssl->buffers.inputBuffer.idx &&
+            ssl->buffers.clearOutputBuffer.length == 0) {{
+        ShrinkInputBuffer(ssl, FORCED_FREE);
+    }}
+#endif
+{GROW_ORIGINAL}"""
+
+
+def patch_input_buffer_growth(path: Path) -> None:
+    text = path.read_text()
+    if GROW_MARKER in text:
+        if text.count(GROW_PATCHED) != 1:
+            raise RuntimeError(f"Corrupt wolfSSL input growth patch in {path}")
+        return
+    if text.count(GROW_ORIGINAL) != 1:
+        raise RuntimeError(f"Unsupported wolfSSL GrowInputBuffer in {path}; refusing an unverified patch")
+    path.write_text(text.replace(GROW_ORIGINAL, GROW_PATCHED, 1))
+    print(f"Patched wolfSSL input growth: {path.relative_to(PROJECT_DIR)}")
+
+
 for settings in PROJECT_DIR.glob(".pio/libdeps/*/Arduino-wolfSSL/src/user_settings.h"):
     patch_user_settings(settings)
 
 for internal in PROJECT_DIR.glob(".pio/libdeps/*/Arduino-wolfSSL/src/src/internal.c"):
     patch_input_buffer_shrink(internal)
+    patch_input_buffer_growth(internal)

@@ -5,6 +5,12 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+### Fixed
+
+- A book download from the BookOrbit catalogue could fail partway through on the X3/X4 (ESP32-C3) with a generic "Download failed" error. A server sending TLS records larger than 16 KB made the device's secure connection need a second, equally large memory block before it could release the first one, and heap fragmentation on these devices usually leaves no block that big free partway into a transfer ([#96](https://github.com/agosez/CrossInk-Bookorbit/issues/96)).
+
 ## [v1.6.1+bookorbit.3] - 2026-10-25
 
 Based on CrossInk v1.6.1.
