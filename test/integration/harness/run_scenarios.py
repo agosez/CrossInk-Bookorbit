@@ -43,6 +43,7 @@ SIM_DEVICE_ID = "crossink-" + SIM_MAC.hex()
 SHORT_PWRBTN_SLEEP = 1  # CrossPointSettings::SHORT_PWRBTN::SLEEP
 SHORT_PWRBTN_BOOKORBIT_SYNC = 37  # CrossPointSettings::SHORT_PWRBTN::BOOKORBIT_SYNC
 SYNC_BEHAVIOR_SMART = 1
+UI_THEME_BOOKORBIT = 8
 SYNC_MARKER_MAGIC = 0x424F5359  # "BOSY", BookOrbitSmartSync::MARKER_MAGIC
 SYNC_MARKER_FILE = "bookorbit_sync.bin"
 
@@ -602,6 +603,76 @@ def scenario_sleep_sync_push(verbose: bool) -> None:
     remote = peer.get_progress(book_hash)
     assert float(remote.get("percentage", 0)) > 0.5, f"server progress not advanced: {remote}"
     assert remote.get("device_id") == SIM_DEVICE_ID, f"unexpected device id: {remote}"
+
+
+def home_snapshot_header(fs: SimFs) -> tuple[int, int] | None:
+    """The Home snapshot's (version, stored struct size), or None without a snapshot."""
+    path = fs.crosspoint / "bookorbit_home.bin"
+    if not path.exists():
+        return None
+    magic, version, size = struct.unpack_from("<IHH", path.read_bytes())
+    assert magic == 0x484F4242, f"unexpected Home snapshot magic {magic:#x}"
+    return version, size
+
+
+def scenario_home_theme_refresh(verbose: bool) -> None:
+    """The BookOrbit Home's tile refreshes its snapshot, from a boot with no open book."""
+    manifest, _ = load_seed()
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        (fs.crosspoint / "crossink-settings.json").write_text(json.dumps({"uiTheme": UI_THEME_BOOKORBIT}))
+        assert home_snapshot_header(fs) is None
+        # Without books the tile is the page's second stop. The run ends on the timeout:
+        # nothing can be scheduled across the two restarts.
+        run_simulator(fs, input_script="3000:DOWN:120;4500:CONFIRM:120", choice="none", timeout_s=14,
+                      verbose=verbose)
+        assert home_snapshot_header(fs) is not None, "the tile wrote no Home snapshot"
+        covers = fs.crosspoint / "bookorbit_home"
+        assert list(covers.glob("*.bmp")), "the refresh decoded no cover"
+        assert not list(covers.glob("*.jpg")), "a cover stayed pending with Wi-Fi off"
+
+
+def scenario_home_download_returns_home(verbose: bool) -> None:
+    """A book downloaded from a BookOrbit Home shelf ends on Home, not on a catalog listing."""
+    manifest, _ = load_seed()
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        (fs.crosspoint / "crossink-settings.json").write_text(json.dumps({"uiTheme": UI_THEME_BOOKORBIT}))
+        run_simulator(fs, input_script="3000:DOWN:120;4500:CONFIRM:120", choice="none", timeout_s=14,
+                      verbose=verbose)
+        assert home_snapshot_header(fs) is not None, "the tile wrote no Home snapshot"
+
+        # Library page, then its first stop: the first Discover cover, not on the card yet.
+        output = run_simulator(fs, input_script="3000:RIGHT:120;4500:CONFIRM:120", choice="none", timeout_s=60,
+                               verbose=verbose)
+        assert "Restarting into the download of book" in output, "the shelf book did not start a download"
+        downloaded = output.index("Downloading file")
+        after = output[downloaded:]
+        assert "Card space read" in after, "Home did not open after the download"
+        assert "Listing page" not in after, "the download went back to a catalog listing"
+        assert not (fs.crosspoint / "bookorbit_download.json").exists(), "the download was left to resume"
+
+
+def scenario_sleep_sync_refreshes_home(verbose: bool) -> None:
+    """Sync on Sleep also refreshes the Home snapshot, but only under the BookOrbit theme."""
+    manifest, _ = load_seed()
+    seeded = manifest["progress"][2]
+    source = INTEGRATION / "library" / seeded["file"]
+    for theme, expected in ((UI_THEME_BOOKORBIT, True), (None, False)):
+        with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+            fs = SimFs(Path(tmp), manifest["kosync"])
+            fs.enable_sync_on_sleep()
+            if theme is not None:
+                settings = json.loads((fs.crosspoint / "crossink-settings.json").read_text())
+                settings["uiTheme"] = theme
+                (fs.crosspoint / "crossink-settings.json").write_text(json.dumps(settings))
+            sim_path = fs.add_book(source)
+            fs.set_open_book(sim_path)
+            write_progress_bin(fs.epub_cache_dir(sim_path) / "progress.bin", 4, 0, 1)
+            output = run_simulator(fs, input_script="6000:POWER:120", choice="none", timeout_s=90, verbose=verbose)
+            assert "Sleep sync over" in output, "sleep sync never ran to its end"
+            refreshed = home_snapshot_header(fs) is not None
+            assert refreshed == expected, f"theme {theme}: Home snapshot written={refreshed}, expected={expected}"
 
 
 def scenario_sleep_sync_after_web_open(verbose: bool) -> None:
@@ -1813,6 +1884,9 @@ SCENARIOS = {
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,
     "sleep_sync_push": scenario_sleep_sync_push,
+    "sleep_sync_refreshes_home": scenario_sleep_sync_refreshes_home,
+    "home_theme_refresh": scenario_home_theme_refresh,
+    "home_download_returns_home": scenario_home_download_returns_home,
     "sleep_sync_after_web_open": scenario_sleep_sync_after_web_open,
     "sleep_sync_conflict": scenario_sleep_sync_conflict,
     "sleep_sync_keeps_progress_reset": scenario_sleep_sync_keeps_progress_reset,

@@ -245,10 +245,12 @@ bool hasEpubFile(const BookOrbitBookDetail& detail, BookOrbitCatalogFile& outFil
 }  // namespace
 
 BookOrbitCatalogBrowserActivity::BookOrbitCatalogBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                                                 const bool networkBoot, const bool resumeDownload)
+                                                                 const bool networkBoot, const bool resumeDownload,
+                                                                 BookOrbitCatalogLink link)
     : Activity("BookOrbitCatalogBrowser", renderer, mappedInput),
       networkBoot(networkBoot || resumeDownload),
       resumeDownload(resumeDownload),
+      entryLink(std::move(link)),
       uiTarget(makeUiTarget(renderer)),
       app(uiTarget, uiTarget.deviceContext()) {}
 
@@ -322,9 +324,14 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
     facetPage = resume.facetPage;
     facetSelectorIndex = resume.facetSelectorIndex;
     facetTopIndex = resume.facetTopIndex;
+    downloadFromHome = resume.fromHome;
     pendingDownload = {resume.bookId, resume.fileId, std::move(resume.title), std::move(resume.path)};
   } else {
     BookOrbitCatalogListCache::clear();
+    // A BOOKORBIT_CATALOG boot the BookOrbit Home asked for brings its link on the SD card.
+    if (networkBoot && entryLink.bookId == 0 && entryLink.sectionId.empty()) {
+      BookOrbitCatalogListCache::takeEntryLink(entryLink);
+    }
   }
 
   if (!BOOKORBIT_STORE.hasCredentials()) {
@@ -378,9 +385,27 @@ void BookOrbitCatalogBrowserActivity::onWifiSelectionComplete(const bool connect
     return;
   }
   sdFontSystem.releaseForNetwork(renderer);
+  if (entryLink.bookId != 0) {
+    // Back from the download lands on the listing the Home shelf drew from.
+    const BookOrbitCatalogLink link = std::move(entryLink);
+    entryLink = BookOrbitCatalogLink{};
+    navLevel = NavLevel::Books;
+    listQuery = BookOrbitCatalogClient::sectionBookQuery("recent");
+    listTitle = link.title;
+    listPage = 1;
+    booksFromFacet = false;
+    downloadFromHome = true;
+    downloadBook(link.bookId, link.title, "");
+    return;
+  }
   if (!loadRoot(/*allowNetwork=*/false)) {
     showLoadingBeforeFetch();
     loadRoot();
+  }
+  if (!entryLink.sectionId.empty()) {
+    const BookOrbitCatalogLink link = std::move(entryLink);
+    entryLink = BookOrbitCatalogLink{};
+    loadFacetEntries(link.sectionId, link.title, 1);
   }
 }
 
@@ -1223,6 +1248,7 @@ bool BookOrbitCatalogBrowserActivity::restartForDownload(const int64_t bookId, c
   resume.facetPage = facetPage;
   resume.facetSelectorIndex = facetSelectorIndex;
   resume.facetTopIndex = facetTopIndex;
+  resume.fromHome = downloadFromHome;
   if (!BookOrbitCatalogListCache::saveDownloadResume(resume)) {
     LOG_ERR("BookOrbit", "Cannot save the download for its restart; downloading in place");
     return false;
@@ -1246,7 +1272,11 @@ void BookOrbitCatalogBrowserActivity::runPendingDownload(const bool wifiConnecte
   const PendingDownload job = std::move(pendingDownload);
   pendingDownload = PendingDownload{};
   if (!wifiConnected) {
-    // Backing out of Wi-Fi cancels the download: back to the listing, from the cache.
+    // Backing out of Wi-Fi cancels the download: back to where it was started.
+    if (downloadFromHome) {
+      onGoHome();
+      return;
+    }
     restoreBookListAfterDownload();
     requestUpdate();
     return;
@@ -1374,6 +1404,13 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
   } else {
     LOG_ERR("BookOrbit", "Download failed (err=%d)", static_cast<int>(result));
     errorMessage = result == HttpDownloader::INSUFFICIENT_SPACE ? tr(STR_SD_CARD_FULL) : tr(STR_DOWNLOAD_FAILED);
+  }
+
+  // A download from Home goes back there once done or cancelled; a failure first shows
+  // its message, which Back dismisses to Home as well.
+  if (downloadFromHome && !downloadFailed) {
+    onGoHome();
+    return;
   }
 
   // The listing was freed for download headroom; rebuild it from the stored
@@ -1587,7 +1624,7 @@ void BookOrbitCatalogBrowserActivity::loop() {
     // previous list (or home from the root) rather than offering a retry, matching
     // the "no code beyond what's needed" scope decision for this feature.
     if (backRequested) {
-      if (!BOOKORBIT_STORE.hasCredentials() || navLevel == NavLevel::Root) {
+      if (!BOOKORBIT_STORE.hasCredentials() || navLevel == NavLevel::Root || downloadFromHome) {
         onGoHome();
       } else if (entries.empty() && listFreedForDownload) {
         // The listing was freed for a download that then failed; rebuild it.

@@ -84,6 +84,8 @@ bool UITheme::hasCoverGridHome() {
   return SETTINGS.uiTheme == CrossPointSettings::UI_THEME::COVER_GRID && supportsCoverGrid();
 }
 
+bool UITheme::hasBookOrbitHome() { return SETTINGS.uiTheme == CrossPointSettings::UI_THEME::BOOKORBIT; }
+
 void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
   if (type == CrossPointSettings::UI_THEME::COVER_GRID && !supportsCoverGrid()) {
     type = CrossPointSettings::UI_THEME::LYRA;
@@ -115,6 +117,8 @@ void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
       currentTheme = std::make_unique<LyraCarouselTheme>();
       currentMetrics = &LyraCarouselMetrics::values;
       break;
+    // The BookOrbit theme only replaces Home (BookOrbitHomeUi); every other screen is Minimal's.
+    case CrossPointSettings::UI_THEME::BOOKORBIT:
     case CrossPointSettings::UI_THEME::MINIMAL:
       LOG_DBG("UI", "Using Minimal theme");
       currentTheme = std::make_unique<MinimalTheme>();

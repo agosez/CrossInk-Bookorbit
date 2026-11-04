@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 
 constexpr size_t READING_TIME_BUCKET_COUNT = 4;
 constexpr size_t READING_DAY_OF_WEEK_COUNT = 7;
@@ -40,6 +41,11 @@ bool readingStatsDateFromDayIndex(uint32_t dayIndex, ReadingStatsDate& outDate);
 uint8_t readingStatsDayOfWeekIndex(const ReadingStatsDate& date);  // Monday = 0
 ReadingTimeBucket readingTimeBucketForHour(uint8_t hour);
 bool getCurrentLocalReadingStatsDateTime(ReadingStatsDateTime& outDateTime);
+// Also answers from the system clock a board without a clock chip sets over Wi-Fi, which
+// the function above ignores. False until that clock is set.
+bool getCurrentLocalReadingStatsDateTimeAnyClock(ReadingStatsDateTime& outDateTime);
+// A UTC time in the local time zone of the setting the function above applies.
+bool readingStatsDateTimeFromUtc(time_t utc, ReadingStatsDateTime& outDateTime);
 uint16_t readingSpanDaysInclusive(const ReadingStatsDate& start, const ReadingStatsDate& end);
 uint16_t readingSpanDaysElapsed(const ReadingStatsDate& start, const ReadingStatsDate& end);
 void formatReadingStatsShortDate(const ReadingStatsDate& date, char* buf, size_t len);
@@ -54,6 +60,8 @@ void recordReadingSpanIntoHistory(uint32_t& anchorDay, std::array<uint8_t, READI
                                   const ReadingStatsDateTime& localStart, uint32_t seconds);
 void mergeReadingHistory(uint32_t& targetAnchorDay, std::array<uint8_t, READING_HISTORY_BYTES>& targetBits,
                          uint32_t sourceAnchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& sourceBits);
+bool readingHistoryHasDay(uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
+                          uint32_t dayIndex);
 uint16_t computeReadingHistoryLongestStreak(uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits);
 uint16_t computeReadingHistoryCurrentStreak(uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
                                             const ReadingStatsDate* today);

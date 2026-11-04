@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -43,6 +44,10 @@ bool hasPath(const std::string& path);
 // still finds it. No-op when oldPath was never a catalog download. Leaves the index
 // unloaded: the file browser and the reader call this, and neither keeps it around.
 void relocate(const std::string& oldPath, const std::string& newPath);
+
+// Downloads recorded for the configured server, without checking their files: a book
+// deleted outside the catalog stays counted until a lookup finds it gone.
+size_t recordedCount();
 
 // Frees the in-RAM copy; the next lookup or record reloads it from the SD card.
 void unload();

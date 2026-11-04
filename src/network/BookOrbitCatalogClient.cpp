@@ -11,10 +11,13 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 
 #include "BookOrbitCredentialStore.h"
+#include "BookOrbitHomeStore.h"
 #include "BookOrbitSyncClient.h"
 #include "DaysFromCivil.h"
+#include "activities/reader/ReadingStatsUtils.h"
 
 bool BookOrbitCatalogClient::lastFetchBadResponse = false;
 
@@ -330,6 +333,150 @@ bool BookOrbitCatalogClient::fetchCatalogCounts(BookOrbitCatalogCounts& outCount
   outCounts.totalBooks = fetchBookTotal(sectionBookQuery("all-books"));
   outCounts.inProgress = fetchBookTotal(sectionBookQuery("continue-reading"));
   return true;
+}
+
+namespace {
+bool hasEpubFormat(JsonVariantConst formats) {
+  for (JsonVariantConst format : formats.as<JsonArrayConst>()) {
+    const char* name = format.as<const char*>();
+    if (name != nullptr && strcasecmp(name, "epub") == 0) return true;
+  }
+  return false;
+}
+
+uint32_t hashText(const char* text) {
+  uint32_t hash = 2166136261u;
+  for (; text != nullptr && *text != '\0'; text++) {
+    hash = (hash ^ static_cast<uint8_t>(*text)) * 16777619u;
+  }
+  return hash;
+}
+
+template <size_t N>
+void copyText(char (&out)[N], const char* text) {
+  snprintf(out, N, "%s", text != nullptr ? text : "");
+}
+
+int readBooks(JsonArrayConst books, BookOrbitHomeBook* out, const int capacity) {
+  int count = 0;
+  for (JsonObjectConst book : books) {
+    if (count >= capacity) break;
+    const int32_t id = book["id"] | 0;
+    if (id == 0 || !hasEpubFormat(book["formats"])) continue;
+    BookOrbitHomeBook& entry = out[count++];
+    entry.id = id;
+    entry.coverVersion = hashText(book["updatedAt"] | "");
+    entry.hasCover = book["hasCover"] | false;
+    const float progress = book["progressPercentage"] | -1.0f;
+    entry.progress =
+        progress >= 0.0f ? static_cast<uint8_t>(std::min(progress + 0.5f, 100.0f)) : BookOrbitHomeBook::NO_PROGRESS;
+    copyText(entry.title, book["title"] | "");
+  }
+  return count;
+}
+}  // namespace
+
+bool BookOrbitCatalogClient::fetchHomeDashboard(BookOrbitHomeSnapshot& out, HalFile& yearOut) {
+  if (!BOOKORBIT_STORE.hasCredentials()) return false;
+
+  JsonDocument filter;
+  filter["displayName"] = true;
+  filter["totalBooks"] = true;
+  filter["browseCounts"]["authors"] = true;
+  filter["browseCounts"]["series"] = true;
+  filter["browseCounts"]["collections"] = true;
+  for (const char* list : {"continueReading", "discover"}) {
+    JsonObject book = filter[list][0].to<JsonObject>();
+    book["id"] = true;
+    book["title"] = true;
+    book["formats"] = true;
+    book["hasCover"] = true;
+    book["updatedAt"] = true;
+    book["progressPercentage"] = true;
+  }
+  filter["readingGoal"]["goalBooks"] = true;
+  filter["readingGoal"]["completedBooks"] = true;
+  filter["readingGoal"]["year"] = true;
+  filter["readingStreak"]["currentStreak"] = true;
+  filter["readingStreak"]["longestStreak"] = true;
+  filter["readingStreak"]["lastSevenDays"] = true;
+  filter["highlightOfTheDay"]["text"] = true;
+  filter["highlightOfTheDay"]["bookTitle"] = true;
+  filter["readingYear"]["startDate"] = true;
+  filter["readingYear"]["minutes"] = true;
+  filter["achievements"]["next"]["name"] = true;
+  filter["achievements"]["next"]["threshold"] = true;
+  filter["achievements"]["next"]["currentProgress"] = true;
+
+  JsonDocument doc;
+  if (!fetchJson(BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/dashboard", filter, doc)) return false;
+
+  copyText(out.displayName, doc["displayName"] | "");
+  out.totalBooks = doc["totalBooks"] | -1;
+  out.authors = doc["browseCounts"]["authors"] | -1;
+  out.series = doc["browseCounts"]["series"] | -1;
+  out.collections = doc["browseCounts"]["collections"] | -1;
+  out.goalBooks = doc["readingGoal"]["goalBooks"] | 0;  // null when no goal is configured
+  out.goalCompleted = doc["readingGoal"]["completedBooks"] | 0;
+  out.goalYear = doc["readingGoal"]["year"] | 0;
+  out.currentStreak = doc["readingStreak"]["currentStreak"] | 0;
+  out.longestStreak = doc["readingStreak"]["longestStreak"] | 0;
+  out.lastSevenDays = 0;
+  int dayBit = 0;
+  for (JsonVariantConst read : doc["readingStreak"]["lastSevenDays"].as<JsonArrayConst>()) {
+    if (dayBit < 7 && (read | false)) out.lastSevenDays |= static_cast<uint8_t>(1u << dayBit);
+    dayBit++;
+  }
+  copyText(out.highlightText, doc["highlightOfTheDay"]["text"] | "");
+  copyText(out.highlightBook, doc["highlightOfTheDay"]["bookTitle"] | "");
+  JsonObjectConst nextBadge = doc["achievements"]["next"].as<JsonObjectConst>();
+  copyText(out.badgeName, nextBadge["name"] | "");
+  out.badgeThreshold = nextBadge["threshold"] | 0;
+  out.badgeProgress = nextBadge["currentProgress"] | 0;
+  out.continueCount = static_cast<uint8_t>(readBooks(doc["continueReading"].as<JsonArrayConst>(), out.continueReading,
+                                                     BookOrbitHomeSnapshot::CONTINUE_COUNT));
+  out.discoverCount = static_cast<uint8_t>(
+      readBooks(doc["discover"].as<JsonArrayConst>(), out.discover, BookOrbitHomeSnapshot::SHELF_COUNT));
+
+  out.yearDayCount = 0;
+  unsigned year = 0;
+  unsigned month = 0;
+  unsigned day = 0;
+  const char* startDate = doc["readingYear"]["startDate"] | "";
+  if (sscanf(startDate, "%u-%u-%u", &year, &month, &day) == 3) {
+    ReadingStatsDate first;
+    first.year = static_cast<uint16_t>(year);
+    first.month = static_cast<uint8_t>(month);
+    first.day = static_cast<uint8_t>(day);
+    if (first.isValid()) {
+      out.yearFirstDay = readingStatsDayIndex(first);
+      for (JsonVariantConst minutes : doc["readingYear"]["minutes"].as<JsonArrayConst>()) {
+        const uint16_t value = minutes | 0;
+        if (yearOut.write(reinterpret_cast<const uint8_t*>(&value), sizeof(value)) != sizeof(value)) {
+          LOG_ERR("BookOrbit", "Cannot write the year's minutes");
+          return false;
+        }
+        out.yearDayCount++;
+      }
+    }
+  }
+  return true;
+}
+
+HttpDownloader::DownloadError BookOrbitCatalogClient::downloadThumbnail(const int64_t bookId, const char* destPath,
+                                                                        bool (*shouldStop)()) {
+  if (!BOOKORBIT_STORE.hasCredentials()) return HttpDownloader::HTTP_ERROR;
+
+  // BookOrbit stores every book thumbnail as a JPEG and streams the file as-is, so the
+  // payload is small (tens of KB) and needs no resume machinery.
+  const std::string url =
+      BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/books/" + std::to_string(bookId) + "/thumbnail";
+  HttpDownloader::DownloadOptions options;
+  options.extraHeaders = authHeaders();
+  options.transport = HttpDownloader::Transport::WOLFSSL;
+  options.clientRxBufferSize = 2048;
+  if (shouldStop != nullptr) options.shouldCancel = shouldStop;
+  return HttpDownloader::downloadToFile(url, destPath, nullptr, nullptr, "", "", std::move(options));
 }
 
 bool BookOrbitCatalogClient::fetchBooks(const BookOrbitBookQuery& query, const int page, BookOrbitBookPage& outPage) {

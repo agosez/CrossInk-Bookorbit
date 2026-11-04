@@ -41,6 +41,13 @@ struct BookReadingStats {
   // Attributes reading time to local date/time buckets when RTC data exists.
   void recordReadingSpan(const ReadingStatsDateTime& localStart, uint32_t seconds);
 
+  // Estimates the time left from how long the book has taken so far. False when too
+  // little has been read to tell.
+  bool fallbackTimeLeft(float progressPercent, uint32_t& seconds) const;
+
+  // The reader's own estimate when it has saved one, otherwise the fallback above.
+  bool estimatedTimeLeft(float progressPercent, uint32_t& seconds) const;
+
   // Formats a duration in seconds into a human-readable string.
   // Output examples: "< 1 min", "45 min", "2h 30 min"
   static void formatDuration(uint32_t seconds, char* buf, size_t len);

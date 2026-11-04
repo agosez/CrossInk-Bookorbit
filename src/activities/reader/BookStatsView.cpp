@@ -168,21 +168,6 @@ const StatsLayout& getNoRtcCombinedLayout(const GfxRenderer& renderer, const Map
   return kCompactLayout;
 }
 
-bool fallbackEstimatedTimeLeft(const BookReadingStats& stats, const float progressPercent, uint32_t& seconds) {
-  seconds = 0;
-  if (progressPercent <= 0.0f || progressPercent >= 100.0f || stats.totalReadingSeconds < 120) {
-    return false;
-  }
-
-  const float progress = progressPercent / 100.0f;
-  const float estimate = (static_cast<float>(stats.totalReadingSeconds) * (1.0f - progress)) / progress;
-  if (estimate <= 0.0f) {
-    return false;
-  }
-  seconds = static_cast<uint32_t>(estimate + 0.5f);
-  return seconds > 0;
-}
-
 bool cachedEstimatedTimeLeft(const BookReadingStats& stats, uint32_t& seconds) {
   seconds = stats.estimatedTimeLeftSeconds;
   return seconds > 0;
@@ -325,7 +310,7 @@ void drawPerBookStatsCard(GfxRenderer& renderer, const int x, const int y, const
   uint32_t fallbackEstimateSeconds = 0;
   uint32_t cachedEstimateSeconds = 0;
   const bool hasCachedEstimate = cachedEstimatedTimeLeft(stats, cachedEstimateSeconds);
-  const bool hasFallbackEstimate = fallbackEstimatedTimeLeft(stats, progressPercent, fallbackEstimateSeconds);
+  const bool hasFallbackEstimate = stats.fallbackTimeLeft(progressPercent, fallbackEstimateSeconds);
   if (!stats.isCompleted && (hasEstimatedTimeLeft || hasCachedEstimate || hasFallbackEstimate)) {
     formatCompactReadingDuration(hasEstimatedTimeLeft ? estimatedTimeLeftSeconds
                                  : hasCachedEstimate  ? cachedEstimateSeconds

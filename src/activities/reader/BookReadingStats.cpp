@@ -260,6 +260,28 @@ void BookReadingStats::recordReadingSpan(const ReadingStatsDateTime& localStart,
   recordReadingSpanIntoBuckets(timeOfDaySeconds, dayOfWeekSeconds, localStart, seconds);
 }
 
+bool BookReadingStats::fallbackTimeLeft(const float progressPercent, uint32_t& seconds) const {
+  seconds = 0;
+  if (progressPercent <= 0.0f || progressPercent >= 100.0f || totalReadingSeconds < 120) {
+    return false;
+  }
+  const float progress = progressPercent / 100.0f;
+  const float estimate = (static_cast<float>(totalReadingSeconds) * (1.0f - progress)) / progress;
+  if (estimate <= 0.0f) {
+    return false;
+  }
+  seconds = static_cast<uint32_t>(estimate + 0.5f);
+  return seconds > 0;
+}
+
+bool BookReadingStats::estimatedTimeLeft(const float progressPercent, uint32_t& seconds) const {
+  if (estimatedTimeLeftSeconds > 0) {
+    seconds = estimatedTimeLeftSeconds;
+    return true;
+  }
+  return fallbackTimeLeft(progressPercent, seconds);
+}
+
 void BookReadingStats::formatDuration(uint32_t seconds, char* buf, size_t len) {
   if (seconds < 60) {
     snprintf(buf, len, "%s", tr(STR_STATS_LESS_THAN_MIN));

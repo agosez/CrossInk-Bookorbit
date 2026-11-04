@@ -1,0 +1,17 @@
+# The BookOrbit Home theme's tile icons, kept out of upstream's manifests so their headers never conflict.
+# python3 scripts/generate_icons.py --library tabler --manifest src/components/icons/bookOrbitHomeIcons.manifest --sizes 24 --out src/components/icons/bookOrbitHomeIcons.h
+home_trophy = trophy
+home_refresh = refresh
+home_cloud_down = cloud-down
+home_calendar = calendar-event
+home_award = award
+home_quote = quote
+home_shuffle = arrows-shuffle
+home_clock = clock
+home_books = books
+home_authors = feather
+home_series = stack-2
+home_card = device-sd-card
+home_check = check
+home_prev = chevron-left
+home_next = chevron-right

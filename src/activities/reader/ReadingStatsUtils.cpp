@@ -2,6 +2,8 @@
 
 #include <HalClock.h>
 
+#include <ctime>
+
 #include "CrossPointSettings.h"
 
 namespace {
@@ -266,6 +268,25 @@ bool getCurrentLocalReadingStatsDateTime(ReadingStatsDateTime& outDateTime) {
   return outDateTime.isValid();
 }
 
+bool getCurrentLocalReadingStatsDateTimeAnyClock(ReadingStatsDateTime& outDateTime) {
+  if (getCurrentLocalReadingStatsDateTime(outDateTime)) return true;
+  if (!halClock.hasCurrentTime()) return false;
+  return readingStatsDateTimeFromUtc(time(nullptr), outDateTime);
+}
+
+bool readingStatsDateTimeFromUtc(const time_t utc, ReadingStatsDateTime& outDateTime) {
+  const time_t local = utc + static_cast<time_t>(static_cast<int>(SETTINGS.clockUtcOffsetQ) - 48) * 15 * 60;
+  struct tm localTm = {};
+  gmtime_r(&local, &localTm);
+  outDateTime.date.year = static_cast<uint16_t>(localTm.tm_year + 1900);
+  outDateTime.date.month = static_cast<uint8_t>(localTm.tm_mon + 1);
+  outDateTime.date.day = static_cast<uint8_t>(localTm.tm_mday);
+  outDateTime.hour = static_cast<uint8_t>(localTm.tm_hour);
+  outDateTime.minute = static_cast<uint8_t>(localTm.tm_min);
+  outDateTime.second = static_cast<uint8_t>(localTm.tm_sec);
+  return outDateTime.isValid();
+}
+
 uint16_t readingSpanDaysInclusive(const ReadingStatsDate& start, const ReadingStatsDate& end) {
   if (!start.isValid() || !end.isValid() || compareReadingStatsDate(end, start) < 0) {
     return 0;
@@ -421,6 +442,13 @@ void mergeReadingHistory(uint32_t& targetAnchorDay, std::array<uint8_t, READING_
       setBit(targetBits, static_cast<size_t>(delta));
     }
   }
+}
+
+bool readingHistoryHasDay(const uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
+                          const uint32_t dayIndex) {
+  if (dayIndex > anchorDay) return false;
+  const uint32_t delta = anchorDay - dayIndex;
+  return delta < READING_HISTORY_DAYS && isBitSet(bits, static_cast<size_t>(delta));
 }
 
 uint16_t computeReadingHistoryLongestStreak(const uint32_t anchorDay,

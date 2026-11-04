@@ -24,7 +24,8 @@ struct portMUX_TYPE {};
   }
 #endif
 
-class Activity;    // forward declaration
+class Activity;  // forward declaration
+struct BookOrbitCatalogLink;
 class RenderLock;  // forward declaration
 
 #if CROSSINK_APP_CAP_TOUCH
@@ -159,6 +160,9 @@ class ActivityManager {
   // the download the catalog restarted for. False only when the browser could not be
   // allocated.
   bool goToBookOrbitCatalog(bool networkBootReady = false, bool resumeDownload = false);
+  // Enters the catalog at one book, which it downloads, or at a drill-down section. On the
+  // X3 and X4 the link waits on the SD card through the catalog's network boot.
+  bool goToBookOrbitCatalog(BookOrbitCatalogLink link);
   void goToBookOrbitAuth();
   void goToReader(std::string path, bool suppressBackRelease = false, bool allowFastInitialRefresh = false,
                   bool cleanImageBaseOnEntry = false);

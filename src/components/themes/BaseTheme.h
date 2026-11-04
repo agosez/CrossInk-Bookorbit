@@ -8,6 +8,7 @@
 
 #include "util/ReaderStatusBarConfig.h"
 
+class Bitmap;
 class GfxRenderer;
 struct RecentBook;
 struct BookReadingStats;
@@ -21,6 +22,9 @@ struct Rect {
 
   explicit Rect(int x = 0, int y = 0, int width = 0, int height = 0) : x(x), y(y), width(width), height(height) {}
 };
+
+// Where a bitmap lands centered in target, shrunk to fit and never enlarged.
+Rect fittedBitmapRect(const Bitmap& bitmap, const Rect& target);
 
 struct TabInfo {
   const char* label;

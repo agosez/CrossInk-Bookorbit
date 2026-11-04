@@ -9,6 +9,9 @@ This guide covers the touchscreen shortcuts available from the **Lyra**,
 **Dashboard**, and **Minimal** Home screens. These themes use the same gestures
 when they show one recent-book cover.
 
+The **BookOrbit** theme has its own gestures: see
+[BookOrbit Home](./reader-features.md#bookorbit-home).
+
 ## Home-screen shortcuts
 
 Start each swipe on the main part of the Home screen and move your finger in

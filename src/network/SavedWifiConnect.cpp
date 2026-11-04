@@ -158,3 +158,11 @@ bool SavedWifiConnect::connect(const StopCheck shouldStop) {
   LOG_INF("WIFI", "No saved network joined in the background (%u visible)", static_cast<unsigned>(visible.size()));
   return false;
 }
+
+void SavedWifiConnect::disconnect() {
+  // No SNTP stop here: syncSystemTimeFromNTP() releases the client before it returns.
+  WiFi.disconnect(false);
+  delay(100);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+}

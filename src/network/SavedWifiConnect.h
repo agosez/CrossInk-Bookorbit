@@ -10,4 +10,7 @@ using StopCheck = bool (*)();
 
 bool connect(StopCheck shouldStop);
 
+// Takes the radio down, handing back the heap Wi-Fi holds.
+void disconnect();
+
 }  // namespace SavedWifiConnect

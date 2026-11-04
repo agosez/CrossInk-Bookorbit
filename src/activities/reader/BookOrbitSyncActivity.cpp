@@ -23,6 +23,7 @@
 #include "BookOrbitAnnotationStore.h"
 #include "BookOrbitBookmarkStore.h"
 #include "BookOrbitCredentialStore.h"
+#include "BookOrbitHomeStore.h"
 #include "BookOrbitStatsQueue.h"
 #include "BookmarkStore.h"
 #include "ClippingStore.h"
@@ -38,6 +39,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/home/RecentBookProgress.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "components/BookOrbitHomeLayout.h"
 #include "components/TouchActionButtons.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
@@ -234,14 +236,6 @@ void syncTimeWithNTP() {
 #endif
 }
 
-void wifiOff() {
-  // No SNTP stop here: syncSystemTimeFromNTP() releases the client before it returns.
-  WiFi.disconnect(false);
-  delay(100);
-  WiFi.mode(WIFI_OFF);
-  delay(100);
-}
-
 #ifdef SIMULATOR
 // Integration-test hook (test/integration/): every sync outcome funnels through
 // returnToReader(), and every sleep sync through the end of runSleepSync(), once its
@@ -335,14 +329,24 @@ void BookOrbitSyncActivity::runSleepSync() {
   LOG_INF("BookOrbit", "Sleep sync starting (free=%u maxAlloc=%u)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   sdFontSystem.releaseLoadedFont(renderer);
   wifiActivated = true;
+  bool wifiConnectedForSleepSync = false;
   if (SavedWifiConnect::connect(&sleepSyncWakeRequested)) {
+    wifiConnectedForSleepSync = true;
     // The whole sync runs synchronously from here, decisions included.
     onWifiSelectionComplete(true);
   } else if (!stopIfWoken()) {
     LOG_INF("BookOrbit", "Sleep sync skipped: no saved network answered");
   }
   syncSession.reset();
-  wifiOff();
+  // The BookOrbit Home draws from what this boot's network leaves behind. Each step is
+  // retried by the next sync, so a wake press can end it anywhere.
+  const bool refreshHome = wifiConnectedForSleepSync && UITheme::hasBookOrbitHome();
+  const auto homeCoverSizes = BookOrbitHomeLayout::coverSizes(renderer);
+  if (refreshHome && !sleepSyncWakeRequested()) BookOrbitHomeStore::refresh(&sleepSyncWakeRequested, homeCoverSizes);
+  SavedWifiConnect::disconnect();
+  if (refreshHome && !sleepSyncWakeRequested()) {
+    BookOrbitHomeStore::decodePendingCovers(&sleepSyncWakeRequested, homeCoverSizes);
+  }
   LOG_INF("BookOrbit", "Sleep sync over (state=%d)", static_cast<int>(state));
 #ifdef SIMULATOR
   endSimulatorScenarioIfRequested(static_cast<int>(state));
@@ -427,7 +431,7 @@ void BookOrbitSyncActivity::performSync() {
   }
   if (requestUpdateAndWait() != RequestUpdateResult::Rendered) {
     LOG_ERR("BookOrbit", "Fetch progress screen could not be rendered synchronously; aborting sync");
-    wifiOff();
+    SavedWifiConnect::disconnect();
     {
       RenderLock lock(*this);
       state = SYNC_FAILED;
@@ -1600,7 +1604,7 @@ void BookOrbitSyncActivity::performUpload() {
   if (requestUpdateAndWait() != RequestUpdateResult::Rendered) {
     LOG_ERR("BookOrbit", "Upload progress screen could not be rendered synchronously; aborting upload");
     syncSession.reset();
-    wifiOff();
+    SavedWifiConnect::disconnect();
     {
       RenderLock lock(*this);
       state = SYNC_FAILED;
@@ -1626,7 +1630,7 @@ void BookOrbitSyncActivity::performUpload() {
   const auto result = BookOrbitSyncClient::updateProgress(progress);
 
   syncSession.reset();
-  wifiOff();
+  SavedWifiConnect::disconnect();
 
   if (result != BookOrbitSyncClient::OK) {
     {
@@ -1726,7 +1730,7 @@ void BookOrbitSyncActivity::onExit() {
 
   syncSession.reset();
   if (wifiActivated) {
-    wifiOff();
+    SavedWifiConnect::disconnect();
     silentRestartToReader();
   }
 }

@@ -252,6 +252,10 @@ device model and build.
   - "RoundedRaff" - A rounded theme with additional visual styling
   - "Cover Grid" (PSRAM devices, such as Sticky and X4 Pro) - Shows the current
     book and up to six additional book covers; tap a cover to open that book
+  - "BookOrbit" - Home as pages of tiles, modeled on BookOrbit's dashboard: the
+    current book, streak, week and other books being read, then the catalog's
+    shelves, then your reading statistics. It works from the SD card and never
+    waits on the network. See **[BookOrbit Home](./reader-features.md#bookorbit-home)**.
 
   Themes that show reading stats hide those stats while **Track Reading Stats** is off.
 

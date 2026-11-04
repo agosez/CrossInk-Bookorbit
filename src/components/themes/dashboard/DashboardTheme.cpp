@@ -67,19 +67,6 @@ Rect coverRectForScreen(const GfxRenderer& renderer, const Rect& rect) {
   return Rect{inset + (gpio.deviceIsX3() ? kPairInwardShiftX3 : 0), rect.y + kTopInset, coverW, coverH};
 }
 
-Rect fittedBitmapRect(const Bitmap& bitmap, const Rect& target) {
-  if (bitmap.getWidth() <= 0 || bitmap.getHeight() <= 0 || target.width <= 0 || target.height <= 0) {
-    return target;
-  }
-
-  const float widthScale = static_cast<float>(target.width) / static_cast<float>(bitmap.getWidth());
-  const float heightScale = static_cast<float>(target.height) / static_cast<float>(bitmap.getHeight());
-  const float scale = std::min(1.0f, std::min(widthScale, heightScale));
-  const int drawnW = std::min(target.width, std::max(1, static_cast<int>(std::ceil(bitmap.getWidth() * scale))));
-  const int drawnH = std::min(target.height, std::max(1, static_cast<int>(std::ceil(bitmap.getHeight() * scale))));
-  return Rect{target.x + (target.width - drawnW) / 2, target.y + (target.height - drawnH) / 2, drawnW, drawnH};
-}
-
 std::string coverPathForRect(const RecentBook& book, const Rect& imageRect) {
   if (book.coverBmpPath.empty()) {
     return {};
@@ -172,28 +159,6 @@ void formatCompactDuration(const uint32_t seconds, char* buf, const size_t len) 
   }
 }
 
-bool fallbackEstimatedTimeLeft(const BookReadingStats& stats, const float progressPercent, uint32_t& seconds) {
-  seconds = 0;
-  if (progressPercent <= 0.0f || progressPercent >= 100.0f || stats.totalReadingSeconds < 120) {
-    return false;
-  }
-  const float progress = progressPercent / 100.0f;
-  const float estimate = (static_cast<float>(stats.totalReadingSeconds) * (1.0f - progress)) / progress;
-  if (estimate <= 0.0f) {
-    return false;
-  }
-  seconds = static_cast<uint32_t>(estimate + 0.5f);
-  return seconds > 0;
-}
-
-bool estimatedTimeLeft(const BookReadingStats& stats, const float progressPercent, uint32_t& seconds) {
-  if (stats.estimatedTimeLeftSeconds > 0) {
-    seconds = stats.estimatedTimeLeftSeconds;
-    return true;
-  }
-  return fallbackEstimatedTimeLeft(stats, progressPercent, seconds);
-}
-
 bool estimateFinishDateFromDailyPace(const BookReadingStats& stats, const ReadingStatsDateTime& today,
                                      const uint32_t estimatedReadingSeconds, ReadingStatsDate& outDate) {
   outDate = {};
@@ -262,7 +227,7 @@ void drawDashboardStats(const GfxRenderer& renderer, const Rect& coverRect, cons
   char startedDate[24];
   char finishDate[24];
   uint32_t estimatedSeconds = 0;
-  const bool hasEstimate = estimatedTimeLeft(bookStats, progressPercent, estimatedSeconds);
+  const bool hasEstimate = bookStats.estimatedTimeLeft(progressPercent, estimatedSeconds);
   if (!showStats) {
     if (hasEstimate) {
       formatCompactDuration(estimatedSeconds, value, sizeof(value));

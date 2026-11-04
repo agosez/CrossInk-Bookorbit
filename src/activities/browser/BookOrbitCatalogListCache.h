@@ -5,6 +5,8 @@
 
 #include "network/BookOrbitCatalogClient.h"
 
+struct BookOrbitCatalogLink;
+
 /**
  * A catalog download that restarts the reader before it starts, so its TLS session
  * gets a heap browsing has not fragmented: the file to fetch, and the book listing
@@ -30,6 +32,8 @@ struct BookOrbitDownloadResume {
   int facetPage = 1;
   int facetSelectorIndex = 0;
   int facetTopIndex = 0;
+  // Started from a BookOrbit Home shelf: the download ends on Home, not on a listing.
+  bool fromHome = false;
 };
 
 namespace BookOrbitCatalogListCache {
@@ -54,5 +58,12 @@ bool saveDownloadResume(const BookOrbitDownloadResume& resume);
 // during the download cannot replay it on every boot.
 bool takeDownloadResume(BookOrbitDownloadResume& outResume);
 void discardDownloadResume();
+
+// The BookOrbit Home's link into the catalog, kept outside the listing pages too: on
+// the X3 and X4 it waits here through the catalog's own network boot.
+bool saveEntryLink(const BookOrbitCatalogLink& link);
+// Reads the saved link and deletes the file; false, without logging, when none is saved.
+bool takeEntryLink(BookOrbitCatalogLink& outLink);
+void discardEntryLink();
 
 }  // namespace BookOrbitCatalogListCache

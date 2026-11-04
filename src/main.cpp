@@ -101,6 +101,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "activities/boot_sleep/ImageFolderIndex.h"
 #include "activities/boot_sleep/SleepActivity.h"
 #include "activities/home/BookActions.h"
+#include "activities/network/BookOrbitHomeRefreshActivity.h"
 #include "activities/reader/BookOrbitSyncActivity.h"
 #include "activities/reader/EpubReaderUtils.h"
 #include "activities/reader/KOReaderSyncActivity.h"
@@ -1680,6 +1681,7 @@ void setup() {
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SLEEP_SYNC) ||
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_DOWNLOAD) ||
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_CATALOG) ||
+        snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_HOME_REFRESH) ||
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::FILE_TRANSFER)) {
       BOOKORBIT_STORE.loadFromFile();
     }
@@ -1858,6 +1860,17 @@ void setup() {
       case NetworkBootTarget::BOOKORBIT_CATALOG:
         launched = activityManager.goToBookOrbitCatalog(/*networkBootReady=*/true);
         break;
+      case NetworkBootTarget::BOOKORBIT_HOME_REFRESH: {
+        auto refresh = makeUniqueNoThrow<BookOrbitHomeRefreshActivity>(renderer, mappedInputManager);
+        if (refresh) {
+          activityManager.replaceActivity(std::move(refresh));
+          launched = true;
+        } else {
+          LOG_ERR("MAIN", "OOM: BookOrbit Home refresh after minimal boot (free=%u maxAlloc=%u)", ESP.getFreeHeap(),
+                  ESP.getMaxAllocHeap());
+        }
+        break;
+      }
       case NetworkBootTarget::KOREADER_AUTH: {
 #if CROSSINK_APP_CAP_KOREADER_SYNC
         const auto mode =

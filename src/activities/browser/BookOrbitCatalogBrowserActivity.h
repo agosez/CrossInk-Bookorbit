@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "BookOrbitCatalogLink.h"
 #include "activities/Activity.h"
 #include "network/BookOrbitCatalogClient.h"
 #include "util/ButtonNavigator.h"
@@ -55,7 +56,8 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   // resumeDownload: the BOOKORBIT_DOWNLOAD boot, to run the download saved before the
   // restart (see downloadBook()).
   explicit BookOrbitCatalogBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                           bool networkBoot = false, bool resumeDownload = false);
+                                           bool networkBoot = false, bool resumeDownload = false,
+                                           BookOrbitCatalogLink link = {});
   ~BookOrbitCatalogBrowserActivity() override;  // defined where OptionPopup is complete
 
   void onEnter() override;
@@ -91,6 +93,8 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   // catalog from one restarts even when Wi-Fi never came up.
   const bool networkBoot;
   const bool resumeDownload;
+  // Where the BookOrbit Home sent this session; consumed once Wi-Fi is up.
+  BookOrbitCatalogLink entryLink;
   PendingDownload pendingDownload;
   ButtonNavigator buttonNavigator;
   BrowserState state = BrowserState::LOADING;
@@ -111,6 +115,9 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   size_t downloadProgress = 0;
   size_t downloadTotal = 0;
   bool goHomeAfterCancel = false;
+  // The download was started from a BookOrbit Home shelf: whatever its outcome, it ends
+  // on Home rather than on the listing it was fetched through.
+  bool downloadFromHome = false;
 
   // Current book-list context, used to page and to return to the same list after a download.
   BookOrbitBookQuery listQuery;

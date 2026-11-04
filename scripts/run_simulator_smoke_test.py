@@ -36,6 +36,7 @@ THEMES = {
     "carousel": 4,
     "dashboard": 6,
     "cover-grid": 7,
+    "bookorbit": 8,
 }
 
 

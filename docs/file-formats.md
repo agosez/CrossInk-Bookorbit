@@ -773,6 +773,54 @@ Binary layout (all little-endian):
   - `[12-13]` `pathLength` (`uint16_t`, 1-256)
   - `[14…]` `path` (`pathLength` bytes, absolute SD path, not null-terminated)
 
+## `/.crosspoint/daily_minutes.bin`
+
+### Version 1
+
+Reading time per calendar day for the BookOrbit Home theme. Written whichever theme is
+active, so the theme has a history from the moment it is chosen. Kept out of
+`global_stats.bin` because that file is also the nearby stats sync's payload, and its
+history and time buckets are only recorded on boards with a clock chip: this file also
+runs on the system clock that a board without one sets over Wi-Fi. Entries are updated in
+place. A file of another size or with another magic is replaced.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | Magic, `BODM` |
+| 4 | 1 | Version |
+| 5 | 3 | Reserved |
+| 8 | 4 | `lastDay`: the newest day written, as days since 2000-01-01 |
+| 12 | 16 | `uint32_t` seconds read in each time of day: morning, afternoon, evening, night |
+| 28 | 742 | 371 `uint16_t` slots, indexed by `dayIndex % 371`, counting tens of seconds |
+| 770 | 742 | 371 `uint16_t` pending slots, indexed the same way: the part of each day the BookOrbit Home snapshot does not hold yet |
+
+Recording reading adds it to both slots of its days. Each new BookOrbit Home snapshot
+clears the pending slots, then puts back what still waits in the books'
+`bookorbit_stats.bin` upload queues, summed per local day; Home shows the server's
+minutes plus the pending ones. Moving `lastDay` forward clears both slots of the days it
+uncovers. All values are little-endian.
+
+## `/.crosspoint/bookorbit_home.bin`
+
+### Version 1
+
+What the BookOrbit Home shows from the server, so that opening Home never touches the
+network. A sync writes it to `bookorbit_home.tmp` and renames it into place. A file with
+another magic, version or struct size is ignored until the next sync replaces it.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | Magic, `0x484F4242` |
+| 4 | 2 | Version |
+| 6 | 2 | `sizeof(BookOrbitHomeSnapshot)` |
+| 8 | struct | `BookOrbitHomeSnapshot` (`src/BookOrbitHomeStore.h`), as laid out in memory: both MCU families are 32-bit little-endian with the same alignment |
+| after | 2 each | `yearDayCount` `uint16_t` minutes per day, the first being `yearFirstDay` |
+
+Covers live in `/.crosspoint/bookorbit_home/`: `<id>_<version>_<w>x<h>.bmp` is what Home
+draws, and `<id>_<version>.jpg` is a fetched cover waiting for a heap the JPEG decoder
+fits in. `<version>` hashes the server's `updatedAt`, so a changed cover gets a new file.
+A sync removes files nothing shows once the folder holds more than 30.
+
 ## `/.crosspoint/wallclock.bin`
 
 ### Version 1

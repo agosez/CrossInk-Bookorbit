@@ -26,6 +26,7 @@
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/BookOrbitCatalogBrowserActivity.h"
+#include "browser/BookOrbitCatalogListCache.h"
 #include "browser/OpdsBookBrowserActivity.h"
 #include "components/TouchRegistry.h"
 #include "home/AlertActivity.h"
@@ -992,6 +993,27 @@ bool ActivityManager::goToBookOrbitCatalog(const bool networkBootReady, const bo
   // The browser exits via goHome, so there is no stack to return to.
   auto browser =
       makeUniqueNoThrow<BookOrbitCatalogBrowserActivity>(renderer, mappedInput, networkBootReady, resumeDownload);
+  if (!browser) {
+    LOG_ERR("ACT", "OOM: BookOrbit catalog (free=%u maxAlloc=%u)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    return false;
+  }
+  replaceActivity(std::move(browser));
+  return true;
+}
+
+bool ActivityManager::goToBookOrbitCatalog(BookOrbitCatalogLink link) {
+#if FREEINK_MCU_C3 && !defined(SIMULATOR)
+  // The same network boot as goToBookOrbitCatalog(); the browser it starts reads the
+  // link back. If the link cannot be saved, the catalog opens in place as before.
+  if (BOOKORBIT_STORE.hasCredentials() && BookOrbitCatalogListCache::saveEntryLink(link)) {
+    silentRestartToNetwork(NetworkBootTarget::BOOKORBIT_CATALOG);
+    // Only returns when deep sleep is already under way, which ends this session anyway.
+    BookOrbitCatalogListCache::discardEntryLink();
+    return true;
+  }
+#endif
+  auto browser =
+      makeUniqueNoThrow<BookOrbitCatalogBrowserActivity>(renderer, mappedInput, false, false, std::move(link));
   if (!browser) {
     LOG_ERR("ACT", "OOM: BookOrbit catalog (free=%u maxAlloc=%u)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
     return false;

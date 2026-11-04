@@ -5,6 +5,9 @@
 
 #include "network/HttpDownloader.h"
 
+struct BookOrbitHomeSnapshot;
+class HalFile;
+
 /**
  * A top-level BookOrbit catalog section (e.g. "Recently added", "Continue reading",
  * "All books", or the authors/series/collections/libraries/smart-scopes
@@ -180,6 +183,16 @@ class BookOrbitCatalogClient {
 
   /** Fetch full detail (including downloadable files) for one book. */
   static bool fetchBookDetail(int64_t bookId, BookOrbitBookDetail& outDetail);
+
+  /**
+   * Fill the BookOrbit Home snapshot from the dashboard endpoint, the one BookOrbit's own
+   * KOReader plugin draws from. The year's minutes per day go straight to yearOut, right
+   * where the file's cursor is. Only EPUB books are kept: the catalog offers nothing else.
+   */
+  static bool fetchHomeDashboard(BookOrbitHomeSnapshot& out, HalFile& yearOut);
+
+  /** Download one book's catalog thumbnail (always a JPEG) to the SD card. */
+  static HttpDownloader::DownloadError downloadThumbnail(int64_t bookId, const char* destPath, bool (*shouldStop)());
 
   /** Download a catalog file (by file id, not book id) to the SD card. */
   static HttpDownloader::DownloadError downloadFile(

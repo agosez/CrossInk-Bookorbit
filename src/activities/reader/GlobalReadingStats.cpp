@@ -9,6 +9,7 @@
 #include <limits>
 #include <string>
 
+#include "ReadingDailyMinutes.h"
 #include "util/FileContentEquals.h"
 
 namespace {
@@ -380,6 +381,7 @@ static uint32_t s_localResetRevision = 0;
 
 bool GlobalReadingStats::resetLocal() {
   if (!saveToFile(GlobalReadingStats{}, GLOBAL_STATS_PATH, nullptr)) return false;
+  ReadingDailyMinutes::reset();
   s_localResetRevision++;
   return true;
 }

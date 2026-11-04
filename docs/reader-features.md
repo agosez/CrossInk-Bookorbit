@@ -324,3 +324,18 @@ Examples include:
 - Side-button shortcuts for changing font size or font family
 
 For the full controls reference, see [Controls](./controls.md).
+
+## BookOrbit Home
+
+The **BookOrbit** theme (**Settings > Display > UI Theme**) replaces the Home screen with pages of tiles. Clock, date and battery stay in the status bar, which you configure as usual.
+
+- **Home**: the current book, your reading streak, the week's reading, your yearly goal, and the other books you are reading.
+- **Library** (with a BookOrbit account): the Discover and Recently Added shelves, links into the catalog, and an **On card** tile: the books in the Library (as of its last scan), how many of them came from the catalog, and how full the card is, as a bar with the used and total space beside it. Selecting a book opens it if it is on the card; otherwise it is downloaded, and Home comes back once the download is done or cancelled.
+- **Statistics**: a year of reading, one square a day with its pattern showing how long you read, then a finish forecast for the current book, when you read and your all-time totals. The page is hidden while **Track Reading Stats** is off.
+
+On button devices, **Left** and **Right** turn pages, **Up** and **Down** move between the tiles of the page, **Confirm** opens the selected tile (the current book first, so one press resumes reading), and **Back** opens the menu with everything else, Settings included. On touch devices, tap a tile, swipe left or right to change page, swipe up for the menu and down for Settings.
+
+Opening Home never uses the network. With a BookOrbit account, the goal, the badge, the highlight of the day, the shelves and reading from your other devices are refreshed by **Sync on Sleep**, or by selecting the BookOrbit tile. That tile shows how old the data is, and a message tells you what the refresh is doing while it runs. Reading on the device counts on Home straight away, books you finish included in the goal; once a sync has sent that reading to BookOrbit, the next refresh shows the server's own numbers. Without an account, every tile that needs one gives way to your own numbers.
+
+Reading time per day needs a date, so on the X4, which has no clock chip, it starts counting once the device has set its clock over Wi-Fi.
+

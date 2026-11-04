@@ -1,5 +1,7 @@
 #include "ReadingSessionStats.h"
 
+#include "ReadingDailyMinutes.h"
+
 void commitReadingSession(BookReadingStats& book, GlobalReadingStats& global, const uint32_t seconds,
                           const ReadingStatsDateTime* sessionStart) {
   // Page intervals longer than the idle threshold are rejected before they
@@ -11,6 +13,8 @@ void commitReadingSession(BookReadingStats& book, GlobalReadingStats& global, co
   if (seconds < 10) return;
   book.totalReadingSeconds += seconds;
   global.totalReadingSeconds += seconds;
+  // Before the check below: this one also runs on boards without a clock chip.
+  ReadingDailyMinutes::record(sessionStart, seconds);
   if (!sessionStart) return;
   book.recordReadingSpan(*sessionStart, seconds);
   global.recordReadingSpan(*sessionStart, seconds);

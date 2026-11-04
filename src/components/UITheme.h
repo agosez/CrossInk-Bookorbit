@@ -34,6 +34,7 @@ class UITheme {
   void setTheme(CrossPointSettings::UI_THEME type);
   static bool supportsCoverGrid();
   static bool hasCoverGridHome();
+  static bool hasBookOrbitHome();
   static int getNumberOfItemsPerPage(const GfxRenderer& renderer, bool hasHeader, bool hasTabBar, bool hasButtonHints,
                                      bool hasSubtitle, int extraReservedHeight = 0);
   // Returns the cache path for a generated thumbnail using the default 3:5

@@ -10,6 +10,7 @@ Everything else — fonts, themes, reader features, reading stats, controls, the
 
 - **BookOrbit progress sync** — sync your reading position with a self-hosted BookOrbit server.
 - **BookOrbit highlight and bookmark sync** — two-way: what you highlight or bookmark on the device appears in the web reader at its exact place in the text, what you add on the web lands in the book, and deletions propagate both ways.
+- **A BookOrbit Home theme** — Home as pages of tiles modeled on BookOrbit's dashboard: the current book, streak, week and yearly goal, the catalog's shelves with their covers, and a year of reading. Opening it never waits on the network: a sync keeps it up to date, and without an account it runs on your own numbers.
 - **BookOrbit catalog browser** — browse your server's library on the device and download EPUBs over WiFi, including by author, series or collection.
 - **Offline shortcuts to your own books** — "On device" and "In progress" categories that open a book directly, without touching the network.
 - **Reading statistics pushed to BookOrbit** — your reading time, streaks and pace on the server's dashboard, fed by the pages you turn on the device.
@@ -17,6 +18,22 @@ Everything else — fonts, themes, reader features, reading stats, controls, the
 - **KOReader Sync is removed** — its screens, settings and shortcut are gone. The X3/X4 firmware gets a 6.5 MB partition, and this fork's BookOrbit layer plus CrossInk's own growth stopped fitting in it; dropping the second sync provider is what buys the room. Credentials already saved on the SD card are left alone, simply unread.
 
 BookOrbit exposes a KOReader-compatible sync API, so this fork talks to it the same way the official BookOrbit KOReader plugin does. Your BookOrbit server must be recent enough to serve the KOReader plugin endpoints under `{server}/api/v1/koreader` — including `plugin/catalog/*` for the catalog browser and `plugin/annotations/*` / `plugin/bookmarks/*` for highlight and bookmark sync (servers without those are detected, and the missing steps are simply skipped).
+
+---
+
+## The BookOrbit Home theme
+
+![The BookOrbit Home theme's three pages on an Xteink X4: Home with the current book, streak, week, yearly goal and other books being read; Library with the catalog's Discover and Recently Added shelves and what is on the card; Statistics with a year of reading, a finish date, reading moments, totals and a highlight of the day](docs/images/bookorbit-home/overview.png)
+
+Choose **BookOrbit** in **Settings → Display → UI Theme**, and Home becomes three pages of tiles modeled on BookOrbit's own dashboard:
+
+- **Home** — the current book with its chapter, progress and time left (Confirm resumes it), your streak, this week's reading, your yearly goal, the BookOrbit tile that refreshes everything, and the other books you are reading, on this device or another one.
+- **Library** — the catalog's Discover and Recently Added shelves, links to the catalog, its authors and its series, and what is on the card: how many books, how many came from BookOrbit, and how full the card is. A book that is not on the card yet downloads from its cover, and Home comes back once it is done.
+- **Statistics** — a year of reading, one square a day, when you will finish the current book, the times and days you read, your all-time totals, the next badge and a highlight of the day.
+
+Left and Right turn pages, Up and Down move between tiles; on touch devices, swipe between pages and tap a tile. Opening Home never waits on the network: Sync on Sleep or the BookOrbit tile bring the server's numbers, reading done on the device counts straight away, and without an account the theme runs on your own numbers. The [reader features guide](docs/reader-features.md#bookorbit-home) has the details.
+
+_Screenshots taken in the simulator, with public-domain books from [Standard Ebooks](https://standardebooks.org)._
 
 ---
 

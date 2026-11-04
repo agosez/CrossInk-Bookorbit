@@ -232,19 +232,6 @@ Rect coverImageRectForFrame(const Rect& coverRect) {
               imageH};
 }
 
-Rect fittedBitmapRect(const Bitmap& bitmap, const Rect& target) {
-  if (bitmap.getWidth() <= 0 || bitmap.getHeight() <= 0 || target.width <= 0 || target.height <= 0) {
-    return target;
-  }
-
-  const float widthScale = static_cast<float>(target.width) / static_cast<float>(bitmap.getWidth());
-  const float heightScale = static_cast<float>(target.height) / static_cast<float>(bitmap.getHeight());
-  const float scale = std::min(1.0f, std::min(widthScale, heightScale));
-  const int drawnW = std::min(target.width, std::max(1, static_cast<int>(std::ceil(bitmap.getWidth() * scale))));
-  const int drawnH = std::min(target.height, std::max(1, static_cast<int>(std::ceil(bitmap.getHeight() * scale))));
-  return Rect{target.x + (target.width - drawnW) / 2, target.y + (target.height - drawnH) / 2, drawnW, drawnH};
-}
-
 std::string coverPathForImageRect(const RecentBook& book, const Rect& imageRect) {
   if (book.coverBmpPath.empty()) {
     return {};

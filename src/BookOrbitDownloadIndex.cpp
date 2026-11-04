@@ -45,10 +45,11 @@ void ensureLoaded() {
 
   char magic[sizeof(INDEX_MAGIC)] = {};
   uint32_t crc = 0;
-  if (f.read(magic, sizeof(magic)) != static_cast<int>(sizeof(magic)) ||
-      memcmp(magic, INDEX_MAGIC, sizeof(magic)) != 0 || !serialization::tryReadPod(f, crc) || crc != serverCrc()) {
+  const bool readable = f.read(magic, sizeof(magic)) == static_cast<int>(sizeof(magic)) &&
+                        memcmp(magic, INDEX_MAGIC, sizeof(magic)) == 0 && serialization::tryReadPod(f, crc);
+  if (!readable || crc != serverCrc()) {
     f.close();
-    LOG_INF("BODI", "Discarding download index (unreadable or from another server)");
+    LOG_INF("BODI", "Discarding download index (%s)", readable ? "recorded for another server URL" : "unreadable");
     return;
   }
 
@@ -177,6 +178,11 @@ void BookOrbitDownloadIndex::relocate(const std::string& oldPath, const std::str
     save();
   }
   if (!wasLoaded) unload();
+}
+
+size_t BookOrbitDownloadIndex::recordedCount() {
+  ensureLoaded();
+  return entries.size();
 }
 
 void BookOrbitDownloadIndex::unload() {

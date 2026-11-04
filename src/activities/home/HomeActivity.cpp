@@ -26,6 +26,8 @@
 #include "../reader/BookStatsTracking.h"
 #include "../reader/EpubReaderUtils.h"
 #include "BookOrbitCredentialStore.h"
+#include "BookOrbitDownloadIndex.h"
+#include "BookOrbitHomeStore.h"
 #include "BookmarkStore.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
@@ -36,6 +38,9 @@
 #include "RecentBookProgress.h"
 #include "RecentBooksStore.h"
 #include "SavedItemsHomeActivity.h"
+#include "SilentRestart.h"
+#include "activities/browser/BookOrbitCatalogLink.h"
+#include "components/BookOrbitHomeLayout.h"
 #include "components/UITheme.h"
 #include "components/themes/dashboard/DashboardTheme.h"
 #include "components/themes/lyra/LyraCarouselTheme.h"
@@ -274,10 +279,13 @@ HomeMenuEntries buildHomeMenuItems(bool hasOpdsServers, bool hasReadingStats, bo
 
 HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats, bool hasBookmarks, bool hasClippings) {
   HomeMenuEntries items;
+  // The BookOrbit theme has no Browse or Settings hint to reach the rest, so its menu holds them too.
+  const bool fullMenu = UITheme::hasBookOrbitHome();
   if (SETTINGS.isLibraryFileBrowserSwapped()) {
     items.push({tr(STR_BROWSE_FILES), Folder, HomeMenuAction::BrowseFiles});
   } else {
     items.push({tr(STR_LIBRARY), Library, HomeMenuAction::Library});
+    if (fullMenu) items.push({tr(STR_BROWSE_FILES), Folder, HomeMenuAction::BrowseFiles});
   }
 
   if (hasOpdsServers) {
@@ -294,6 +302,7 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
   }
 
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
+  if (fullMenu) items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
   return items;
 }
 
@@ -336,8 +345,10 @@ int findMenuActionIndex(const HomeMenuEntries& items, HomeMenuAction action) {
   return -1;
 }
 
+// The BookOrbit theme draws its own Home; should that UI fail to allocate, it is Minimal.
 bool isMinimalTheme() {
-  return static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::MINIMAL;
+  return static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::MINIMAL ||
+         UITheme::hasBookOrbitHome();
 }
 
 bool isDashboardTheme() {
@@ -831,6 +842,9 @@ void HomeActivity::onEnter() {
   if (UITheme::hasCoverGridHome()) {
     coverGridUi = makeUniqueNoThrow<CoverGridHomeUi>(renderer);
     if (!coverGridUi) LOG_ERR("HOME", "Cannot allocate cover grid UI; using standard Home");
+  } else if (UITheme::hasBookOrbitHome()) {
+    bookOrbitUi = makeUniqueNoThrow<BookOrbitHomeUi>(renderer, mappedInput);
+    if (!bookOrbitUi) LOG_ERR("HOME", "Cannot allocate BookOrbit Home; using Minimal");
   }
   const bool isCarouselTheme =
       static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::LYRA_CAROUSEL;
@@ -854,8 +868,9 @@ void HomeActivity::onEnter() {
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int recentBooksToLoad =
-      coverGridUi ? CoverGridHomeUi::MAX_BOOKS
-                  : std::min(kMaxCachedBooks, std::max(metrics.homeRecentBooksCount, HOME_BOOK_SWAP_RECENT_COUNT));
+      coverGridUi   ? CoverGridHomeUi::MAX_BOOKS
+      : bookOrbitUi ? BookOrbitHomeUi::MAX_BOOKS
+                    : std::min(kMaxCachedBooks, std::max(metrics.homeRecentBooksCount, HOME_BOOK_SWAP_RECENT_COUNT));
   RECENT_BOOKS.ensureLoaded();
   loadRecentBooks(recentBooksToLoad);
   gridHasContinueReading = !recentBooks.empty();
@@ -891,7 +906,8 @@ void HomeActivity::onEnter() {
   if (isCarouselTheme) {
     loadAllBookStats();
   }
-  updateHighlightedBookContext(false);
+  updateHighlightedBookContext(bookOrbitUi != nullptr);
+  if (bookOrbitUi) beginBookOrbitUi();
 
   if (coverGridUi) {
     const bool hasBookOrbit = BOOKORBIT_STORE.hasCredentials();
@@ -922,7 +938,7 @@ void HomeActivity::onEnter() {
     if (tabPosition >= 0) selectorIndex = static_cast<int>(recentBooks.size()) + tabPosition;
     coverGridUi->begin(recentBooks, hasOpdsServers, hasBookOrbit, gridHasContinueReading,
                        gridHasContinueReading ? loadRecentBookProgress(recentBooks.front()) : -1.0f);
-  } else if (initialMenuItem != HomeMenuItem::NONE) {
+  } else if (initialMenuItem != HomeMenuItem::NONE && !bookOrbitUi) {
     const bool includeContinueReading = metrics.homeContinueReadingInMenu && !recentBooks.empty();
     const auto menuItems = buildSelectableHomeMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings,
                                                         includeContinueReading);
@@ -1058,7 +1074,7 @@ void HomeActivity::updateHighlightedBookContext(const bool allowChapterTitleRead
   if (idx >= 0) {
     const RecentBook& book = recentBooks[idx];
     const bool isEpub = FsHelpers::hasEpubExtension(book.path);
-    const bool loadChapterTitle = isDashboardTheme();
+    const bool loadChapterTitle = isDashboardTheme() || UITheme::hasBookOrbitHome();
     if (useCachedStats) {
       currentBookStats = visibleRecentBookStats(book, cachedBookStats[idx]);
       currentBookProgressPercent = cachedBookProgress[idx];
@@ -1077,12 +1093,208 @@ void HomeActivity::updateHighlightedBookContext(const bool allowChapterTitleRead
   hasReadingStats =
       SETTINGS.shouldTrackReadingStats() && (hasAnyBookStats(currentBookStats) || hasAnyGlobalStats(globalStats) ||
                                              (showAllDevicesStats && hasAnyGlobalStats(allDevicesGlobalStats)));
+
+  // After the first paint the render task reads what begin() rewrites.
+  if (bookOrbitUi && firstRenderDone) {
+    RenderLock lock;
+    beginBookOrbitUi();
+  }
+}
+
+void HomeActivity::beginBookOrbitUi() {
+  BookOrbitHomeUi::Source source;
+  source.books = &recentBooks;
+  source.stats = showAllDevicesStats ? &allDevicesGlobalStats : &globalStats;
+  source.currentBookStats = &currentBookStats;
+  source.currentBookProgress = currentBookProgressPercent;
+  source.chapterTitle = &currentBookChapterTitle;
+  source.recentBookCount = RECENT_BOOKS.getBooks().size();
+  source.localFinishedBooks = globalStats.completedBooks;
+  bookOrbitUi->begin(source);
+}
+
+// Home can open while the button that left the previous screen is still down.
+bool HomeActivity::waitingForInitialFrontRelease() {
+  if (!minimalSuppressInitialFrontRelease) return false;
+  if (mappedInput.getReleasedFrontButton() >= 0) {
+    minimalSuppressInitialFrontRelease = false;
+    return true;
+  }
+  if (isAnyFrontButtonPressed(mappedInput)) return true;
+  minimalSuppressInitialFrontRelease = false;
+  return false;
+}
+
+void HomeActivity::loopBookOrbitHome() {
+  if (waitingForInitialFrontRelease()) return;
+
+  const auto movePage = [this](const int delta) {
+    bookOrbitUi->movePage(delta);
+    requestUpdate();
+  };
+  const auto openMenu = [this] {
+    minimalMenuOpen = true;
+    minimalMenuIndex = 0;
+    requestUpdate();
+  };
+
+  int tapped = -1;
+  if (mappedInput.wasItemTapped(tapped)) {
+    if (tapped == BookOrbitHomeUi::TAP_PREVIOUS_PAGE) {
+      movePage(-1);
+    } else if (tapped == BookOrbitHomeUi::TAP_NEXT_PAGE) {
+      movePage(1);
+    } else if (const auto* stop = bookOrbitUi->stopAt(tapped)) {
+      activateBookOrbitStop(*stop);
+    }
+    return;
+  }
+  switch (mappedInput.wasSwipe()) {
+    case MappedInputManager::SwipeDir::Left:
+      movePage(1);
+      return;
+    case MappedInputManager::SwipeDir::Right:
+      movePage(-1);
+      return;
+    case MappedInputManager::SwipeDir::Up:
+      openMenu();
+      return;
+    case MappedInputManager::SwipeDir::Down:
+      onSettingsOpen();
+      return;
+    case MappedInputManager::SwipeDir::None:
+      break;
+  }
+
+  // A press seen here: the release that left the previous screen can arrive after Home opens.
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) backPressSeen = true;
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back) && backPressSeen) {
+    openMenu();
+    return;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    if (const auto* stop = bookOrbitUi->selectedStop()) activateBookOrbitStop(*stop);
+    return;
+  }
+  // Left and Right turn pages, as swipes do; Up and Down walk the tiles of the page.
+  if (mappedInput.wasPressed(MappedInputManager::Button::Left)) {
+    movePage(-1);
+    return;
+  }
+  if (mappedInput.wasPressed(MappedInputManager::Button::Right)) {
+    movePage(1);
+    return;
+  }
+  const auto moveSelection = [this](const int delta) {
+    bookOrbitUi->moveSelection(delta);
+    requestUpdate();
+  };
+  buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Up}, [&] { moveSelection(-1); });
+  buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Down}, [&] { moveSelection(1); });
+}
+
+void HomeActivity::activateBookOrbitStop(const BookOrbitHomeUi::Stop& stop) {
+  switch (stop.action) {
+    case BookOrbitHomeUi::Action::OpenBook:
+      if (stop.arg < recentBooks.size()) onSelectBook(recentBooks[stop.arg].path);
+      break;
+    case BookOrbitHomeUi::Action::OpenLibrary:
+      onLibraryOpen();
+      break;
+    case BookOrbitHomeUi::Action::OpenStats:
+      onReadingStatsOpen();
+      break;
+    case BookOrbitHomeUi::Action::OpenSavedItems:
+      onSavedItemsOpen();
+      break;
+    case BookOrbitHomeUi::Action::OpenCatalogBook: {
+      const BookOrbitHomeBook* book = bookOrbitUi->catalogBook(stop.arg);
+      if (book == nullptr) break;
+      std::string path;
+      const bool onCard = BookOrbitDownloadIndex::lookup(book->id, path);
+      BookOrbitDownloadIndex::unload();
+      if (onCard) {
+        onSelectBook(path);
+      } else {
+        BookOrbitCatalogLink link;
+        link.bookId = book->id;
+        link.title = book->title;
+        activityManager.goToBookOrbitCatalog(std::move(link));
+      }
+      break;
+    }
+    case BookOrbitHomeUi::Action::OpenCatalog:
+      activityManager.goToBookOrbitCatalog();
+      break;
+    case BookOrbitHomeUi::Action::OpenAuthors:
+    case BookOrbitHomeUi::Action::OpenSeries: {
+      const bool authors = stop.action == BookOrbitHomeUi::Action::OpenAuthors;
+      BookOrbitCatalogLink link;
+      link.sectionId = authors ? "authors" : "series";
+      link.title = authors ? tr(STR_HOME_AUTHORS) : tr(STR_HOME_SERIES);
+      activityManager.goToBookOrbitCatalog(std::move(link));
+      break;
+    }
+    case BookOrbitHomeUi::Action::Refresh:
+      silentRestartToNetwork(NetworkBootTarget::BOOKORBIT_HOME_REFRESH);
+      break;
+    case BookOrbitHomeUi::Action::None:
+      break;
+  }
+}
+
+void HomeActivity::loadBookOrbitThumbnails() {
+  recentsLoading = true;
+  bool showingLoading = false;
+  Rect popupRect;
+  const auto showLoadingProgress = [&](const int value) {
+    if (!showingLoading) {
+      showingLoading = true;
+      popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+    }
+    GUI.fillPopupProgress(renderer, popupRect, value);
+    renderer.displayBuffer();
+  };
+  const int count = std::min(static_cast<int>(recentBooks.size()), BookOrbitHomeUi::MAX_BOOKS);
+  for (int i = 0; i < count; i++) {
+    RecentBook& book = recentBooks[static_cast<size_t>(i)];
+    if (book.coverState == RecentBook::CoverState::Missing || !Storage.exists(book.path.c_str())) continue;
+    const Rect slot = bookOrbitUi->coverSlot(i);
+    const std::string path = BookOrbitHomeUi::coverPath(book, slot.width, slot.height);
+    if (path.empty() || Storage.exists(path.c_str())) continue;
+    showLoadingProgress(100 * i / count);
+    if (FsHelpers::hasEpubExtension(book.path)) {
+      Epub epub(book.path, "/.crosspoint");
+      if (!epub.load(true, true, Epub::XLocationLoadMode::Skip)) {
+        LOG_ERR("HOME", "Cannot load EPUB cache for thumbnail: %s", book.path.c_str());
+        continue;
+      }
+      if (!epub.generateAdaptiveThumbBmp(slot.width, slot.height, &renderer, SETTINGS.getReaderFontId()) &&
+          !epub.hasCoverImage()) {
+        markCoverMissing(book);
+      }
+    } else if (FsHelpers::hasXtcExtension(book.path)) {
+      Xtc xtc(book.path, "/.crosspoint");
+      if (xtc.load()) xtc.generateThumbBmp(static_cast<uint16_t>(slot.width), static_cast<uint16_t>(slot.height));
+    }
+  }
+  // Covers a sync fetched but had no heap to decode. Wi-Fi is off here, and nothing but a
+  // thumbnail generation competes for the heap.
+  if (BookOrbitHomeStore::hasPendingCovers()) {
+    showLoadingProgress(100);
+    BookOrbitHomeStore::decodePendingCovers(nullptr, BookOrbitHomeLayout::coverSizes(renderer));
+  }
+  recentsLoaded = true;
+  recentsLoading = false;
+  // The popup is still in the framebuffer, and BookOrbitHomeUi repaints when it finds that.
+  if (showingLoading) requestUpdate();
 }
 
 void HomeActivity::onExit() {
   Activity::onExit();
 
   coverGridUi.reset();
+  bookOrbitUi.reset();
   carouselMenuTouchDownIndex = -1;
   freeCoverBuffer();
   gCarouselCache.invalidate();
@@ -1440,20 +1652,16 @@ void HomeActivity::loop() {
     return;
   }
 
+  if (bookOrbitUi && !minimalMenuOpen) {
+    loopBookOrbitHome();
+    return;
+  }
+
   if (usesMinimalHomeInteraction()) {
     const int pressedFrontButton = mappedInput.getPressedFrontButton();
     const int releasedFrontButton = mappedInput.getReleasedFrontButton();
 
-    if (minimalSuppressInitialFrontRelease) {
-      if (releasedFrontButton >= 0) {
-        minimalSuppressInitialFrontRelease = false;
-        return;
-      }
-      if (isAnyFrontButtonPressed(mappedInput)) {
-        return;
-      }
-      minimalSuppressInitialFrontRelease = false;
-    }
+    if (waitingForInitialFrontRelease()) return;
 
     if (homeBookSwapLongPressHandled) {
       if (releasedFrontButton == HalGPIO::BTN_BACK || !mappedInput.isFrontButtonPressed(HalGPIO::BTN_BACK)) {
@@ -1499,8 +1707,10 @@ void HomeActivity::loop() {
           case HomeMenuAction::FileTransfer:
             onFileTransferOpen();
             break;
-          case HomeMenuAction::ContinueReading:
           case HomeMenuAction::Settings:
+            onSettingsOpen();
+            break;
+          case HomeMenuAction::ContinueReading:
             break;
         }
       };
@@ -2134,6 +2344,14 @@ void HomeActivity::render(RenderLock&&) {
       coverGridUi->refreshCoverPaths();
       requestUpdate();
     }
+    return;
+  }
+
+  if (bookOrbitUi && !minimalMenuOpen) {
+    bookOrbitUi->render(initialRefreshMode);
+    initialRefreshMode = HalDisplay::FAST_REFRESH;
+    firstRenderDone = true;
+    if (!recentsLoaded && !recentsLoading) loadBookOrbitThumbnails();
     return;
   }
 
