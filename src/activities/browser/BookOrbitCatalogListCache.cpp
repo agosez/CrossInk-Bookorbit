@@ -292,6 +292,8 @@ bool saveDownloadResume(const BookOrbitDownloadResume& resume) {
   addString("facetSectionId", resume.facetSectionId);
   addString("facetTitle", resume.facetTitle);
   addNumber("facetPage", resume.facetPage);
+  addNumber("facetSelectorIndex", resume.facetSelectorIndex);
+  addNumber("facetTopIndex", resume.facetTopIndex);
   json += "}";
   return writeJsonStringFile(BOOKORBIT_DOWNLOAD_RESUME_PATH, json);
 }
@@ -333,6 +335,8 @@ bool takeDownloadResume(BookOrbitDownloadResume& outResume) {
   outResume.facetSectionId = field("facetSectionId");
   outResume.facetTitle = field("facetTitle");
   outResume.facetPage = doc["facetPage"] | 1;
+  outResume.facetSelectorIndex = doc["facetSelectorIndex"] | 0;
+  outResume.facetTopIndex = doc["facetTopIndex"] | 0;
   if (outResume.fileId == 0 || outResume.path.empty()) {
     LOG_ERR("BookOrbit", "Download resume file names no file to fetch");
     return false;

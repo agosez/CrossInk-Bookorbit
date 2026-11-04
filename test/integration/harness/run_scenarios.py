@@ -19,6 +19,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -1152,7 +1153,8 @@ def scenario_catalog_empty_listing_back(verbose: bool) -> None:
     """An empty listing (a collection with no books) shows the no-entries error,
     and Back must climb out of it — the regression had the error screen's Back
     reload the very listing it was showing, forever. Proven by navigating onward
-    after the error: the non-empty collection's books still load."""
+    after the error: Back lands on the row it left, the empty collection, and the
+    non-empty collection above it still opens with its books."""
     manifest, _ = load_seed()
     collection = manifest["collection"]
 
@@ -1163,7 +1165,8 @@ def scenario_catalog_empty_listing_back(verbose: bool) -> None:
             "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> Collections (4th row,
             "12100:CONFIRM",                              #   after Libraries)
             "14500:DOWN", "14900:CONFIRM",                # Zero Shelf (empty) -> error screen
-            "17500:BACK",                                 # must climb back to the collection list
+            "17500:BACK",                                 # must climb back to the collection list,
+            "19100:UP",                                   #   on Zero Shelf's row
             "19500:CONFIRM",                              # Integration Shelf -> its books
             "22500:QUIT",
         ])
@@ -1477,6 +1480,78 @@ def scenario_catalog_book_actions(verbose: bool) -> None:
         assert not fs.epub_cache_dir(sim_path).exists(), "Delete left the book's cache behind"
 
 
+LISTING_PAGE_LOG = re.compile(r"Listing page (\d+) from (cache|server): (\d+) rows in memory from row (\d+)")
+
+
+def scenario_catalog_deep_listing(verbose: bool) -> None:
+    """Issue #96: a long listing keeps only a window of pages in memory, its rows
+    still numbered from the top of the listing. Walks All books down to its fourth
+    page with Next presses, downloads the book selected there, then walks back up
+    in the download boot. Proves that the rows in memory never exceed three pages,
+    that the download fetched the book the selection was on, that the restored
+    window holds that book's row, and that walking back reloads an earlier page in
+    front of the window from the list cache."""
+    manifest, _ = load_seed()
+    window_rows = 3 * 20  # MAX_WINDOW_PAGES + the page on its way in, of PAGE_SIZE rows
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
+        # 72 Next presses aim at row 72, on page 4. A press that lands while a page
+        # loads can be missed, so the assertions follow the book the log names.
+        presses = [f"{16000 + i * 400}:DOWN" for i in range(72)]
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
+            "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> All books (8th row)
+            "12050:DOWN", "12400:DOWN", "12750:DOWN",
+            "13100:DOWN",
+            "13450:CONFIRM",
+            *presses,
+            "46000:CONFIRM",                              # the selected book -> download
+            "60000:QUIT",                                 # only reached if no restart dropped it
+        ])
+        # The download boot rebuilds the listing around the book (pages 3 and 4, rows
+        # 40-79), then 45 Previous presses walk back past the window's first row.
+        back = [f"{12000 + i * 400}:UP" for i in range(45)]
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=120, verbose=verbose,
+                               after_reboot_script=";".join(back + ["32000:QUIT"]))
+
+        marker = re.search(r"Restarting into the download of book (\d+)", output)
+        assert marker, "the deep listing's download did not restart first"
+        before, resumed = output[:marker.start()], output[marker.end():]
+
+        loads = [(int(p), source, int(rows), int(start)) for p, source, rows, start in LISTING_PAGE_LOG.findall(output)]
+        assert loads, "no listing page load was logged"
+        assert max(rows for _, _, rows, _ in loads) <= window_rows, \
+            f"more than {window_rows} rows were kept in memory: {loads}"
+        browsed = [(p, start) for p, _, _, start in LISTING_PAGE_LOG.findall(before)]
+        assert any(int(p) >= 4 for p, _ in browsed), f"browsing never reached page 4: {browsed}"
+        assert any(int(start) > 0 for _, start in browsed), f"no page ever left the window: {browsed}"
+
+        # The selected book, found by its row in the listing the device cached.
+        caches = [json.loads(p.read_text())
+                  for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
+        pages = sorted((c for c in caches if "total" in c and "sections" not in c and c.get("total", 0) > 60),
+                       key=lambda c: c["page"])
+        listing = [item for page in pages for item in page["items"]]
+        book_id = int(marker.group(1))
+        row = next((i for i, item in enumerate(listing) if item["id"] == book_id), None)
+        assert row is not None and row >= 60, f"the downloaded book {book_id} is not on page 4 or later (row {row})"
+
+        # The path as the firmware sanitized the server's devicePath (a seeded book can
+        # have no author, which leaves an empty folder name the firmware drops).
+        landed = re.search(r"Downloading file \d+ -> (\S.*?) \(free=", resumed)
+        assert landed and (fs.fs / landed.group(1).lstrip("/")).exists(), "the selected book was not downloaded"
+
+        restored = [(int(p), int(rows), int(start)) for p, _, rows, start in LISTING_PAGE_LOG.findall(resumed)]
+        last_restore = max(i for i, (p, _, _) in enumerate(restored) if p == row // 20 + 1)
+        _, rows, start = restored[last_restore]
+        assert start <= row < start + rows, \
+            f"the restored window (rows {start}-{start + rows - 1}) does not hold row {row}"
+        walked_back = restored[last_restore + 1:]
+        assert any(start_row < start for _, _, start_row in walked_back), \
+            f"walking back never put an earlier page in front of the window: {walked_back}"
+
+
 def scenario_bookmark_push(verbose: bool) -> None:
     """A local bookmark (store entry + minted position record) reaches the
     server and is offered to a device that has never seen it."""
@@ -1592,6 +1667,7 @@ SCENARIOS = {
     "catalog_smart_scopes_browse": scenario_catalog_smart_scopes_browse,
     "catalog_download_naming": scenario_catalog_download_naming,
     "catalog_book_actions": scenario_catalog_book_actions,
+    "catalog_deep_listing": scenario_catalog_deep_listing,
     "catalog_hides_non_epub": scenario_catalog_hides_non_epub,
     "sync_progress_pull": scenario_sync_progress_pull,
     "sync_progress_push": scenario_sync_progress_push,

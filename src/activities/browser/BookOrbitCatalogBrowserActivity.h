@@ -37,12 +37,15 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
     std::string path;       // SD path: LOCAL_BOOK entries, and BOOK entries already on the device
     int64_t bookId = 0;
     bool onDevice = false;  // BOOK entries: a matching file already exists on the device (at `path`)
+    uint16_t page = 0;      // server page the row came from; 0 for the root and the on-device lists
   };
 
-  // downloadBoot: launched by the BOOKORBIT_DOWNLOAD network boot, to run the download
-  // saved before the restart (see downloadBook()).
+  // networkBoot: launched by a minimal network boot (BOOKORBIT_CATALOG or
+  // BOOKORBIT_DOWNLOAD), which leaving the catalog must restart out of.
+  // resumeDownload: the BOOKORBIT_DOWNLOAD boot, to run the download saved before the
+  // restart (see downloadBook()).
   explicit BookOrbitCatalogBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                           bool downloadBoot = false);
+                                           bool networkBoot = false, bool resumeDownload = false);
 
   void onEnter() override;
   void onExit() override;
@@ -63,13 +66,23 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
     std::string path;
   };
 
+  // How a server page joins the rows in memory. Open starts a listing at its first
+  // page; Append and Prepend extend the window by one page at either end.
+  enum class PageLoad : uint8_t { Open, Append, Prepend };
+
   // A minimal network boot never brought up the rest of the app, so leaving the
   // catalog from one restarts even when Wi-Fi never came up.
-  const bool downloadBoot;
+  const bool networkBoot;
+  const bool resumeDownload;
   PendingDownload pendingDownload;
   ButtonNavigator buttonNavigator;
   BrowserState state = BrowserState::LOADING;
+  // The rows in memory: a whole root or on-device list, or a window of a few
+  // consecutive server pages of a book or facet listing. Every scroll position
+  // (selectorIndex, topIndex) counts rows from the start of the listing, so a page
+  // dropped from the window changes no index; entries[0] is row windowStart.
   std::vector<Entry> entries;
+  int windowStart = 0;
   int selectorIndex = 0;
   NavLevel navLevel = NavLevel::Root;
   bool consumeConfirm = false;
@@ -102,6 +115,13 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   std::string facetTitle;
   int facetPage = 1;
   bool facetHasNext = false;
+  // The facet row a book list was opened from, which Back returns to.
+  int facetSelectorIndex = 0;
+  int facetTopIndex = 0;
+  // Book counts of the on-device root entries, as last counted for their badges: what
+  // opening one reserves rows for.
+  size_t localOnDeviceCount = 0;
+  size_t localInProgressCount = 0;
 
   freeink::ui::GfxRendererTarget uiTarget;  // must precede `app`: the app holds a reference to it
   UiApp app;
@@ -117,7 +137,7 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   void activateSelected();
   void openLocalBook(const std::string& path);
   void showBookActionMenu(bool ignoreInitialConfirmRelease);
-  void promptDeleteBook(size_t index);
+  void promptDeleteBook(int row);
   void navigateBack();
 
   void checkAndConnectWifi();
@@ -125,13 +145,43 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   void onWifiSelectionComplete(bool connected);
   void showLoadingBeforeFetch();
   bool loadRoot(bool allowNetwork = true);
-  void loadLocalBooks(const std::string& kind);
+  // By value: callers pass a row's own section id, and the listing it opens replaces that row.
+  void loadLocalBooks(std::string kind);
   size_t collectLocalBooks(const std::string& kind, std::vector<Entry>* sink);
-  bool loadFacetEntries(const std::string& sectionId, const std::string& title, int page, bool append = false,
-                        bool allowNetwork = true);
+  bool loadFacetEntries(const std::string& sectionId, const std::string& title, int page,
+                        PageLoad load = PageLoad::Open, bool allowNetwork = true);
   bool loadBooks(const BookOrbitBookQuery& query, const std::string& title, int page, bool fromFacet,
-                 bool append = false, bool allowNetwork = true);
+                 PageLoad load = PageLoad::Open, bool allowNetwork = true);
+
+  // Row window over the current listing (see `entries`).
+  int loadedEnd() const { return windowStart + static_cast<int>(entries.size()); }
+  const Entry* entryAt(int row) const;
+  Entry* entryAt(int row);
+  bool hasMorePages() const;
+  // Empties the rows for a new listing that will hold about `rows`, giving back a
+  // larger block a previous on-device listing left behind.
+  void startListing(size_t rows);
+  // Room for `count` blank rows of server page `page`; returns the index of the first.
+  size_t placePageRows(PageLoad load, size_t count, uint16_t page);
+  // Drop whole pages from one end of the window while it holds more than
+  // MAX_WINDOW_PAGES (counting `incoming` pages about to join it) and the page lies
+  // wholly outside the rows to keep.
+  void dropPagesBefore(int keepFrom, int incoming = 0);
+  void dropPagesAfter(int keepThrough, int incoming = 0);
+  void clampSelectionToWindow();
+  // One line per page load: what tells a field log how much heap browsing left.
+  void logPageLoad(int page, bool cacheHit) const;
   bool appendNextPageForCurrentList(bool allowNetwork = true);
+  bool prependPreviousPage();
+  // Loads the pages in front of the window until `row` is in it.
+  bool revealRow(int row);
+  bool rewindToStart();
+  // From the list cache, without requests: walks the rest of the listing and wraps
+  // the selection to its end. A cache miss puts the listing back at its start.
+  bool wrapToEndFromCache();
+  // Opens the current book or facet listing again down to `lastPage`, walking its
+  // pages in order so row numbers stay exact, then restores the scroll position.
+  bool reopenListing(NavLevel level, int lastPage, int wantedSelector, int wantedTop);
   void restoreBookListAfterDownload();
   void launchSearch();
   void performSearch(const std::string& query);

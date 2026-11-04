@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "./BookOrbitCatalogListCache.h"
+#include "AppVersion.h"
 #include "BookOrbitCredentialStore.h"
 #include "BookOrbitDownloadIndex.h"
 #include "CrossPointState.h"
@@ -59,6 +60,14 @@ constexpr char STAGED_DOWNLOAD_SUFFIX[] = ".part";
 // Marker appended (right-aligned) to catalog rows whose book already exists on the
 // device. U+2022 bullet: guaranteed by the built-in fonts' default glyph intervals.
 constexpr char ON_DEVICE_MARKER[] = "\xE2\x80\xA2";
+// Server pages a book or facet listing keeps in memory. A listing used to keep every
+// page it had shown, about 150 bytes a row plus its strings, until a C3 catalog session
+// had no block left for a 16 KB TLS record by the third page (issue #96). Two pages
+// cover a screen and the next; a third arrives before the first one goes.
+constexpr int MAX_WINDOW_PAGES = 2;
+// Reserved once for the session, so the rows never move through doubling reallocations
+// that would leave holes next to the TLS buffers.
+constexpr size_t WINDOW_ROWS = (MAX_WINDOW_PAGES + 1) * BookOrbitCatalogClient::PAGE_SIZE;
 
 // The SD filename (leading slash, no folder) this firmware falls back to when the
 // server does not say where the file belongs.
@@ -98,17 +107,16 @@ bool bookOnDevice(const int64_t bookId, const std::string& title, const std::str
   if (BookOrbitDownloadIndex::lookup(bookId, outPath)) return true;
   const std::string filename = catalogBookFilename(title, author);
   const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
-  if (!folder.empty() && Storage.exists((folder + filename).c_str())) {
-    outPath = folder + filename;
+  // Candidates are built aside: outPath is a listed row's own path, and most catalog
+  // books are not on the device, so a miss must not leave a path buffer in the row.
+  const auto found = [&outPath](std::string candidate) {
+    if (!Storage.exists(candidate.c_str())) return false;
+    outPath = std::move(candidate);
     return true;
-  }
-  if (Storage.exists(filename.c_str())) {
-    outPath = filename;
-    return true;
-  }
-  outPath = std::string(READ_FOLDER_PREFIX) + filename;
-  if (Storage.exists(outPath.c_str())) return true;
-  outPath.clear();
+  };
+  if (!folder.empty() && found(folder + filename)) return true;
+  if (found(filename) || found(READ_FOLDER_PREFIX + filename)) return true;
+  std::string().swap(outPath);  // re-checked after a delete: release the old path too
   return false;
 }
 
@@ -133,20 +141,24 @@ bool hasEpubFile(const BookOrbitBookDetail& detail, BookOrbitCatalogFile& outFil
 }  // namespace
 
 BookOrbitCatalogBrowserActivity::BookOrbitCatalogBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                                                 const bool downloadBoot)
+                                                                 const bool networkBoot, const bool resumeDownload)
     : Activity("BookOrbitCatalogBrowser", renderer, mappedInput),
-      downloadBoot(downloadBoot),
+      networkBoot(networkBoot || resumeDownload),
+      resumeDownload(resumeDownload),
       uiTarget(makeUiTarget(renderer)),
       app(uiTarget, uiTarget.deviceContext()) {}
 
 void BookOrbitCatalogBrowserActivity::onRowEvent(const fui::ActionEvent& event, void* user) {
   auto* self = static_cast<BookOrbitCatalogBrowserActivity*>(user);
-  if (event.value < 0 || event.value >= static_cast<int>(self->entries.size())) return;
-  self->selectorIndex = event.value;
+  // The list was given the rows in memory, so its action values index `entries`.
+  const int row = self->windowStart + event.value;
+  const Entry* entry = self->entryAt(row);
+  if (!entry) return;
+  self->selectorIndex = row;
   // Activation loads a new listing or starts a download; a lingering flash
   // would gray an unrelated row of whatever comes next.
   self->app.clearTapFlash();
-  if (event.longPress && self->entries[event.value].type == EntryType::BOOK) {
+  if (event.longPress && entry->type == EntryType::BOOK) {
     self->showBookActionMenu(/*ignoreInitialConfirmRelease=*/false);
     return;
   }
@@ -166,6 +178,7 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   app.setScreen(&BookOrbitCatalogBrowserActivity::listScreen, this);
 
   entries.clear();
+  windowStart = 0;
   selectorIndex = 0;
   navLevel = NavLevel::Root;
   consumeConfirm = false;
@@ -177,7 +190,7 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   // A download boot comes back to the listing it left, whose pages are still in the
   // list cache; any other entry starts a fresh catalog session.
   BookOrbitDownloadResume resume;
-  if (downloadBoot && BookOrbitCatalogListCache::takeDownloadResume(resume)) {
+  if (resumeDownload && BookOrbitCatalogListCache::takeDownloadResume(resume)) {
     navLevel = NavLevel::Books;
     listQuery = std::move(resume.listQuery);
     listTitle = std::move(resume.listTitle);
@@ -188,6 +201,8 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
     facetSectionId = std::move(resume.facetSectionId);
     facetTitle = std::move(resume.facetTitle);
     facetPage = resume.facetPage;
+    facetSelectorIndex = resume.facetSelectorIndex;
+    facetTopIndex = resume.facetTopIndex;
     pendingDownload = {resume.bookId, resume.fileId, std::move(resume.title), std::move(resume.path)};
   } else {
     BookOrbitCatalogListCache::clear();
@@ -214,7 +229,7 @@ void BookOrbitCatalogBrowserActivity::onExit() {
     WiFi.disconnect(false);
     delay(30);
     silentRestart();
-  } else if (downloadBoot) {
+  } else if (networkBoot) {
     silentRestart();
   }
 }
@@ -296,7 +311,12 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
     return -1;
   };
 
-  entries.clear();
+  // Local, offline categories: what's already on the SD card, counted on the spot.
+  localOnDeviceCount = collectLocalBooks("on-device", nullptr);
+  localInProgressCount = collectLocalBooks("in-progress", nullptr);
+
+  RenderLock lock(*this);             // the render task draws the rows replaced here
+  startListing(sections.size() + 3);  // the server's sections, the two local ones, Search
   listFreedForDownload = false;
   for (auto& section : sections) {
     Entry entry;
@@ -311,17 +331,14 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
     entry.sectionId = section.id;
     entries.push_back(std::move(entry));
   }
-  // Local, offline categories: what's already on the SD card, counted on the spot.
   Entry onDevice;
   onDevice.type = EntryType::LOCAL_SECTION;
-  onDevice.title =
-      std::string(tr(STR_BOOKORBIT_ON_DEVICE)) + " (" + std::to_string(collectLocalBooks("on-device", nullptr)) + ")";
+  onDevice.title = std::string(tr(STR_BOOKORBIT_ON_DEVICE)) + " (" + std::to_string(localOnDeviceCount) + ")";
   onDevice.sectionId = "on-device";
   entries.push_back(std::move(onDevice));
   Entry inProgress;
   inProgress.type = EntryType::LOCAL_SECTION;
-  inProgress.title = std::string(tr(STR_BOOKORBIT_IN_PROGRESS)) + " (" +
-                     std::to_string(collectLocalBooks("in-progress", nullptr)) + ")";
+  inProgress.title = std::string(tr(STR_BOOKORBIT_IN_PROGRESS)) + " (" + std::to_string(localInProgressCount) + ")";
   inProgress.sectionId = "in-progress";
   entries.push_back(std::move(inProgress));
   Entry search;
@@ -329,9 +346,9 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   search.title = tr(STR_SEARCH);
   entries.push_back(std::move(search));
 
-  selectorIndex = 0;
   state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
+  lock.unlock();
   requestUpdate();
   return true;
 }
@@ -424,9 +441,13 @@ size_t BookOrbitCatalogBrowserActivity::collectLocalBooks(const std::string& kin
   return count;
 }
 
-void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
-  entries.clear();
-  listTitle = (kind == "in-progress") ? tr(STR_BOOKORBIT_IN_PROGRESS) : tr(STR_BOOKORBIT_ON_DEVICE);
+void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string kind) {
+  const bool inProgress = kind == "in-progress";
+  RenderLock lock(*this);  // the render task draws the rows replaced here
+  listTitle = inProgress ? tr(STR_BOOKORBIT_IN_PROGRESS) : tr(STR_BOOKORBIT_ON_DEVICE);
+  // Sized by the root's badge count: this list is sorted whole, so it cannot be paged
+  // like a server listing, and growing it a row at a time would double its block.
+  startListing(inProgress ? localInProgressCount : localOnDeviceCount);
 
   collectLocalBooks(kind, &entries);
   std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
@@ -445,14 +466,14 @@ void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string& kind) {
   listPage = 1;
   listTotal = static_cast<int>(entries.size());
   listPageSize = std::max<int>(1, static_cast<int>(entries.size()));
-  selectorIndex = 0;
   state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
+  lock.unlock();
   requestUpdate();
 }
 
 bool BookOrbitCatalogBrowserActivity::loadFacetEntries(const std::string& sectionId, const std::string& title,
-                                                       const int page, const bool append, const bool allowNetwork) {
+                                                       const int page, const PageLoad load, const bool allowNetwork) {
   BookOrbitFacetPage result;
   const bool cacheHit = BookOrbitCatalogListCache::loadFacetPage(sectionId, page, result);
   if (!cacheHit && !allowNetwork) {
@@ -470,41 +491,49 @@ bool BookOrbitCatalogBrowserActivity::loadFacetEntries(const std::string& sectio
   }
 
   // Commit the navigation context only on success, so a failed page fetch leaves
-  // the currently displayed list and its paging state consistent.
+  // the currently displayed list and its paging state consistent. The arguments can
+  // be the rows' own strings, so they are copied before the rows change. The render
+  // task draws these rows, and the window's inserts and erases move them: hold it off.
+  RenderLock lock(*this);
   navLevel = NavLevel::FacetList;
   listFreedForDownload = false;
   facetSectionId = sectionId;
   facetTitle = title;
-  facetPage = page;
-  facetHasNext = result.hasNext;
-
-  if (!append) {
-    entries.clear();
+  // The window's last page says whether more follow; a page put in front changes neither.
+  if (load != PageLoad::Prepend) {
+    facetPage = page;
+    facetHasNext = result.hasNext;
   }
+
+  if (load == PageLoad::Open) startListing(result.entries.size());
+  // Make room before the page arrives, so the window stays within its reserve: trimmed
+  // after, it briefly holds one page too many and the vector moves to a larger block.
+  if (load == PageLoad::Append) dropPagesBefore(topIndex, /*incoming=*/1);
+  if (load == PageLoad::Prepend) dropPagesAfter(topIndex + visibleRows - 1, /*incoming=*/1);
   // Server order is kept as-is: it is already alphabetical for facets, and a
   // per-page sort would break the overall order once pages are appended.
-  for (auto& facet : result.entries) {
-    Entry entry;
+  const size_t first = placePageRows(load, result.entries.size(), static_cast<uint16_t>(page));
+  for (size_t i = 0; i < result.entries.size(); i++) {
+    auto& facet = result.entries[i];
+    Entry& entry = entries[first + i];
     entry.type = EntryType::FACET;
-    entry.title = facet.title;
+    entry.title = std::move(facet.title);
     if (facet.count > 0) {
       entry.title += " (" + std::to_string(facet.count) + ")";
     }
-    entry.sectionId = facet.id;
-    entry.seriesId = facet.seriesId;
-    entries.push_back(std::move(entry));
+    entry.sectionId = std::move(facet.id);
+    entry.seriesId = std::move(facet.seriesId);
   }
-  if (!append) {
-    selectorIndex = 0;
-  }
+  logPageLoad(page, cacheHit);
   state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
+  lock.unlock();
   requestUpdate();
   return true;
 }
 
 bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query, const std::string& title,
-                                                const int page, const bool fromFacet, const bool append,
+                                                const int page, const bool fromFacet, const PageLoad load,
                                                 const bool allowNetwork) {
   BookOrbitBookPage result;
   const bool cacheHit = BookOrbitCatalogListCache::loadBooksPage(query, page, result);
@@ -523,83 +552,246 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
   }
 
   // Commit the navigation context only on success (see loadFacetEntries).
+  RenderLock lock(*this);
   navLevel = NavLevel::Books;
   listFreedForDownload = false;
   listQuery = query;
   listTitle = title;
-  listPage = page;
+  if (load != PageLoad::Prepend) listPage = page;
   booksFromFacet = fromFacet;
 
   listTotal = result.total;
   listPageSize = result.pageSize > 0 ? result.pageSize : BookOrbitCatalogClient::PAGE_SIZE;
 
-  if (!append) {
-    entries.clear();
-  }
+  if (load == PageLoad::Open) startListing(result.books.size());
+  // Make room before the page arrives, so the window stays within its reserve: trimmed
+  // after, it briefly holds one page too many and the vector moves to a larger block.
+  if (load == PageLoad::Append) dropPagesBefore(topIndex, /*incoming=*/1);
+  if (load == PageLoad::Prepend) dropPagesAfter(topIndex + visibleRows - 1, /*incoming=*/1);
   // Server order carries the listing's meaning -- recency for "Continue reading"
   // and "Recently added", series order for series -- and appending pages keeps
   // it consistent; a client-side re-sort would destroy both.
-  for (auto& book : result.books) {
-    Entry entry;
+  const size_t first = placePageRows(load, result.books.size(), static_cast<uint16_t>(page));
+  for (size_t i = 0; i < result.books.size(); i++) {
+    auto& book = result.books[i];
+    Entry& entry = entries[first + i];
     entry.type = EntryType::BOOK;
-    entry.title = book.title;
-    entry.subtitle = book.author;
     entry.bookId = book.id;
     entry.onDevice = bookOnDevice(book.id, book.title, book.author, entry.path);
-    entries.push_back(std::move(entry));
+    entry.title = std::move(book.title);
+    entry.subtitle = std::move(book.author);
   }
-  if (!append) {
-    selectorIndex = 0;
-  }
+  logPageLoad(page, cacheHit);
   state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
+  lock.unlock();
   requestUpdate();
   return true;
 }
 
+const BookOrbitCatalogBrowserActivity::Entry* BookOrbitCatalogBrowserActivity::entryAt(const int row) const {
+  const int index = row - windowStart;
+  if (index < 0 || index >= static_cast<int>(entries.size())) return nullptr;
+  return &entries[index];
+}
+
+BookOrbitCatalogBrowserActivity::Entry* BookOrbitCatalogBrowserActivity::entryAt(const int row) {
+  return const_cast<Entry*>(std::as_const(*this).entryAt(row));
+}
+
+bool BookOrbitCatalogBrowserActivity::hasMorePages() const {
+  if (navLevel == NavLevel::FacetList) return facetHasNext;
+  if (navLevel == NavLevel::Books) return static_cast<long>(listPage) * listPageSize < listTotal;
+  return false;
+}
+
+void BookOrbitCatalogBrowserActivity::startListing(const size_t rows) {
+  const size_t wanted = std::max(rows, WINDOW_ROWS);
+  if (entries.capacity() > wanted) {
+    // Free the large block first, so the smaller one can be carved out of it.
+    std::vector<Entry>().swap(entries);
+  }
+  entries.clear();
+  entries.reserve(wanted);
+  windowStart = 0;
+  selectorIndex = 0;
+  topIndex = 0;
+}
+
+size_t BookOrbitCatalogBrowserActivity::placePageRows(const PageLoad load, const size_t count, const uint16_t page) {
+  // An exact reserve: insert() would otherwise double the block. Only a listing whose
+  // pages or screen are larger than WINDOW_ROWS planned for gets here.
+  if (entries.size() + count > entries.capacity()) entries.reserve(entries.size() + count);
+  Entry blank;
+  blank.type = EntryType::BOOK;
+  blank.page = page;
+  if (load == PageLoad::Prepend) {
+    entries.insert(entries.begin(), count, blank);
+    windowStart -= static_cast<int>(count);
+    return 0;
+  }
+  const size_t first = entries.size();
+  entries.insert(entries.end(), count, blank);
+  return first;
+}
+
+void BookOrbitCatalogBrowserActivity::dropPagesBefore(const int keepFrom, const int incoming) {
+  while (!entries.empty() && entries.back().page - entries.front().page + 1 + incoming > MAX_WINDOW_PAGES) {
+    const uint16_t page = entries.front().page;
+    const auto end =
+        std::find_if(entries.begin(), entries.end(), [page](const Entry& entry) { return entry.page != page; });
+    const int count = static_cast<int>(end - entries.begin());
+    if (windowStart + count > keepFrom) break;  // the viewport still shows that page
+    entries.erase(entries.begin(), end);
+    windowStart += count;
+  }
+  clampSelectionToWindow();
+}
+
+void BookOrbitCatalogBrowserActivity::dropPagesAfter(const int keepThrough, const int incoming) {
+  while (!entries.empty() && entries.back().page - entries.front().page + 1 + incoming > MAX_WINDOW_PAGES) {
+    const uint16_t page = entries.back().page;
+    const auto start = std::find_if(entries.rbegin(), entries.rend(), [page](const Entry& entry) {
+                         return entry.page != page;
+                       }).base();
+    if (windowStart + static_cast<int>(start - entries.begin()) <= keepThrough) break;
+    entries.erase(start, entries.end());
+    // The window now ends a page earlier, and the server still has that page after it.
+    if (navLevel == NavLevel::FacetList) {
+      facetPage = page - 1;
+      facetHasNext = true;
+    } else {
+      listPage = page - 1;
+    }
+  }
+  clampSelectionToWindow();
+}
+
+void BookOrbitCatalogBrowserActivity::logPageLoad(const int page, const bool cacheHit) const {
+  LOG_INF("BookOrbit", "Listing page %d from %s: %u rows in memory from row %d (free=%u maxAlloc=%u)", page,
+          cacheHit ? "cache" : "server", static_cast<unsigned>(entries.size()), windowStart, ESP.getFreeHeap(),
+          ESP.getMaxAllocHeap());
+}
+
+// A swipe leaves the selection where it was while the viewport moves on, so a dropped
+// page can take the selected row with it; the selection then holds the nearest row.
+void BookOrbitCatalogBrowserActivity::clampSelectionToWindow() {
+  if (entries.empty()) return;
+  selectorIndex = std::clamp(selectorIndex, windowStart, loadedEnd() - 1);
+}
+
 bool BookOrbitCatalogBrowserActivity::appendNextPageForCurrentList(const bool allowNetwork) {
-  const size_t previousCount = entries.size();
+  const int previousEnd = loadedEnd();
   if (navLevel == NavLevel::FacetList && facetHasNext) {
-    if (!loadFacetEntries(facetSectionId, facetTitle, facetPage + 1, true, /*allowNetwork=*/false)) {
+    if (!loadFacetEntries(facetSectionId, facetTitle, facetPage + 1, PageLoad::Append, /*allowNetwork=*/false)) {
       if (!allowNetwork) return false;
       showLoadingBeforeFetch();
-      loadFacetEntries(facetSectionId, facetTitle, facetPage + 1, true);
+      loadFacetEntries(facetSectionId, facetTitle, facetPage + 1, PageLoad::Append);
     }
-    return state == BrowserState::BROWSING && entries.size() > previousCount;
+    return state == BrowserState::BROWSING && loadedEnd() > previousEnd;
   }
 
-  const bool booksHasNext = static_cast<long>(listPage) * listPageSize < listTotal;
-  if (navLevel == NavLevel::Books && booksHasNext) {
-    if (!loadBooks(listQuery, listTitle, listPage + 1, booksFromFacet, true, /*allowNetwork=*/false)) {
+  if (navLevel == NavLevel::Books && hasMorePages()) {
+    if (!loadBooks(listQuery, listTitle, listPage + 1, booksFromFacet, PageLoad::Append, /*allowNetwork=*/false)) {
       if (!allowNetwork) return false;
       showLoadingBeforeFetch();
-      loadBooks(listQuery, listTitle, listPage + 1, booksFromFacet, true);
+      loadBooks(listQuery, listTitle, listPage + 1, booksFromFacet, PageLoad::Append);
     }
-    return state == BrowserState::BROWSING && entries.size() > previousCount;
+    return state == BrowserState::BROWSING && loadedEnd() > previousEnd;
   }
 
   return false;
 }
 
+// The pages in front of the window were shown earlier in this session, so the list
+// cache has them; the network only stands in for a page the cache failed to keep.
+bool BookOrbitCatalogBrowserActivity::prependPreviousPage() {
+  if (entries.empty() || entries.front().page <= 1) return false;
+  const int page = entries.front().page - 1;
+  const int previousStart = windowStart;
+  if (navLevel == NavLevel::FacetList) {
+    if (!loadFacetEntries(facetSectionId, facetTitle, page, PageLoad::Prepend, /*allowNetwork=*/false)) {
+      showLoadingBeforeFetch();
+      loadFacetEntries(facetSectionId, facetTitle, page, PageLoad::Prepend);
+    }
+  } else if (navLevel == NavLevel::Books) {
+    if (!loadBooks(listQuery, listTitle, page, booksFromFacet, PageLoad::Prepend, /*allowNetwork=*/false)) {
+      showLoadingBeforeFetch();
+      loadBooks(listQuery, listTitle, page, booksFromFacet, PageLoad::Prepend);
+    }
+  } else {
+    return false;
+  }
+  return state == BrowserState::BROWSING && windowStart < previousStart;
+}
+
+bool BookOrbitCatalogBrowserActivity::revealRow(const int row) {
+  while (row < windowStart) {
+    if (!prependPreviousPage()) return false;
+  }
+  return true;
+}
+
+bool BookOrbitCatalogBrowserActivity::rewindToStart() {
+  if (navLevel == NavLevel::FacetList) {
+    if (loadFacetEntries(facetSectionId, facetTitle, 1, PageLoad::Open, /*allowNetwork=*/false)) return true;
+    showLoadingBeforeFetch();
+    return loadFacetEntries(facetSectionId, facetTitle, 1);
+  }
+  if (navLevel == NavLevel::Books) {
+    if (loadBooks(listQuery, listTitle, 1, booksFromFacet, PageLoad::Open, /*allowNetwork=*/false)) return true;
+    showLoadingBeforeFetch();
+    return loadBooks(listQuery, listTitle, 1, booksFromFacet);
+  }
+  return false;
+}
+
+bool BookOrbitCatalogBrowserActivity::wrapToEndFromCache() {
+  while (hasMorePages()) {
+    // The walk keeps nothing behind it: the selection lands on the listing's end.
+    topIndex = selectorIndex = loadedEnd() - 1;
+    if (!appendNextPageForCurrentList(/*allowNetwork=*/false)) break;
+  }
+  if (hasMorePages()) {
+    if (windowStart > 0) {
+      rewindToStart();
+    } else {
+      selectorIndex = topIndex = 0;
+    }
+    return false;
+  }
+  topIndex = std::max(windowStart, loadedEnd() - visibleRows);
+  return true;
+}
+
+bool BookOrbitCatalogBrowserActivity::reopenListing(const NavLevel level, const int lastPage, const int wantedSelector,
+                                                    const int wantedTop) {
+  const auto loadPage = [this, level](const int page, const PageLoad load, const bool allowNetwork) {
+    return level == NavLevel::FacetList ? loadFacetEntries(facetSectionId, facetTitle, page, load, allowNetwork)
+                                        : loadBooks(listQuery, listTitle, page, booksFromFacet, load, allowNetwork);
+  };
+  for (int page = 1; page <= lastPage; page++) {
+    const PageLoad load = page == 1 ? PageLoad::Open : PageLoad::Append;
+    if (!loadPage(page, load, /*allowNetwork=*/false)) {
+      showLoadingBeforeFetch();
+      if (!loadPage(page, load, /*allowNetwork=*/true)) {
+        return false;  // the load set the error state; keep whatever pages did load
+      }
+    }
+    // Open put the listing at its top. The wanted viewport is what decides which
+    // pages the rest of the walk drops.
+    if (page == 1) topIndex = wantedTop;
+  }
+  if (entries.empty()) return false;
+  topIndex = std::clamp(wantedTop, windowStart, loadedEnd() - 1);
+  selectorIndex = std::clamp(wantedSelector, windowStart, loadedEnd() - 1);
+  return true;
+}
+
 // Rebuild the book listing that downloadBook() freed, and put the selector back on
 // the entry it was on
 void BookOrbitCatalogBrowserActivity::restoreBookListAfterDownload() {
-  // Both get overwritten as the pages reload: loadBooks() sets listPage, and its
-  // first (non-appending) call resets the selector.
-  const int wantedIndex = selectorIndex;
-  const int wantedPage = listPage;
-  for (int page = 1; page <= wantedPage; page++) {
-    const bool append = page > 1;
-    if (loadBooks(listQuery, listTitle, page, booksFromFacet, append, /*allowNetwork=*/false)) {
-      continue;
-    }
-    showLoadingBeforeFetch();
-    if (!loadBooks(listQuery, listTitle, page, booksFromFacet, append)) {
-      return;  // loadBooks() set the error state; keep whatever pages did load
-    }
-  }
-  if (entries.empty()) return;
-  selectorIndex = std::min(wantedIndex, static_cast<int>(entries.size()) - 1);
+  reopenListing(NavLevel::Books, listPage, selectorIndex, topIndex);
 }
 
 void BookOrbitCatalogBrowserActivity::launchSearch() {
@@ -627,7 +819,7 @@ void BookOrbitCatalogBrowserActivity::performSearch(const std::string& query) {
   BookOrbitBookQuery bookQuery;
   bookQuery.sort = "title";
   bookQuery.query = query;
-  if (!loadBooks(bookQuery, query, 1, /*fromFacet=*/false, /*append=*/false, /*allowNetwork=*/false)) {
+  if (!loadBooks(bookQuery, query, 1, /*fromFacet=*/false, PageLoad::Open, /*allowNetwork=*/false)) {
     showLoadingBeforeFetch();
     loadBooks(bookQuery, query, 1, /*fromFacet=*/false);
   }
@@ -707,11 +899,14 @@ bool BookOrbitCatalogBrowserActivity::restartForDownload(const int64_t bookId, c
   resume.facetSectionId = facetSectionId;
   resume.facetTitle = facetTitle;
   resume.facetPage = facetPage;
+  resume.facetSelectorIndex = facetSelectorIndex;
+  resume.facetTopIndex = facetTopIndex;
   if (!BookOrbitCatalogListCache::saveDownloadResume(resume)) {
     LOG_ERR("BookOrbit", "Cannot save the download for its restart; downloading in place");
     return false;
   }
-  LOG_INF("BookOrbit", "Restarting into the download of book %lld", static_cast<long long>(bookId));
+  LOG_INF("BookOrbit", "Restarting into the download of book %lld (row %d, top %d, page %d)",
+          static_cast<long long>(bookId), selectorIndex, topIndex, listPage);
   silentRestartToNetwork(NetworkBootTarget::BOOKORBIT_DOWNLOAD);
   // Only returns when deep sleep is already under way, which ends this session anyway.
   BookOrbitCatalogListCache::discardDownloadResume();
@@ -741,9 +936,9 @@ void BookOrbitCatalogBrowserActivity::runPendingDownload(const bool wifiConnecte
 void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const int64_t fileId,
                                                    const std::string& finalPath) {
   // The heap the TLS session starts from: what tells a fragmented session from a
-  // clean download boot in a field log.
-  LOG_INF("BookOrbit", "Downloading file %lld -> %s (free=%u maxAlloc=%u)", static_cast<long long>(fileId),
-          finalPath.c_str(), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  // clean download boot in a field log. The version says which build wrote that log.
+  LOG_INF("BookOrbit", "Downloading file %lld -> %s (free=%u maxAlloc=%u, firmware %s)", static_cast<long long>(fileId),
+          finalPath.c_str(), ESP.getFreeHeap(), ESP.getMaxAllocHeap(), AppVersion::version());
 
   bool cancelRequested = false;
   auto pollCancel = [this, &cancelRequested] {
@@ -770,6 +965,7 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
   // Small client RX buffer (see BookOrbitCatalogClient::fetchJson) so the
   // headers-time body cache can't demand a large realloc next to the TLS buffers.
   downloadOptions.clientRxBufferSize = 2048;
+  downloadOptions.largeBody = true;
   // CrossInk v1.6.1's download safeguards, as its OPDS browser uses them: stage the file
   // as "<book>.part", refuse a book the card cannot hold before writing any of it, and
   // only put the file in place once it opens as an EPUB. A body cut short without a
@@ -784,8 +980,11 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
 
   // Free the current listing while the download runs: every KB of contiguous heap
   // matters next to the TLS session, and the list is rebuilt from listQuery after.
-  std::vector<Entry>().swap(entries);
-  listFreedForDownload = true;
+  {
+    RenderLock lock(*this);
+    std::vector<Entry>().swap(entries);
+    listFreedForDownload = true;
+  }
 
   constexpr int MAX_DOWNLOAD_ATTEMPTS = 3;
   HttpDownloader::DownloadError result = HttpDownloader::HTTP_ERROR;
@@ -883,19 +1082,21 @@ bool BookOrbitCatalogBrowserActivity::preventAutoSleep() {
 }
 
 void BookOrbitCatalogBrowserActivity::activateSelected() {
-  if (entries.empty()) return;
-  const auto& entry = entries[selectorIndex];
+  const Entry* selected = entryAt(selectorIndex);
+  if (!selected) return;
+  // A reference into the rows: the loads below copy what they need before replacing them.
+  const auto& entry = *selected;
   switch (entry.type) {
     case EntryType::SECTION: {
       const BookOrbitBookQuery query = BookOrbitCatalogClient::sectionBookQuery(entry.sectionId);
-      if (!loadBooks(query, entry.title, 1, /*fromFacet=*/false, /*append=*/false, /*allowNetwork=*/false)) {
+      if (!loadBooks(query, entry.title, 1, /*fromFacet=*/false, PageLoad::Open, /*allowNetwork=*/false)) {
         showLoadingBeforeFetch();
         loadBooks(query, entry.title, 1, /*fromFacet=*/false);
       }
       break;
     }
     case EntryType::FACET_SECTION:
-      if (!loadFacetEntries(entry.sectionId, entry.title, 1, /*append=*/false, /*allowNetwork=*/false)) {
+      if (!loadFacetEntries(entry.sectionId, entry.title, 1, PageLoad::Open, /*allowNetwork=*/false)) {
         showLoadingBeforeFetch();
         loadFacetEntries(entry.sectionId, entry.title, 1);
       }
@@ -931,7 +1132,10 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       } else {
         query.author = entry.sectionId;
       }
-      if (!loadBooks(query, entry.title, 1, /*fromFacet=*/true, /*append=*/false, /*allowNetwork=*/false)) {
+      // Back reopens the facet listing on this row.
+      facetSelectorIndex = selectorIndex;
+      facetTopIndex = topIndex;
+      if (!loadBooks(query, entry.title, 1, /*fromFacet=*/true, PageLoad::Open, /*allowNetwork=*/false)) {
         showLoadingBeforeFetch();
         loadBooks(query, entry.title, 1, /*fromFacet=*/true);
       }
@@ -960,9 +1164,9 @@ void BookOrbitCatalogBrowserActivity::openLocalBook(const std::string& path) {
 }
 
 void BookOrbitCatalogBrowserActivity::showBookActionMenu(const bool ignoreInitialConfirmRelease) {
-  if (selectorIndex < 0 || selectorIndex >= static_cast<int>(entries.size())) return;
-  const Entry& entry = entries[selectorIndex];
-  if (entry.type != EntryType::BOOK) return;
+  const Entry* selected = entryAt(selectorIndex);
+  if (!selected || selected->type != EntryType::BOOK) return;
+  const Entry& entry = *selected;
 
   std::vector<FileBrowserActionActivity::MenuItem> items;
   if (entry.onDevice) {
@@ -973,20 +1177,21 @@ void BookOrbitCatalogBrowserActivity::showBookActionMenu(const bool ignoreInitia
     items.push_back({FileBrowserAction::Download, StrId::STR_DOWNLOAD});
   }
 
-  // Captured by index: the menu is modal, so the listing cannot change under it.
-  const size_t index = static_cast<size_t>(selectorIndex);
+  // Captured by row: the menu is modal, so the listing cannot change under it.
+  const int row = selectorIndex;
   startActivityForResult(std::make_unique<FileBrowserActionActivity>(renderer, mappedInput, entry.title,
                                                                      std::move(items), ignoreInitialConfirmRelease),
-                         [this, index](const ActivityResult& result) {
+                         [this, row](const ActivityResult& result) {
                            longPressFired = false;
-                           if (result.isCancelled || index >= entries.size()) return;
+                           const Entry* current = entryAt(row);
+                           if (result.isCancelled || !current) return;
                            const auto* actionResult = std::get_if<FileBrowserActionResult>(&result.data);
                            if (!actionResult) {
                              LOG_ERR("BookOrbit", "Book action result missing");
                              return;
                            }
                            // Copies: downloadBook() frees the listing these would point into.
-                           const Entry entry = entries[index];
+                           const Entry entry = *current;
                            LOG_DBG("BookOrbit", "Book action %d on book %lld", actionResult->action,
                                    static_cast<long long>(entry.bookId));
                            switch (static_cast<FileBrowserAction>(actionResult->action)) {
@@ -1000,7 +1205,7 @@ void BookOrbitCatalogBrowserActivity::showBookActionMenu(const bool ignoreInitia
                                downloadBook(entry.bookId, entry.title, entry.path);
                                return;
                              case FileBrowserAction::Delete:
-                               promptDeleteBook(index);
+                               promptDeleteBook(row);
                                return;
                              default:
                                return;
@@ -1008,12 +1213,15 @@ void BookOrbitCatalogBrowserActivity::showBookActionMenu(const bool ignoreInitia
                          });
 }
 
-void BookOrbitCatalogBrowserActivity::promptDeleteBook(const size_t index) {
+void BookOrbitCatalogBrowserActivity::promptDeleteBook(const int row) {
+  const Entry* book = entryAt(row);
+  if (!book) return;
   const std::string heading = tr(STR_DELETE) + std::string("? ");
-  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, entries[index].title),
-                         [this, index](const ActivityResult& result) {
-                           if (result.isCancelled || index >= entries.size()) return;
-                           Entry& entry = entries[index];
+  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, book->title),
+                         [this, row](const ActivityResult& result) {
+                           Entry* current = entryAt(row);
+                           if (result.isCancelled || !current) return;
+                           Entry& entry = *current;
                            BookActions::clearFileMetadata(entry.path);
                            if (!Storage.remove(entry.path.c_str())) {
                              LOG_ERR("BookOrbit", "Failed to delete book: %s", entry.path.c_str());
@@ -1032,10 +1240,7 @@ void BookOrbitCatalogBrowserActivity::navigateBack() {
   if (navLevel == NavLevel::Root) {
     onGoHome();
   } else if (navLevel == NavLevel::Books && booksFromFacet) {
-    if (!loadFacetEntries(facetSectionId, facetTitle, facetPage, /*append=*/false, /*allowNetwork=*/false)) {
-      showLoadingBeforeFetch();
-      loadFacetEntries(facetSectionId, facetTitle, facetPage);
-    }
+    reopenListing(NavLevel::FacetList, facetPage, facetSelectorIndex, facetTopIndex);
   } else {
     if (!loadRoot(/*allowNetwork=*/false)) {
       showLoadingBeforeFetch();
@@ -1098,8 +1303,9 @@ void BookOrbitCatalogBrowserActivity::loop() {
       return;
     }
     // Holding Confirm on a catalog book opens its action menu instead of acting.
-    if (!entries.empty() && entries[selectorIndex].type == EntryType::BOOK &&
-        mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= LONG_PRESS_MS) {
+    const Entry* selected = entryAt(selectorIndex);
+    if (selected && selected->type == EntryType::BOOK && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
+        mappedInput.getHeldTime() >= LONG_PRESS_MS) {
       longPressFired = true;
       showBookActionMenu(/*ignoreInitialConfirmRelease=*/true);
       return;
@@ -1127,18 +1333,26 @@ void BookOrbitCatalogBrowserActivity::loop() {
 
     if (!entries.empty()) {
       // Rows the list actually drew, so page jumps land where the display pages;
-      // a fixed constant would drift from the theme's row height.
+      // a fixed constant would drift from the theme's row height. Every index below
+      // counts rows from the start of the listing (see `entries`), so the pages a
+      // move loads or drops leave the screen-page boundaries where they were.
       const int pageItems = visibleRows;
-      // More content on the server than is loaded? Then the loaded end is a
-      // phantom boundary mid-listing: never wrap onto or past it.
-      const auto hasMorePages = [this] {
-        if (navLevel == NavLevel::FacetList) return facetHasNext;
-        if (navLevel == NavLevel::Books) return static_cast<long>(listPage) * listPageSize < listTotal;
-        return false;
+      // A move that could not reach its row (no network for a lost page) stays on
+      // the rows in memory.
+      const auto holdPosition = [this] {
+        clampSelectionToWindow();
+        requestUpdate();
+      };
+      // A move past the rows in memory: earlier pages come back from the list cache,
+      // and a wrap to the top reopens the listing at its first page.
+      const auto reachSelection = [this] {
+        if (selectorIndex >= windowStart) return true;
+        return selectorIndex == 0 ? rewindToStart() : revealRow(selectorIndex);
       };
       // Button navigation moves the selection; the viewport follows it.
       const auto followSelection = [this] {
-        topIndex = followListSelection(selectorIndex, topIndex, visibleRows, static_cast<int>(entries.size()));
+        topIndex = followListSelection(selectorIndex, topIndex, visibleRows, loadedEnd());
+        if (!revealRow(topIndex)) topIndex = windowStart;
       };
       // Swipes do the opposite: they move the viewport and leave the selection
       // where it is. Reaching the end of what is loaded pulls the next page in,
@@ -1147,16 +1361,15 @@ void BookOrbitCatalogBrowserActivity::loop() {
       if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
         if (swipe == MappedInputManager::SwipeDir::Up) {
           const int wantedCount = topIndex + 2 * visibleRows;
-          while (static_cast<int>(entries.size()) < wantedCount && hasMorePages()) {
+          while (loadedEnd() < wantedCount && hasMorePages()) {
             if (!appendNextPageForCurrentList()) break;
           }
         }
         const int delta = swipe == MappedInputManager::SwipeDir::Up ? visibleRows : -visibleRows;
-        const int next = scrollListBy(topIndex, delta, visibleRows, static_cast<int>(entries.size()));
-        if (next != topIndex) {
-          topIndex = next;
-          requestUpdate();
-        }
+        const int previousTop = topIndex;
+        topIndex = scrollListBy(topIndex, delta, visibleRows, loadedEnd());
+        if (!revealRow(topIndex)) topIndex = windowStart;
+        if (topIndex != previousTop) requestUpdate();
         return;
       }
       // Prefetch at the page turn: after a forward move onto the last loaded
@@ -1164,61 +1377,62 @@ void BookOrbitCatalogBrowserActivity::loop() {
       // (server pages are not screen-page multiples, and can even be smaller
       // than one screen). The load pause lands on a transition the e-ink
       // refreshes anyway instead of mid-page, and the page comes up full. The
-      // lambdas read entries.size() live because appends grow the list.
-      const auto extendIfOnLastPage = [this, pageItems, hasMorePages] {
-        const int lastPageStart = (static_cast<int>(entries.size()) - 1) / pageItems * pageItems;
+      // lambdas read loadedEnd() live because appends extend the listing.
+      const auto extendIfOnLastPage = [this, pageItems] {
+        const int lastPageStart = (loadedEnd() - 1) / pageItems * pageItems;
         if (selectorIndex < lastPageStart) return;
         const int wantedCount = (selectorIndex / pageItems + 1) * pageItems;
-        while (static_cast<int>(entries.size()) < wantedCount && hasMorePages()) {
+        while (loadedEnd() < wantedCount && hasMorePages()) {
           if (!appendNextPageForCurrentList()) break;
         }
       };
-      buttonNavigator.onNextRelease([this, extendIfOnLastPage, followSelection, hasMorePages] {
-        if (selectorIndex + 1 >= static_cast<int>(entries.size()) && hasMorePages() &&
-            !appendNextPageForCurrentList()) {
+      buttonNavigator.onNextRelease([this, extendIfOnLastPage, followSelection, reachSelection, holdPosition] {
+        if (selectorIndex + 1 >= loadedEnd() && hasMorePages() && !appendNextPageForCurrentList()) {
           requestUpdate();  // could not load past the end (e.g. network); hold position, no wrap
           return;
         }
-        selectorIndex = ButtonNavigator::nextIndex(selectorIndex, entries.size());
+        selectorIndex = ButtonNavigator::nextIndex(selectorIndex, loadedEnd());
+        if (!reachSelection()) return holdPosition();
         extendIfOnLastPage();
         followSelection();
         requestUpdate();
       });
       // Backward from the very top: when the session cache holds the rest of the
-      // listing, materialise it (no requests) and wrap to the real end. A cache
-      // miss keeps the clamp -- a Previous press should not start a network crawl.
-      const auto materialiseFromCache = [this, hasMorePages] {
-        while (hasMorePages() && appendNextPageForCurrentList(/*allowNetwork=*/false)) {
-        }
-        return !hasMorePages();
-      };
-      buttonNavigator.onPreviousRelease([this, followSelection, hasMorePages, materialiseFromCache] {
-        if (selectorIndex == 0 && hasMorePages() && !materialiseFromCache()) return;
-        selectorIndex = ButtonNavigator::previousIndex(selectorIndex, entries.size());
+      // listing, walk it (no requests) and wrap to the real end. A cache miss keeps
+      // the clamp -- a Previous press should not start a network crawl.
+      buttonNavigator.onPreviousRelease([this, followSelection, reachSelection, holdPosition] {
+        const int from = selectorIndex;
+        if (from == 0 && hasMorePages() && !wrapToEndFromCache()) return holdPosition();
+        selectorIndex = ButtonNavigator::previousIndex(from, loadedEnd());
+        if (!reachSelection()) return holdPosition();
         followSelection();
         requestUpdate();
       });
-      buttonNavigator.onNextContinuous([this, pageItems, extendIfOnLastPage, followSelection, hasMorePages] {
-        const int count = static_cast<int>(entries.size());
-        if (selectorIndex / pageItems == (count - 1) / pageItems && hasMorePages() && !appendNextPageForCurrentList()) {
-          requestUpdate();
-          return;
-        }
-        selectorIndex = ButtonNavigator::nextPageIndex(selectorIndex, entries.size(), pageItems);
-        extendIfOnLastPage();
-        followSelection();
-        requestUpdate();
-      });
-      buttonNavigator.onPreviousContinuous([this, pageItems, followSelection, hasMorePages, materialiseFromCache] {
-        if (selectorIndex / pageItems == 0 && hasMorePages()) {
-          if (selectorIndex > 0) {
+      buttonNavigator.onNextContinuous(
+          [this, pageItems, extendIfOnLastPage, followSelection, reachSelection, holdPosition] {
+            if (selectorIndex / pageItems == (loadedEnd() - 1) / pageItems && hasMorePages() &&
+                !appendNextPageForCurrentList()) {
+              requestUpdate();
+              return;
+            }
+            selectorIndex = ButtonNavigator::nextPageIndex(selectorIndex, loadedEnd(), pageItems);
+            if (!reachSelection()) return holdPosition();
+            extendIfOnLastPage();
+            followSelection();
+            requestUpdate();
+          });
+      buttonNavigator.onPreviousContinuous([this, pageItems, followSelection, reachSelection, holdPosition] {
+        const int from = selectorIndex;
+        if (from / pageItems == 0 && hasMorePages()) {
+          if (from > 0) {
             selectorIndex = 0;  // finish the backward run at the top first
             requestUpdate();
             return;
           }
-          if (!materialiseFromCache()) return;
+          if (!wrapToEndFromCache()) return holdPosition();
         }
-        selectorIndex = ButtonNavigator::previousPageIndex(selectorIndex, entries.size(), pageItems);
+        selectorIndex = ButtonNavigator::previousPageIndex(from, loadedEnd(), pageItems);
+        if (!reachSelection()) return holdPosition();
         followSelection();
         requestUpdate();
       });
@@ -1237,7 +1451,8 @@ void BookOrbitCatalogBrowserActivity::buildListScreen(UiApp::ScreenType& screen)
   screen.setContentMargin(fui::Insets{static_cast<int16_t>(CompactHeader::contentTop(metrics)), 0,
                                       static_cast<int16_t>(metrics.buttonHintsHeight), 0});
 
-  // Transient per-render: points into `entries`, freed on scope exit.
+  // Transient per-render: points into `entries`, freed on scope exit. The list gets
+  // the rows in memory, so its indices are those rows' own (row - windowStart).
   std::vector<fui::ListItem> items;
   items.reserve(entries.size());
   for (size_t i = 0; i < entries.size(); i++) {
@@ -1255,29 +1470,32 @@ void BookOrbitCatalogBrowserActivity::buildListScreen(UiApp::ScreenType& screen)
   fui::ListProps props;
   props.items = items.data();
   props.count = static_cast<uint16_t>(items.size());
-  props.selectedIndex = static_cast<int16_t>(selectorIndex);
+  props.selectedIndex = entryAt(selectorIndex) ? static_cast<int16_t>(selectorIndex - windowStart) : -1;
   props.action = ACTION_ROW;
   props.inputMask = static_cast<uint16_t>(fui::InputTouch | fui::InputLongPress);  // physical buttons stay in loop()
   props.valueInset = 8;  // air between the on-device dot and the row edge
   const auto rows = configureUiList(props, screen.theme(), screen.body(), UiListRowType::WithSubtitle);
   visibleRows = rows > 0 ? rows : 1;
-  topIndex = scrollListBy(topIndex, 0, visibleRows, static_cast<int>(entries.size()));  // clamp to range
-  props.topIndex = static_cast<uint16_t>(topIndex);
+  // Clamped for this frame only: the loop owns topIndex, and a listing being rebuilt
+  // around a wanted position (reopenListing) must not see it pulled into a partial window.
+  const int top = std::max(windowStart, scrollListBy(topIndex, 0, visibleRows, loadedEnd()));
+  props.topIndex = static_cast<uint16_t>(top - windowStart);
 
   const fui::Rect listRect = screen.body();
   screen.list(props);
 
-  // A book listing loads a page at a time, so the entries in memory are only a
-  // prefix of what the server holds. The list sized its indicator on that
-  // prefix, which would make a 500-book listing look like it ends one swipe
-  // away; repaint the same track against the server's total instead. Only when
-  // the list already drew one: that is what shrank the rows to clear the track.
-  const int scrollTotal = navLevel == NavLevel::Books ? listTotal : 0;
-  if (scrollTotal > static_cast<int>(entries.size()) && static_cast<int>(entries.size()) > visibleRows) {
+  // A long listing keeps only a few pages in memory, so the list sized its
+  // indicator on that window: a 500-book listing would look like it ends one swipe
+  // away, and a window deep in it like its top. Repaint the same track against the
+  // whole listing instead -- the server's total for books, what has been reached
+  // for facets, which give no total. Only when the list already drew one: that is
+  // what shrank the rows to clear the track.
+  const int scrollTotal = navLevel == NavLevel::Books ? std::max(listTotal, loadedEnd()) : loadedEnd();
+  if ((windowStart > 0 || scrollTotal > loadedEnd()) && static_cast<int>(entries.size()) > visibleRows) {
     const auto& theme = screen.theme();
     fui::drawListScrollIndicator(screen.target(), listRect, static_cast<uint32_t>(scrollTotal),
-                                 static_cast<uint32_t>(visibleRows), static_cast<uint32_t>(topIndex),
-                                 theme.listScrollWidth, theme.listScrollSide, theme.listScrollInset);
+                                 static_cast<uint32_t>(visibleRows), static_cast<uint32_t>(top), theme.listScrollWidth,
+                                 theme.listScrollSide, theme.listScrollInset);
   }
 }
 
@@ -1341,8 +1559,8 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
     return;
   }
 
-  const bool onRemoteBook =
-      !entries.empty() && entries[selectorIndex].type == EntryType::BOOK && !entries[selectorIndex].onDevice;
+  const Entry* selected = entryAt(selectorIndex);
+  const bool onRemoteBook = selected && selected->type == EntryType::BOOK && !selected->onDevice;
   const char* confirmLabel = onRemoteBook ? tr(STR_DOWNLOAD) : tr(STR_OPEN);
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

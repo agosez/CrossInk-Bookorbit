@@ -200,6 +200,8 @@ The file is named by **your server's KOReader file naming template** — BookOrb
 
 In **On device** and **In progress**, Confirm opens the book in the reader instead of downloading it.
 
+On the X3 and X4, the reader restarts briefly before it opens the catalog and before each download, so the secure connection gets the memory it needs; leaving the catalog restarts it once more. A long listing keeps only the pages around the one on screen in memory and reloads the others from the SD card as you scroll back.
+
 > If the catalog reports _"BookOrbit sent an unexpected reply"_, the server answered but not with the catalog API — usually a BookOrbit version without the KOReader catalog endpoints, a wrong server URL, or a reverse proxy/SSO layer intercepting `/api/v1/koreader/plugin/*`.
 
 ---

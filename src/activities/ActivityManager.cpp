@@ -4,6 +4,7 @@
 #include <HalScalableFont.h>
 #endif
 
+#include <BoardConfig.h>
 #include <CrossInkHalFrontlight.h>
 #include <Epub.h>
 #include <FontCacheManager.h>
@@ -16,6 +17,7 @@
 
 #include <algorithm>
 
+#include "BookOrbitCredentialStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "OpdsServerStore.h"
@@ -973,11 +975,23 @@ void ActivityManager::goToBrowser() {
   }
 }
 
-bool ActivityManager::goToBookOrbitCatalog(const bool resumeDownload) {
+bool ActivityManager::goToBookOrbitCatalog(const bool networkBootReady, const bool resumeDownload) {
+#if FREEINK_MCU_C3 && !defined(SIMULATOR)
+  // Like OPDS: browse from a minimal network boot, whose heap still has the 16 KB
+  // blocks the catalog's TLS records need page after page (issue #96). Without an
+  // account the browser only shows the setup hint, which needs no restart. The
+  // desktop build has no fragmented heap to clear, and its integration scenarios
+  // drive one restart at most, the download's.
+  if (!networkBootReady && BOOKORBIT_STORE.hasCredentials()) {
+    silentRestartToNetwork(NetworkBootTarget::BOOKORBIT_CATALOG);
+    return true;
+  }
+#endif
   // Replace (not push): clearing the activity stack under the browser frees the
   // 15-20KB of headroom the TLS session needs on the C3 (see .claude/CONTEXT.md).
   // The browser exits via goHome, so there is no stack to return to.
-  auto browser = makeUniqueNoThrow<BookOrbitCatalogBrowserActivity>(renderer, mappedInput, resumeDownload);
+  auto browser =
+      makeUniqueNoThrow<BookOrbitCatalogBrowserActivity>(renderer, mappedInput, networkBootReady, resumeDownload);
   if (!browser) {
     LOG_ERR("ACT", "OOM: BookOrbit catalog (free=%u maxAlloc=%u)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
     return false;

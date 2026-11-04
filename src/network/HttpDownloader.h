@@ -78,6 +78,11 @@ class HttpDownloader {
     // writing anything if the SD card cannot hold the file. The first check
     // can scan the whole FAT, so leave it off for small files.
     bool checkFreeSpace = false;
+    // The body spans many TLS records: a book, not a JSON reply. wolfSSL then sizes its
+    // input buffer for a full record at the start of the handshake, while the heap still
+    // has a block that large, instead of growing it through the transfer. Costs about
+    // 13 KB of headroom for the length of the connection, so leave it off for short replies.
+    bool largeBody = false;
   };
 
   /**

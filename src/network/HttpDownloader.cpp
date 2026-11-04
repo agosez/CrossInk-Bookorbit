@@ -97,6 +97,20 @@ class ProgressNotifier {
   const HttpDownloader::ProgressCallback* progress_ = nullptr;
 };
 
+#if defined(FREEINK_NET_WOLFSSL)
+// Free heap wanted when the first TLS record arrives, before taking a full-record input
+// buffer. An RSA-4096 handshake still needs about 36 KB at that point, the buffer included;
+// the rest is margin. A C3 network boot has about 62 KB there, a browsing session about 40.
+constexpr uint32_t FULL_TLS_RECORD_MIN_FREE_HEAP = 46000;
+bool fullTlsRecordRequested = false;
+
+class FullTlsRecordScope {
+ public:
+  explicit FullTlsRecordScope(const bool requested) { fullTlsRecordRequested = requested; }
+  ~FullTlsRecordScope() { fullTlsRecordRequested = false; }
+};
+#endif
+
 struct Sink {
   std::function<bool(const uint8_t*, size_t)> write;
   HttpDownloader::ProgressCallback progress;
@@ -487,6 +501,20 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
 }
 }  // namespace
 
+#if defined(FREEINK_NET_WOLFSSL)
+// Asked by wolfSSL each time its input buffer grows (scripts/patch_wolfssl.py).
+extern "C" int freeinkWolfsslWantsFullRecordBuffer(void) {
+  if (!fullTlsRecordRequested) return 0;
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const bool wanted = freeHeap >= FULL_TLS_RECORD_MIN_FREE_HEAP;
+  // One line per connection when the full record is taken, one per larger record when not:
+  // what tells the two apart in a field log.
+  LOG_INF("HTTP", "TLS input buffer grows: %s (free=%u maxAlloc=%u)", wanted ? "full record" : "record by record",
+          freeHeap, ESP.getMaxAllocHeap());
+  return wanted;
+}
+#endif
+
 int HttpDownloader::lastHttpStatus = 0;
 
 bool HttpDownloader::fetchUrl(const std::string& url, Stream& outContent, const std::string& username,
@@ -539,6 +567,10 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
                                                              DownloadOptions options) {
   WifiPowerSaveGuard wifiPowerSaveGuard;
   (void)wifiPowerSaveGuard;
+#if defined(FREEINK_NET_WOLFSSL)
+  const FullTlsRecordScope fullTlsRecordScope(options.largeBody);
+  (void)fullTlsRecordScope;
+#endif
 
   const size_t bufferSize = options.bufferSize > 0 ? options.bufferSize : DEFAULT_DOWNLOAD_BUFFER_SIZE;
   if (options.stageAsPart && !DownloadFileSwap::recover(destPath)) return FILE_ERROR;
@@ -637,6 +669,15 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   if (result != OK) {
     LOG_ERR("HTTP", "Transfer failed: error=%d downloaded=%zu expected=%zu preservePartial=%d resumePartial=%d",
             static_cast<int>(result), sink.downloaded, sink.total, options.preservePartial, options.resumePartial);
+#ifndef SIMULATOR
+    // A card that filled up and an I/O error both end as a failed write. The used bytes
+    // can be up to 20 seconds old, which is close enough to tell them apart.
+    if (result == FILE_ERROR) {
+      LOG_ERR("HTTP", "SD card after the failed write: %llu of %llu bytes used",
+              static_cast<unsigned long long>(Storage.usedBytes()),
+              static_cast<unsigned long long>(Storage.totalBytes()));
+    }
+#endif
     if (result == ABORTED || !options.preservePartial) {
       Storage.remove(writePath.c_str());
     }

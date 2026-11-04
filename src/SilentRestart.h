@@ -22,6 +22,10 @@ enum class NetworkBootTarget : uint32_t {
   // browsing has not fragmented. What to fetch, and the listing to return to, wait
   // on the SD card (BookOrbitCatalogListCache::saveDownloadResume()).
   BOOKORBIT_DOWNLOAD = 10,
+  // The BookOrbit catalog itself on the X3 and X4, as OPDS has its own boot: every
+  // listing it loads is a TLS session that needs a 16 KB record buffer in one block,
+  // which the rest of the app's heap no longer has after a few pages (issue #96).
+  BOOKORBIT_CATALOG = 11,
 };
 
 // BOOKORBIT_SYNC payload: bit 16 set means bits 0-15 carry the paragraph index of the
@@ -58,6 +62,7 @@ constexpr bool isNetworkBootTargetValue(const uint32_t value) {
     case NetworkBootTarget::BOOKORBIT_SYNC:
     case NetworkBootTarget::BOOKORBIT_SLEEP_SYNC:
     case NetworkBootTarget::BOOKORBIT_DOWNLOAD:
+    case NetworkBootTarget::BOOKORBIT_CATALOG:
       return true;
   }
   return false;
@@ -71,7 +76,8 @@ static_assert(isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::MANAGE_FONTS)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SYNC)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SLEEP_SYNC)) &&
-                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_DOWNLOAD)),
+                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_DOWNLOAD)) &&
+                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_CATALOG)),
               "Every network boot target must pass RTC target validation");
 
 void silentRestart();                                            // home screen

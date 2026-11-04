@@ -17,14 +17,17 @@ struct BookOrbitDownloadResume {
   std::string path;  // SD destination, already resolved from the book's detail
   BookOrbitBookQuery listQuery;
   std::string listTitle;
-  int listPage = 1;
+  int listPage = 1;  // the last page the listing had in memory
   bool booksFromFacet = false;
+  // Rows counted from the start of the listing, not from the first row in memory.
   int selectorIndex = 0;
   int topIndex = 0;
-  // The facet listing Back returns to when booksFromFacet is set.
+  // The facet listing Back returns to when booksFromFacet is set, and its row.
   std::string facetSectionId;
   std::string facetTitle;
   int facetPage = 1;
+  int facetSelectorIndex = 0;
+  int facetTopIndex = 0;
 };
 
 namespace BookOrbitCatalogListCache {

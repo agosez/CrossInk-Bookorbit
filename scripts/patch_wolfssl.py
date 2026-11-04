@@ -59,20 +59,57 @@ SHRINK_PATCHED = f"""    {SHRINK_MARKER}
 env.Append(CPPDEFINES=["FREEINK_WOLFSSL_RETAIN_INPUT_BUFFER"])
 
 
-def patch_input_buffer_shrink(path: Path) -> None:
+# A retained buffer still has to grow when a larger record arrives, and it used
+# to hold its old block while allocating the new one. Go's crypto/tls (Caddy,
+# Traefik...) ignores max_fragment_length and grows its records 1186 bytes at a
+# time up to 16 KB, so a transfer made a dozen such allocations, each larger than
+# any hole the previous ones left, and the last failed about 100 KB in, on a heap
+# that had 70 KB in one block before the handshake (issue #96). Release the old
+# block first when nothing has to be carried over, and let the app ask for a full
+# record the first time, while that block is still whole: it knows which requests
+# are worth the memory (HttpDownloader's DownloadOptions::largeBody).
+GROW_MARKER = "/* CrossInk: reach a full record in one input buffer allocation */"
+GROW_ORIGINAL = """    tmp = (byte*)XMALLOC(size + usedLength + align,
+                             ssl->heap, DYNAMIC_TYPE_IN_BUFFER);
+    WOLFSSL_MSG("growing input buffer");
+"""
+GROW_PATCHED = f"""    {GROW_MARKER}
+#if defined(FREEINK_WOLFSSL_RETAIN_INPUT_BUFFER)
+    tmp = NULL;
+    /* With nothing to carry over, the old block can merge with its neighbours. */
+    if (usedLength == 0 && ssl->buffers.inputBuffer.dynamicFlag)
+        ShrinkInputBuffer(ssl, FORCED_FREE);
+    if (size + usedLength < FREEINK_WOLFSSL_FULL_RECORD_BUFFER) {{
+        extern int freeinkWolfsslWantsFullRecordBuffer(void);
+        if (freeinkWolfsslWantsFullRecordBuffer()) {{
+            tmp = (byte*)XMALLOC(FREEINK_WOLFSSL_FULL_RECORD_BUFFER + align,
+                                 ssl->heap, DYNAMIC_TYPE_IN_BUFFER);
+            if (tmp != NULL)
+                size = FREEINK_WOLFSSL_FULL_RECORD_BUFFER - usedLength;
+        }}
+    }}
+    if (tmp == NULL)
+#endif
+{GROW_ORIGINAL}"""
+# MAX_RECORD_SIZE plus TLS 1.3's largest record expansion (RFC 8446, section 5.2).
+env.Append(CPPDEFINES=[("FREEINK_WOLFSSL_FULL_RECORD_BUFFER", 16640)])
+
+
+def patch_once(path: Path, marker: str, original: str, patched: str, description: str) -> None:
     text = path.read_text()
-    if SHRINK_MARKER in text:
-        if text.count(SHRINK_PATCHED) != 1:
-            raise RuntimeError(f"Corrupt wolfSSL input buffer patch in {path}")
+    if marker in text:
+        if text.count(patched) != 1:
+            raise RuntimeError(f"Corrupt wolfSSL {description} patch in {path}")
         return
-    if text.count(SHRINK_ORIGINAL) != 1:
-        raise RuntimeError(f"Unsupported wolfSSL ShrinkInputBuffer in {path}; refusing an unverified patch")
-    path.write_text(text.replace(SHRINK_ORIGINAL, SHRINK_PATCHED, 1))
-    print(f"Patched wolfSSL input buffer: {path.relative_to(PROJECT_DIR)}")
+    if text.count(original) != 1:
+        raise RuntimeError(f"Unsupported wolfSSL {description} code in {path}; refusing an unverified patch")
+    path.write_text(text.replace(original, patched, 1))
+    print(f"Patched wolfSSL {description}: {path.relative_to(PROJECT_DIR)}")
 
 
 for settings in PROJECT_DIR.glob(".pio/libdeps/*/Arduino-wolfSSL/src/user_settings.h"):
     patch_user_settings(settings)
 
 for internal in PROJECT_DIR.glob(".pio/libdeps/*/Arduino-wolfSSL/src/src/internal.c"):
-    patch_input_buffer_shrink(internal)
+    patch_once(internal, SHRINK_MARKER, SHRINK_ORIGINAL, SHRINK_PATCHED, "input buffer shrink")
+    patch_once(internal, GROW_MARKER, GROW_ORIGINAL, GROW_PATCHED, "input buffer growth")

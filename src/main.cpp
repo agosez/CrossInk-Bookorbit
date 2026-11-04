@@ -1679,6 +1679,7 @@ void setup() {
     if (snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SYNC) ||
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SLEEP_SYNC) ||
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_DOWNLOAD) ||
+        snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_CATALOG) ||
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::FILE_TRANSFER)) {
       BOOKORBIT_STORE.loadFromFile();
     }
@@ -1852,7 +1853,10 @@ void setup() {
         launched = startBookOrbitSleepSync(snapshotPayload);
         break;
       case NetworkBootTarget::BOOKORBIT_DOWNLOAD:
-        launched = activityManager.goToBookOrbitCatalog(/*resumeDownload=*/true);
+        launched = activityManager.goToBookOrbitCatalog(/*networkBootReady=*/true, /*resumeDownload=*/true);
+        break;
+      case NetworkBootTarget::BOOKORBIT_CATALOG:
+        launched = activityManager.goToBookOrbitCatalog(/*networkBootReady=*/true);
         break;
       case NetworkBootTarget::KOREADER_AUTH: {
 #if CROSSINK_APP_CAP_KOREADER_SYNC

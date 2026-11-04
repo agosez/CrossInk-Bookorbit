@@ -154,9 +154,11 @@ class ActivityManager {
   void goToLibrary();
   void goToBrowser();
   bool goToOpdsServer(uint32_t serverIndex, bool networkBootReady = false);
-  // resumeDownload: the BOOKORBIT_DOWNLOAD network boot, running the download the
-  // catalog restarted for. False only when the browser could not be allocated.
-  bool goToBookOrbitCatalog(bool resumeDownload = false);
+  // networkBootReady: called from the catalog's own minimal network boot; otherwise the
+  // X3 and X4 restart into one first. resumeDownload: the BOOKORBIT_DOWNLOAD boot, running
+  // the download the catalog restarted for. False only when the browser could not be
+  // allocated.
+  bool goToBookOrbitCatalog(bool networkBootReady = false, bool resumeDownload = false);
   void goToBookOrbitAuth();
   void goToReader(std::string path, bool suppressBackRelease = false, bool allowFastInitialRefresh = false,
                   bool cleanImageBaseOnEntry = false);

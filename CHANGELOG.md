@@ -5,6 +5,19 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.6.1.
+
+### Fixed
+
+- Downloading a book from the BookOrbit catalog or an OPDS server no longer fails after about 100 KB with "Download failed" on the X3 and X4 when the server sits behind Caddy, Traefik or another proxy written in Go. These servers start with small pieces of secure data and send larger ones as the transfer goes on, and the reader made room for each new size until no large enough block of memory was left. It now sets aside room for the largest piece as the connection opens ([#96](https://github.com/agosez/CrossInk-Bookorbit/issues/96)).
+- Browsing past the second page of a BookOrbit catalog listing, or opening a book found there, no longer fails with "Could not reach BookOrbit" on the X3 and X4. Every page shown used to stay in memory until too little was left for a secure connection. The catalog now keeps only the pages around the one on screen and reloads the others from the SD card, and on the X3 and X4 it opens after a quick restart, as the OPDS browser does ([#96](https://github.com/agosez/CrossInk-Bookorbit/issues/96)).
+
+### Changed
+
+- Back from a book list opened from Authors, Series, Collections, Libraries or SmartScopes returns to the entry you opened it from, instead of the top of that list.
+
 ## [v1.6.1+bookorbit.4] - 2026-10-30
 
 Based on CrossInk v1.6.1.
