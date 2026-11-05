@@ -1,3 +1,4 @@
 # This fork's own icons, kept out of upstream's manifests so their headers never conflict.
 # python3 scripts/generate_icons.py --library lucide --manifest src/components/icons/bookOrbitIcons.manifest --sizes 32 --out src/components/icons/bookOrbitIcons.h
 bookorbit = orbit
+list-filter = list-filter

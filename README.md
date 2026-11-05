@@ -190,6 +190,7 @@ The root list contains:
 | Recently added / Continue reading / All books | Your server's own sections                                                                                                                          |
 | **Authors** / **Series**                      | Paged lists with a book count per entry; pick one to see its books (series are listed in series order)                                              |
 | **Collections**                               | Your server's collections, with a book count per entry; pick one to see its books                                                                   |
+| **Want to Read**                              | The books you most recently marked as want to read, when your server offers that shelf                                                             |
 | **Search**                                    | Free-text search of your library                                                                                                                    |
 | **On device**                                 | Everything downloaded from the catalog, wherever it was filed, plus every EPUB in the download folder, the SD card root and `/Read` — works offline |
 | **In progress**                               | Recent books you haven't finished yet — works offline                                                                                               |
@@ -197,6 +198,17 @@ The root list contains:
 In a server book list, **Confirm** downloads the book into the download folder configured in the BookOrbit settings (the SD card root by default). A download that gets interrupted resumes automatically on retry, and **Back** cancels it. Books already present on the device are marked with a dot at the end of the line, so you can tell at a glance what is worth downloading.
 
 The file is named by **your server's KOReader file naming template** — BookOrbit's _Settings → Koreader → File Naming_, the same template its own KOReader plugin follows — so a book can land inside a series folder, for instance. BookOrbit resolves the template and tells the device where the file belongs; a per-device override set on the server is honoured too, and any folder it asks for is created under your download folder. If your account has no template, BookOrbit's default applies, which files books under `Series/` and `Standalone/`. Books downloaded before this behaviur existed are left where they are.
+
+A server book list (a root section, the books of an author, series, collection, library or SmartScope, or search results) can be sorted and filtered, as the Library is sorted:
+
+- **Sort** — date added, title, author (by last name), recently read or series. The first row of the picker flips the direction (A-Z or Z-A); a newly picked order starts in its natural direction, newest first for dates.
+- **Filter** — all books, or only those that are unread, being read or finished on your BookOrbit account. The header then names the filter, and its count is the number of matching books.
+
+On the X3 and X4, **Left** opens Sort and **Right** opens Filter while **Up** and **Down** move through the list, as in the Library. On touch devices, the two buttons at the right of the header open them. Your server does the sorting and filtering, so a long list keeps paging exactly. The choice applies to the list you are in; opening a section again shows it in its own order.
+
+When the Library's **List View** is **Expanded**, a book list is split into sections the way the Library splits its own: by first letter when sorted by title or author (where your server ranks it, by the author's last name), by day when sorted by date added, and by series when sorted by series. The second row of the Sort picker switches the List View between Expanded and Compact without leaving the catalog; it is the Library's setting, so the Library follows.
+
+**Want to Read** lists the books you most recently marked as want to read in BookOrbit: the shelf BookOrbit's own KOReader plugin shows, a dozen books at most, in the order you marked them. It appears after the server's sections when your server offers that shelf. BookOrbit's catalog cannot filter a whole list by that status, so it is a shelf rather than a filter choice.
 
 In **On device** and **In progress**, Confirm opens the book in the reader instead of downloading it.
 

@@ -16,6 +16,8 @@ struct BookOrbitDownloadResume {
   std::string title;
   std::string path;  // SD destination, already resolved from the book's detail
   BookOrbitBookQuery listQuery;
+  // The read-status filter the listing opened with, before the user changed it.
+  std::string listDefaultReadStatus;
   std::string listTitle;
   int listPage = 1;  // the last page the listing had in memory
   bool booksFromFacet = false;

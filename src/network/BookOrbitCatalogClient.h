@@ -31,6 +31,17 @@ struct BookOrbitCatalogBook {
   int64_t id = 0;
   std::string title;
   std::string author;  // first author only, for compact list display
+  // What the listing's sort groups the book by, fetched only for the sort that needs it:
+  // the series name under the series sort, and when it was added (UTC epoch seconds, 0
+  // unknown) under the date-added sort.
+  std::string series;
+  uint32_t addedAt = 0;
+};
+
+/** Where a letter starts in a listing sorted by title or author, as the server ranks it. */
+struct BookOrbitLetterBucket {
+  char letter = '#';  // 'A' to 'Z' with accents folded, '#' for anything else
+  int row = 0;        // the letter's first row, counted from the start of the listing
 };
 
 /** One entry in a drill-down facet listing (an author, a series or a collection). */
@@ -50,8 +61,12 @@ struct BookOrbitFacetPage {
 
 /** Filters for a book listing request; empty fields are omitted from the query. */
 struct BookOrbitBookQuery {
-  std::string sort;          // BookOrbit sort id (e.g. "recently_added", "title", "series")
-  std::string readStatus;    // read-status filter ("reading" for Continue reading)
+  std::string sort;        // BookOrbit sort id (e.g. "recently_added", "title", "series")
+  std::string order;       // "asc" or "desc"; empty = the sort's natural direction
+  std::string readStatus;  // read-status filter: "unread", "reading" or "finished"
+  // A dashboard shelf ("want-to-read") listed instead of the books endpoint: at most a
+  // dozen books, in the server's order, which no other field applies to.
+  std::string shelf;
   std::string query;         // free-text search
   std::string author;        // author filter (facet entry id)
   std::string seriesId;      // numeric series filter (preferred when present)
@@ -75,6 +90,8 @@ struct BookOrbitBookPage {
   int page = 1;
   int total = 0;
   int pageSize = 0;
+  // The whole listing's letters, in its order: page 1 of a title or author sort only.
+  std::vector<BookOrbitLetterBucket> letters;
 };
 
 /**
@@ -92,6 +109,9 @@ struct BookOrbitCatalogCounts {
   int series = -1;
   int collections = -1;
   int smartScopes = -1;
+  // EPUBs on the dashboard's want-to-read shelf (the dozen most recently marked); -1 when
+  // the server has no such shelf.
+  int wantToRead = -1;
 };
 
 /**
@@ -112,6 +132,9 @@ struct BookOrbitCatalogCounts {
 class BookOrbitCatalogClient {
  public:
   static constexpr int PAGE_SIZE = 20;
+  // The dashboard shelf of books marked "want to read", which BookOrbit's KOReader plugin
+  // shows; the catalog lists it as a root section of the same id.
+  static constexpr char WANT_TO_READ_SHELF[] = "want-to-read";
 
   // True when the last failed fetch reached a server but got a non-catalog reply
   // (HTML page, invalid JSON...) — typically a BookOrbit version without the
@@ -136,7 +159,8 @@ class BookOrbitCatalogClient {
 
   /**
    * The listing query behind a root book section ("recent", "continue-reading",
-   * "all-books"), mirroring the booksHref the server gives each of them.
+   * "all-books"), mirroring the booksHref the server gives each of them, or the
+   * want-to-read shelf.
    */
   static BookOrbitBookQuery sectionBookQuery(const std::string& sectionId);
 

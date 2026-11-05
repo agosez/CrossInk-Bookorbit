@@ -74,12 +74,6 @@ bool hasValidGridThumb(const std::string& path, const int width, const int heigh
   file.close();
   return valid;
 }
-
-int headerControlRightInset() {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  // Inline battery themes need a separate lane for the options button.
-  return metrics.headerBatteryDetached || metrics.headerBatterySide == 1 ? 10 : metrics.batteryWidth + 80;
-}
 }  // namespace
 
 LibraryActivity::LibraryActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -1165,7 +1159,8 @@ void LibraryActivity::buildListScreen(UiApp::ScreenType& screen) {
   // Every header icon owns a 44px touch box, with 10px of clearance.
   const int16_t controlSize = HEADER_CONTROL_SIZE;
   const auto header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
-  const int16_t right = static_cast<int16_t>(renderer.getScreenWidth() - bounds[1] - headerControlRightInset());
+  const int16_t right =
+      static_cast<int16_t>(renderer.getScreenWidth() - bounds[1] - TouchHeaderBackButton::controlRightInset());
   if (mappedInput.hasTouchHardware()) {
     fui::ButtonProps action;
     action.action = ACTION_CONTROL;
@@ -1420,8 +1415,9 @@ void LibraryActivity::render(RenderLock&&) {
     renderer.clearScreen();
     const auto header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
     if (mappedInput.hasTouchHardware())
-      TouchHeaderBackButton::draw(renderer, uiTarget, header, tr(STR_LIBRARY), false,
-                                  3 * HEADER_CONTROL_SIZE + 2 * HEADER_CONTROL_GAP + headerControlRightInset() + 10);
+      TouchHeaderBackButton::draw(
+          renderer, uiTarget, header, tr(STR_LIBRARY), false,
+          3 * HEADER_CONTROL_SIZE + 2 * HEADER_CONTROL_GAP + TouchHeaderBackButton::controlRightInset() + 10);
     else
       GUI.drawHeader(renderer, header, tr(STR_LIBRARY));
     app.render();

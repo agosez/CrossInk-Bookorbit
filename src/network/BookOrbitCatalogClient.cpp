@@ -6,12 +6,15 @@
 #endif
 #include <HalStorage.h>
 #include <Logging.h>
+#include <strings.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 
 #include "BookOrbitCredentialStore.h"
 #include "BookOrbitSyncClient.h"
+#include "DaysFromCivil.h"
 
 bool BookOrbitCatalogClient::lastFetchBadResponse = false;
 
@@ -190,11 +193,20 @@ namespace {
 // the server drops audiobook-only and other non-EPUB records: it filters before
 // paginating, which keeps pages full and `total` accurate, and keeps mixed-format
 // records that include an EPUB.
-std::string booksUrl(const BookOrbitBookQuery& query, const int page, const int size) {
+// withLetters asks for the listing's letter buckets, which the server ranks over the whole
+// listing: only worth it on a title or author sort's first page.
+std::string booksUrl(const BookOrbitBookQuery& query, const int page, const int size, const bool withLetters = false) {
+  if (!query.shelf.empty()) {
+    return BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/dashboard/sections/" + urlEncode(query.shelf);
+  }
   std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/books?page=" + std::to_string(page) +
                     "&size=" + std::to_string(size) + "&format=epub";
+  if (withLetters) url += "&buckets=true";
   if (!query.sort.empty()) {
     url += "&sort=" + urlEncode(query.sort);
+  }
+  if (!query.order.empty()) {
+    url += "&order=" + urlEncode(query.order);
   }
   if (!query.readStatus.empty()) {
     url += "&readStatus=" + urlEncode(query.readStatus);
@@ -223,6 +235,35 @@ std::string booksUrl(const BookOrbitBookQuery& query, const int page, const int 
   return url;
 }
 
+bool listsEpub(JsonArrayConst formats) {
+  for (JsonVariantConst format : formats) {
+    const char* name = format.as<const char*>();
+    if (name && strcasecmp(name, "epub") == 0) return true;
+  }
+  return false;
+}
+
+// "2026-11-04T23:13:15.399Z" as UTC epoch seconds; 0 when it does not read as one.
+uint32_t parseUtcTimestamp(const char* text) {
+  int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+  if (!text || sscanf(text, "%4d-%2d-%2dT%2d:%2d:%2d", &year, &month, &day, &hour, &minute, &second) != 6) return 0;
+  if (year < 1970 || month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59) return 0;
+  const int32_t days = daysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day));
+  return static_cast<uint32_t>(days) * 86400u + static_cast<uint32_t>(hour * 3600 + minute * 60 + second);
+}
+
+// The book fields every listing row carries; the ones a sort needs come from the caller.
+BookOrbitCatalogBook bookFromItem(JsonObjectConst item) {
+  BookOrbitCatalogBook book;
+  book.id = item["id"] | 0;
+  book.title = std::string(item["title"] | "");
+  JsonArrayConst authors = item["authors"].as<JsonArrayConst>();
+  if (!authors.isNull() && authors.size() > 0) {
+    book.author = std::string(authors[0].as<const char*>() ? authors[0].as<const char*>() : "");
+  }
+  return book;
+}
+
 // The total of a books listing, read from a single-item page. -1 on failure.
 int fetchBookTotal(const BookOrbitBookQuery& query) {
   JsonDocument filter;
@@ -244,6 +285,8 @@ BookOrbitBookQuery BookOrbitCatalogClient::sectionBookQuery(const std::string& s
     query.readStatus = "reading";
   } else if (sectionId == "all-books") {
     query.sort = "title";
+  } else if (sectionId == WANT_TO_READ_SHELF) {
+    query.shelf = WANT_TO_READ_SHELF;
   } else {
     query.sort = "recently_added";
   }
@@ -254,13 +297,17 @@ bool BookOrbitCatalogClient::fetchCatalogCounts(BookOrbitCatalogCounts& outCount
   outCounts = BookOrbitCatalogCounts{};
   if (!BOOKORBIT_STORE.hasCredentials()) return false;
 
-  const std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/dashboard";
+  // The want-to-read shelf rides along with the dashboard. A server without dashboard
+  // sections ignores the parameter, and the missing shelf hides the root's entry for it.
+  const std::string url =
+      BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/dashboard?section=" + std::string(WANT_TO_READ_SHELF);
   JsonDocument filter;
   filter["browseCounts"]["libraries"] = true;
   filter["browseCounts"]["authors"] = true;
   filter["browseCounts"]["series"] = true;
   filter["browseCounts"]["collections"] = true;
   filter["browseCounts"]["smartScopes"] = true;
+  filter["section"]["books"][0]["formats"] = true;
   JsonDocument doc;
   if (!fetchJson(url, filter, doc)) return false;
 
@@ -269,6 +316,13 @@ bool BookOrbitCatalogClient::fetchCatalogCounts(BookOrbitCatalogCounts& outCount
   outCounts.series = doc["browseCounts"]["series"] | -1;
   outCounts.collections = doc["browseCounts"]["collections"] | -1;
   outCounts.smartScopes = doc["browseCounts"]["smartScopes"] | -1;
+  JsonArrayConst shelf = doc["section"]["books"].as<JsonArrayConst>();
+  if (!shelf.isNull()) {
+    outCounts.wantToRead = 0;
+    for (JsonObjectConst book : shelf) {
+      if (listsEpub(book["formats"].as<JsonArrayConst>())) outCounts.wantToRead++;
+    }
+  }
   // Free the dashboard document before the next two requests' TLS sessions.
   doc.clear();
 
@@ -282,7 +336,30 @@ bool BookOrbitCatalogClient::fetchBooks(const BookOrbitBookQuery& query, const i
   outPage = BookOrbitBookPage{};
   if (!BOOKORBIT_STORE.hasCredentials()) return false;
 
-  const std::string url = booksUrl(query, page, PAGE_SIZE);
+  if (!query.shelf.empty()) {
+    // A shelf is one short list in the server's order, and it is not narrowed to EPUBs.
+    JsonDocument filter;
+    filter["section"]["books"][0]["id"] = true;
+    filter["section"]["books"][0]["title"] = true;
+    filter["section"]["books"][0]["authors"] = true;
+    filter["section"]["books"][0]["formats"] = true;
+    JsonDocument doc;
+    if (!fetchJson(booksUrl(query, page, PAGE_SIZE), filter, doc)) return false;
+    JsonArrayConst books = doc["section"]["books"].as<JsonArrayConst>();
+    outPage.books.reserve(books.size());
+    for (JsonObjectConst item : books) {
+      if (listsEpub(item["formats"].as<JsonArrayConst>())) outPage.books.push_back(bookFromItem(item));
+    }
+    outPage.total = static_cast<int>(outPage.books.size());
+    outPage.pageSize = std::max(outPage.total, 1);
+    return true;
+  }
+
+  const std::string sort = query.sort.empty() ? "recently_added" : query.sort;
+  const bool bySeries = sort == "series";
+  const bool byDateAdded = sort == "recently_added";
+  const bool withLetters = page == 1 && (sort == "title" || sort == "author");
+  const std::string url = booksUrl(query, page, PAGE_SIZE, withLetters);
 
   JsonDocument filter;
   filter["page"] = true;
@@ -291,6 +368,13 @@ bool BookOrbitCatalogClient::fetchBooks(const BookOrbitBookQuery& query, const i
   filter["items"][0]["id"] = true;
   filter["items"][0]["title"] = true;
   filter["items"][0]["authors"] = true;
+  // Only what the sort's list sections need: a series name per row costs heap.
+  if (bySeries) filter["items"][0]["seriesName"] = true;
+  if (byDateAdded) filter["items"][0]["addedAt"] = true;
+  if (withLetters) {
+    filter["buckets"][0]["key"] = true;
+    filter["buckets"][0]["index"] = true;
+  }
   JsonDocument doc;
   if (!fetchJson(url, filter, doc)) return false;
 
@@ -300,14 +384,16 @@ bool BookOrbitCatalogClient::fetchBooks(const BookOrbitBookQuery& query, const i
 
   outPage.books.reserve(doc["items"].size());
   for (JsonObjectConst item : doc["items"].as<JsonArrayConst>()) {
-    BookOrbitCatalogBook book;
-    book.id = item["id"] | 0;
-    book.title = std::string(item["title"] | "");
-    JsonArrayConst authors = item["authors"].as<JsonArrayConst>();
-    if (!authors.isNull() && authors.size() > 0) {
-      book.author = std::string(authors[0].as<const char*>() ? authors[0].as<const char*>() : "");
-    }
+    BookOrbitCatalogBook book = bookFromItem(item);
+    if (bySeries) book.series = std::string(item["seriesName"] | "");
+    if (byDateAdded) book.addedAt = parseUtcTimestamp(item["addedAt"] | "");
     outPage.books.push_back(std::move(book));
+  }
+  JsonArrayConst letters = doc["buckets"].as<JsonArrayConst>();
+  outPage.letters.reserve(letters.size());
+  for (JsonObjectConst bucket : letters) {
+    const char* key = bucket["key"] | "#";
+    outPage.letters.push_back({key[0] ? key[0] : '#', bucket["index"] | 0});
   }
   return true;
 }

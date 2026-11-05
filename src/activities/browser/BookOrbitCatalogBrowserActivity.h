@@ -2,6 +2,7 @@
 #include <FreeInkApp.h>
 #include <FreeInkUIGfxRenderer.h>
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -11,15 +12,18 @@
 #include "network/BookOrbitCatalogClient.h"
 #include "util/ButtonNavigator.h"
 
+class OptionPopup;
+
 /**
  * Activity for browsing and downloading books from BookOrbit's catalog.
  *
  * Simplified compared to BookOrbit's own KOReader plugin: three navigation levels
  * (root sections -> optional authors/series/collections/libraries/smart-scopes
  * facet list -> a paged book list or a search), with each root section badged
- * with its entry count, the way the plugin badges its Browse tiles. Covers,
- * ratings and read-status editing remain out of scope (see SCOPE.md discussion
- * for BookOrbit sync).
+ * with its entry count, the way the plugin badges its Browse tiles. A server book
+ * list can be sorted and filtered by read status; the server does both, so paging
+ * stays exact. Covers, ratings and read-status editing remain out of scope (see
+ * SCOPE.md discussion for BookOrbit sync).
  */
 class BookOrbitCatalogBrowserActivity final : public Activity {
  public:
@@ -31,13 +35,19 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   struct Entry {
     EntryType type;
     std::string title;
-    std::string subtitle;   // author, for BOOK/LOCAL_BOOK entries
-    std::string sectionId;  // section id (SECTION/FACET_SECTION/LOCAL_SECTION) or facet entry id (FACET)
-    std::string seriesId;   // numeric series id, for FACET entries of the series facet
-    std::string path;       // SD path: LOCAL_BOOK entries, and BOOK entries already on the device
+    std::string subtitle;  // author, for BOOK/LOCAL_BOOK entries
+    // Section id (SECTION/FACET_SECTION/LOCAL_SECTION), facet entry id (FACET), or for a
+    // BOOK the list section its listing's sort files it under (its series, the day it was
+    // added), empty when that sort has none.
+    std::string sectionId;
+    std::string seriesId;  // numeric series id, for FACET entries of the series facet
+    std::string path;      // SD path: LOCAL_BOOK entries, and BOOK entries already on the device
     int64_t bookId = 0;
     bool onDevice = false;  // BOOK entries: a matching file already exists on the device (at `path`)
     uint16_t page = 0;      // server page the row came from; 0 for the root and the on-device lists
+    // Length of `title` before its " (count)" badge, 0 when it has none. A listing opened
+    // from the row is titled without it: its header counts what the listing holds.
+    uint16_t badgeAt = 0;
   };
 
   // networkBoot: launched by a minimal network boot (BOOKORBIT_CATALOG or
@@ -46,6 +56,7 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   // restart (see downloadBook()).
   explicit BookOrbitCatalogBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                            bool networkBoot = false, bool resumeDownload = false);
+  ~BookOrbitCatalogBrowserActivity() override;  // defined where OptionPopup is complete
 
   void onEnter() override;
   void onExit() override;
@@ -55,8 +66,14 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
  private:
   // FreeInkApp hosts the entry list (themed rows, touch routing); the compact
   // header keeps its own painter so the catalog's chrome stays as it was.
-  // 24 interaction slots cover the densest page at the smallest UI scale.
-  using UiApp = freeink::ui::FreeInkApp<24, 4>;
+  // 24 interaction slots cover the densest page at the smallest UI scale, plus the
+  // header's sort and filter controls on touch builds. Button-only builds keep 24: the
+  // FreeInkApp<24> code is shared with other screens, a second size would cost ~7 KB.
+  using UiApp = freeink::ui::FreeInkApp<CROSSINK_APP_CAP_TOUCH ? 26 : 24, 4>;
+
+  // The two pickers of a server book list. Sort and Left on button-only devices, Filter
+  // and Right; a header control each on touch devices.
+  enum class ListOption : uint8_t { Sort, Filter };
 
   // The transfer a BOOKORBIT_DOWNLOAD boot runs once Wi-Fi is up; fileId 0 when none.
   struct PendingDownload {
@@ -97,13 +114,19 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
 
   // Current book-list context, used to page and to return to the same list after a download.
   BookOrbitBookQuery listQuery;
-  std::string listTitle;
+  // The read-status filter the listing opened with ("reading" for Continue reading): the
+  // header names the filter only once the user picked another.
+  std::string listDefaultReadStatus;
+  std::string listTitle;  // without a count: the header adds listTotal
   int listPage = 1;
   int listTotal = 0;
   int listPageSize = BookOrbitCatalogClient::PAGE_SIZE;
   // Set when the current book list was opened from a facet entry, so Back returns
   // to the facet listing instead of the root.
   bool booksFromFacet = false;
+  // The book list is an on-device one (On device, In progress): no server query behind
+  // it, so nothing to sort or filter.
+  bool listIsLocal = false;
   // Set while the listing is freed for a download's heap headroom, cleared once a
   // listing loads again. Distinguishes "rebuild the list Back should return to"
   // from a listing that genuinely loaded empty, where Back must navigate up
@@ -131,10 +154,67 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   int visibleRows = 1;  // rows per page at the current scale; set by the screen builder
   int topIndex = 0;     // viewport scroll position, decoupled from the selection
 
+  // The sort or filter picker while it is open. Allocated for the pick and freed
+  // right after, before the listing it changes is fetched: its strings and layout
+  // must not sit in the heap the TLS session is about to need.
+  std::unique_ptr<OptionPopup> listOptions;
+  ListOption openListOption = ListOption::Sort;
+  int pendingListChoice = -1;  // the row picked, applied once the picker has closed
+
+  // Where each letter starts in a listing sorted by title or author, from its first page;
+  // none for any other listing. The heading strings stay put for the list to point at.
+  struct LetterStart {
+    int row = 0;
+    char heading[2] = {'#', '\0'};
+  };
+  static constexpr size_t MAX_LETTERS = 27;  // A to Z, and '#'
+  std::array<LetterStart, MAX_LETTERS> listLetters{};
+  size_t listLetterCount = 0;
+
+  // Section headings take room, so a screen holds fewer rows than visibleRows assumes.
+  // The render task measures how many it drew and, when the selection or the listing's
+  // end fell below the screen, draws again further down. The loop keeps owning topIndex:
+  // it takes the render's correction only for the very top and selection it rendered
+  // from (adoptRenderedViewport), never mid-walk.
+  static constexpr int MAX_RENDER_PASSES = 4;
+  freeink::ui::ListNav listMeasure;  // render task: measures rows drawn, never scrolls
+  int renderPass = 0;                // render task: 0 for a frame's first layout
+  int renderTop = 0;                 // render task: the row the frame is drawn from
+  bool renderPassAgain = false;      // render task: the frame needs a pass from renderTop
+  int renderFromTop = 0;             // render task: topIndex and selectorIndex as the
+  int renderFromSelection = 0;       //   frame started, which its correction answers
+  uint32_t listingGeneration = 0;    // bumped by startListing(), under the render lock
+  std::atomic<uint32_t> renderedListing{0};
+  std::atomic<int> renderedFromTop{-1};
+  std::atomic<int> renderedFromSelection{-1};
+  std::atomic<int> renderedTop{0};
+  std::atomic<int> renderedRows{0};
+
   static void listScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
+  static void onControlEvent(const freeink::ui::ActionEvent& event, void* user);
   void buildListScreen(UiApp::ScreenType& screen);
   void activateSelected();
+  // Opens a server book listing from a root section, a facet entry or a search.
+  void openBookListing(const BookOrbitBookQuery& query, const std::string& title, bool fromFacet);
+  bool listOptionsAvailable() const;
+  // The Library's list view setting: Expanded heads the list's sections, as it does there.
+  bool sectionsShown() const;
+  // The heading drawn above the row at entries[index], or nullptr.
+  const char* sectionHeading(size_t index) const;
+  void setListLetters(const std::vector<BookOrbitLetterBucket>& letters);
+  // Takes the top the last frame was really drawn from, when it was drawn for the
+  // current top and selection (see listMeasure).
+  void adoptRenderedViewport();
+  // Rows a screen holds from topIndex: what the last frame drew, when sections made that
+  // fewer than visibleRows.
+  int screenRows() const;
+  void showListOptions(ListOption option);
+  // Runs the picker; true while it holds the input.
+  bool handleListOptions();
+  void applyListChoice(ListOption option, int choice);
+  void reloadListing(const BookOrbitBookQuery& query);
+  std::string headerTitle() const;
   void openLocalBook(const std::string& path);
   void showBookActionMenu(bool ignoreInitialConfirmRelease);
   void promptDeleteBook(int row);

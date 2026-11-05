@@ -1,10 +1,12 @@
 #include "HeaderDate.h"
 
+#include <DateFormatting.h>
 #include <GfxRenderer.h>
 #include <HalClock.h>
 
 #include <algorithm>
 #include <cstddef>
+#include <ctime>
 
 #include "CrossPointSettings.h"
 #include "components/themes/BaseTheme.h"
@@ -58,6 +60,17 @@ bool formatHeaderDateImpl(char* buf, const size_t len) {
 }  // namespace
 
 bool formatHeaderDateText(char* buffer, const size_t length) { return formatHeaderDateImpl(buffer, length); }
+
+bool formatLocalDateText(char* buffer, const size_t length, const uint32_t utcEpochSeconds) {
+  // The offset is in quarter-hours, biased by 48 (48 = UTC+0), as HalClock reads it.
+  const time_t local = static_cast<time_t>(utcEpochSeconds) +
+                       static_cast<time_t>(static_cast<int>(SETTINGS.clockUtcOffsetQ) - 48) * 15 * 60;
+  struct tm localTm = {};
+  gmtime_r(&local, &localTm);
+  return formatDateParts(buffer, length, static_cast<uint16_t>(localTm.tm_year + 1900),
+                         static_cast<uint8_t>(localTm.tm_mon + 1), static_cast<uint8_t>(localTm.tm_mday),
+                         SETTINGS.dateFormat, dateSeparatorChar());
+}
 
 int headerDateReservedWidth(const GfxRenderer& renderer) {
   char dateBuf[32];

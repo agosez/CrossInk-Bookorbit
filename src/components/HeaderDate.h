@@ -1,11 +1,15 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 class GfxRenderer;
 struct ThemeMetrics;
 
 bool formatHeaderDateText(char* buffer, size_t length);
+// A UTC instant as the local date the status bar would show for it: the clock's UTC
+// offset, and the date format and separator settings.
+bool formatLocalDateText(char* buffer, size_t length, uint32_t utcEpochSeconds);
 int headerDateReservedWidth(const GfxRenderer& renderer);
 int headerDateLineBottomY(const GfxRenderer& renderer, const ThemeMetrics& metrics, int headerHeight = -1);
 void drawHeaderDateAtBaseline(const GfxRenderer& renderer, int pageWidth, int baselineY);

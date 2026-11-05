@@ -8,11 +8,13 @@
 #include <I18n.h>
 #include <LibraryBuilder.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <WiFi.h>
 #include <ZipFile.h>
 
 #include <algorithm>
 #include <cctype>
+#include <iterator>
 #include <utility>
 
 #include "./BookOrbitCatalogListCache.h"
@@ -32,10 +34,14 @@
 #include "activities/util/ConfirmationActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/CompactHeader.h"
+#include "components/HeaderDate.h"
+#include "components/OptionPopup.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
+#include "components/icons/bookOrbitIcons.h"
+#include "components/icons/libraryIcons.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
@@ -45,7 +51,105 @@
 namespace fui = freeink::ui;
 
 namespace {
+using Entry = BookOrbitCatalogBrowserActivity::Entry;
+
 constexpr fui::ActionId ACTION_ROW = 1;
+constexpr fui::ActionId ACTION_CONTROL = 2;
+// A server book list's header controls on touch devices, sized and spaced like the Library's.
+constexpr int HEADER_CONTROL_SIZE = 44;
+constexpr int HEADER_CONTROL_GAP = 10;
+constexpr int16_t HEADER_CONTROL_SORT = 0;
+constexpr int16_t HEADER_CONTROL_FILTER = 1;
+
+// The Library's sort methods that BookOrbit can apply, in the Library's order. The server
+// sorts authors by last name and has no first-name or genre order.
+struct SortChoice {
+  const char* id;  // BookOrbit's sort id
+  StrId label;
+  bool descendingFirst;  // the server's own direction for it: newest first for dates
+};
+constexpr SortChoice SORT_CHOICES[] = {
+    {"recently_added", StrId::STR_LIBRARY_DATE_ADDED, true},
+    {"title", StrId::STR_LIBRARY_TITLE, false},
+    {"author", StrId::STR_LIBRARY_AUTHOR_LAST_NAME, false},
+    {"recently_read", StrId::STR_BOOKORBIT_SORT_RECENTLY_READ, true},
+    {"series", StrId::STR_LIBRARY_SERIES, false},
+};
+constexpr int SORT_CHOICE_COUNT = static_cast<int>(std::size(SORT_CHOICES));
+// The sort picker's rows: the direction and the list view above a divider, then the methods.
+constexpr int SORT_ROW_DIRECTION = 0;
+constexpr int SORT_ROW_LIST_VIEW = 1;
+constexpr int SORT_ROW_FIRST_METHOD = 2;
+// What the server sorts by when a query names no sort (an author's books).
+constexpr int DEFAULT_SORT_CHOICE = 0;
+
+struct ReadStatusChoice {
+  const char* id;  // BookOrbit's readStatus filter; empty for every book
+  StrId label;
+};
+constexpr ReadStatusChoice READ_STATUS_CHOICES[] = {
+    {"", StrId::STR_BOOKORBIT_STATUS_ALL},
+    {"unread", StrId::STR_BOOKORBIT_STATUS_UNREAD},
+    {"reading", StrId::STR_BOOKORBIT_STATUS_READING},
+    {"finished", StrId::STR_BOOKORBIT_STATUS_FINISHED},
+};
+constexpr int READ_STATUS_CHOICE_COUNT = static_cast<int>(std::size(READ_STATUS_CHOICES));
+
+int sortChoiceIndex(const std::string& sort) {
+  if (sort.empty()) return DEFAULT_SORT_CHOICE;
+  for (int i = 0; i < SORT_CHOICE_COUNT; i++) {
+    if (sort == SORT_CHOICES[i].id) return i;
+  }
+  return DEFAULT_SORT_CHOICE;
+}
+
+bool sortsDescending(const BookOrbitBookQuery& query) {
+  if (!query.order.empty()) return query.order == "desc";
+  return SORT_CHOICES[sortChoiceIndex(query.sort)].descendingFirst;
+}
+
+int readStatusChoiceIndex(const std::string& readStatus) {
+  for (int i = 0; i < READ_STATUS_CHOICE_COUNT; i++) {
+    if (readStatus == READ_STATUS_CHOICES[i].id) return i;
+  }
+  return 0;
+}
+
+// A row's title without the count badge the root and facet listings give it.
+std::string titleWithoutBadge(const Entry& entry) {
+  return entry.badgeAt > 0 ? entry.title.substr(0, entry.badgeAt) : entry.title;
+}
+
+// A server book list's header controls on touch devices: the Library's, minus its refresh
+// and search. Sort, whose arrow shows the direction, then filter, right-aligned clear of
+// the battery. A template, so a button-only build, whose call site is dead, never emits it.
+template <typename Screen>
+void addListHeaderControls(Screen& screen, const GfxRenderer& renderer, const bool descending) {
+  int bounds[4]{};
+  renderer.getOrientedViewableTRBL(&bounds[0], &bounds[1], &bounds[2], &bounds[3]);
+  const Rect header = TouchHeaderBackButton::compactHeaderRect(renderer);
+  const int right = renderer.getScreenWidth() - bounds[1] - TouchHeaderBackButton::controlRightInset();
+  const auto y = static_cast<int16_t>(header.y + header.height - HEADER_CONTROL_SIZE);
+  fui::ButtonProps control;
+  control.action = ACTION_CONTROL;
+  control.inputMask = fui::InputTouch;
+  control.styles = fui::plainStyles();
+  control.icon = fui::bitmapFromIcon(descending ? icon_arrow_down_wide_narrow_32 : icon_arrow_up_narrow_wide_32);
+  control.value = HEADER_CONTROL_SORT;
+  screen.button(control, fui::Rect{static_cast<int16_t>(right - 2 * HEADER_CONTROL_SIZE - HEADER_CONTROL_GAP), y,
+                                   HEADER_CONTROL_SIZE, HEADER_CONTROL_SIZE});
+  control.icon = fui::bitmapFromIcon(icon_list_filter_32);
+  control.value = HEADER_CONTROL_FILTER;
+  screen.button(control, fui::Rect{static_cast<int16_t>(right - HEADER_CONTROL_SIZE), y, HEADER_CONTROL_SIZE,
+                                   HEADER_CONTROL_SIZE});
+}
+
+// Appends a row's " (count)" badge, remembering where the title itself ends.
+void addCountBadge(Entry& entry, const int count) {
+  entry.badgeAt = static_cast<uint16_t>(entry.title.size());
+  entry.title += " (" + std::to_string(count) + ")";
+}
+
 constexpr size_t BOOKORBIT_DOWNLOAD_BUFFER_SIZE = 2048;
 constexpr char READ_FOLDER_PREFIX[] = "/Read";
 constexpr size_t MAX_LOCAL_ENTRIES = 200;
@@ -148,6 +252,15 @@ BookOrbitCatalogBrowserActivity::BookOrbitCatalogBrowserActivity(GfxRenderer& re
       uiTarget(makeUiTarget(renderer)),
       app(uiTarget, uiTarget.deviceContext()) {}
 
+BookOrbitCatalogBrowserActivity::~BookOrbitCatalogBrowserActivity() = default;
+
+void BookOrbitCatalogBrowserActivity::onControlEvent(const fui::ActionEvent& event, void* user) {
+  auto* self = static_cast<BookOrbitCatalogBrowserActivity*>(user);
+  self->app.clearTapFlash();
+  if (!self->listOptionsAvailable()) return;
+  self->showListOptions(event.value == HEADER_CONTROL_FILTER ? ListOption::Filter : ListOption::Sort);
+}
+
 void BookOrbitCatalogBrowserActivity::onRowEvent(const fui::ActionEvent& event, void* user) {
   auto* self = static_cast<BookOrbitCatalogBrowserActivity*>(user);
   // The list was given the rows in memory, so its action values index `entries`.
@@ -175,12 +288,17 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   topIndex = 0;
   applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &BookOrbitCatalogBrowserActivity::onRowEvent, this);
+  if (mappedInput.hasTouchHardware()) app.on(ACTION_CONTROL, &BookOrbitCatalogBrowserActivity::onControlEvent, this);
   app.setScreen(&BookOrbitCatalogBrowserActivity::listScreen, this);
 
   entries.clear();
   windowStart = 0;
   selectorIndex = 0;
   navLevel = NavLevel::Root;
+  listIsLocal = false;
+  listDefaultReadStatus.clear();
+  listOptions.reset();
+  pendingListChoice = -1;
   consumeConfirm = false;
   longPressFired = false;
   errorMessage.clear();
@@ -193,6 +311,7 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   if (resumeDownload && BookOrbitCatalogListCache::takeDownloadResume(resume)) {
     navLevel = NavLevel::Books;
     listQuery = std::move(resume.listQuery);
+    listDefaultReadStatus = std::move(resume.listDefaultReadStatus);
     listTitle = std::move(resume.listTitle);
     listPage = resume.listPage;
     booksFromFacet = resume.booksFromFacet;
@@ -222,6 +341,7 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
 
 void BookOrbitCatalogBrowserActivity::onExit() {
   Activity::onExit();
+  listOptions.reset();
   entries.clear();
   BookOrbitDownloadIndex::unload();
 
@@ -316,7 +436,7 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   localInProgressCount = collectLocalBooks("in-progress", nullptr);
 
   RenderLock lock(*this);             // the render task draws the rows replaced here
-  startListing(sections.size() + 3);  // the server's sections, the two local ones, Search
+  startListing(sections.size() + 4);  // the server's sections, Want to read, the two local ones, Search
   listFreedForDownload = false;
   for (auto& section : sections) {
     Entry entry;
@@ -325,20 +445,30 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
     entry.type = isFacet ? EntryType::FACET_SECTION : EntryType::SECTION;
     entry.title = section.title;
     const int count = sectionCount(section.id);
-    if (count >= 0) {
-      entry.title += " (" + std::to_string(count) + ")";
-    }
+    if (count >= 0) addCountBadge(entry, count);
     entry.sectionId = section.id;
     entries.push_back(std::move(entry));
   }
+  // The want-to-read shelf BookOrbit's own plugin shows, which the server does not list
+  // among its sections. After them, so the rows above keep their places.
+  if (counts.wantToRead >= 0) {
+    Entry wantToRead;
+    wantToRead.type = EntryType::SECTION;
+    wantToRead.title = tr(STR_BOOKORBIT_WANT_TO_READ);
+    addCountBadge(wantToRead, counts.wantToRead);
+    wantToRead.sectionId = BookOrbitCatalogClient::WANT_TO_READ_SHELF;
+    entries.push_back(std::move(wantToRead));
+  }
   Entry onDevice;
   onDevice.type = EntryType::LOCAL_SECTION;
-  onDevice.title = std::string(tr(STR_BOOKORBIT_ON_DEVICE)) + " (" + std::to_string(localOnDeviceCount) + ")";
+  onDevice.title = tr(STR_BOOKORBIT_ON_DEVICE);
+  addCountBadge(onDevice, static_cast<int>(localOnDeviceCount));
   onDevice.sectionId = "on-device";
   entries.push_back(std::move(onDevice));
   Entry inProgress;
   inProgress.type = EntryType::LOCAL_SECTION;
-  inProgress.title = std::string(tr(STR_BOOKORBIT_IN_PROGRESS)) + " (" + std::to_string(localInProgressCount) + ")";
+  inProgress.title = tr(STR_BOOKORBIT_IN_PROGRESS);
+  addCountBadge(inProgress, static_cast<int>(localInProgressCount));
   inProgress.sectionId = "in-progress";
   entries.push_back(std::move(inProgress));
   Entry search;
@@ -462,6 +592,7 @@ void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string kind) {
   // scroll indicator would size itself on the stale server total.
   navLevel = NavLevel::Books;
   booksFromFacet = false;
+  listIsLocal = true;
   listFreedForDownload = false;
   listPage = 1;
   listTotal = static_cast<int>(entries.size());
@@ -518,9 +649,7 @@ bool BookOrbitCatalogBrowserActivity::loadFacetEntries(const std::string& sectio
     Entry& entry = entries[first + i];
     entry.type = EntryType::FACET;
     entry.title = std::move(facet.title);
-    if (facet.count > 0) {
-      entry.title += " (" + std::to_string(facet.count) + ")";
-    }
+    if (facet.count > 0) addCountBadge(entry, facet.count);
     entry.sectionId = std::move(facet.id);
     entry.seriesId = std::move(facet.seriesId);
   }
@@ -559,6 +688,7 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
   listTitle = title;
   if (load != PageLoad::Prepend) listPage = page;
   booksFromFacet = fromFacet;
+  listIsLocal = false;
 
   listTotal = result.total;
   listPageSize = result.pageSize > 0 ? result.pageSize : BookOrbitCatalogClient::PAGE_SIZE;
@@ -580,7 +710,17 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
     entry.onDevice = bookOnDevice(book.id, book.title, book.author, entry.path);
     entry.title = std::move(book.title);
     entry.subtitle = std::move(book.author);
+    // The list section the sort files the book under. The day is formatted once, here:
+    // short enough to fit the string without a heap block.
+    if (!book.series.empty()) {
+      entry.sectionId = std::move(book.series);
+    } else if (book.addedAt != 0) {
+      char day[24];
+      if (formatLocalDateText(day, sizeof(day), book.addedAt)) entry.sectionId = day;
+    }
   }
+  // The letters span the whole listing and only come with its first page.
+  if (page == 1) setListLetters(result.letters);
   logPageLoad(page, cacheHit);
   state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
@@ -616,6 +756,55 @@ void BookOrbitCatalogBrowserActivity::startListing(const size_t rows) {
   windowStart = 0;
   selectorIndex = 0;
   topIndex = 0;
+  listLetterCount = 0;
+  // What the render task measured belongs to the previous listing.
+  listingGeneration++;
+}
+
+void BookOrbitCatalogBrowserActivity::setListLetters(const std::vector<BookOrbitLetterBucket>& letters) {
+  listLetterCount = 0;
+  for (const auto& letter : letters) {
+    if (listLetterCount == MAX_LETTERS) break;
+    LetterStart& start = listLetters[listLetterCount++];
+    start.row = letter.row;
+    start.heading[0] = letter.letter;
+  }
+}
+
+bool BookOrbitCatalogBrowserActivity::sectionsShown() const {
+  return SETTINGS.libraryListExpanded != 0 && navLevel == NavLevel::Books && !listIsLocal;
+}
+
+const char* BookOrbitCatalogBrowserActivity::sectionHeading(const size_t index) const {
+  if (listLetterCount > 0) {
+    const int row = windowStart + static_cast<int>(index);
+    for (size_t i = 0; i < listLetterCount; i++) {
+      if (listLetters[i].row == row) return listLetters[i].heading;
+    }
+    return nullptr;
+  }
+  const Entry& entry = entries[index];
+  if (entry.type != EntryType::BOOK || entry.sectionId.empty()) return nullptr;
+  // The first row in memory may go on with a section that began on a page no longer held:
+  // it is headed again, which names the section the screen opens on.
+  if (index > 0 && entries[index - 1].sectionId == entry.sectionId) return nullptr;
+  return entry.sectionId.c_str();
+}
+
+void BookOrbitCatalogBrowserActivity::adoptRenderedViewport() {
+  if (renderedListing.load(std::memory_order_acquire) != listingGeneration) return;
+  if (renderedFromTop.load() != topIndex || renderedFromSelection.load() != selectorIndex) return;
+  const int top = renderedTop.load();
+  if (top >= windowStart && top < loadedEnd()) topIndex = top;
+}
+
+int BookOrbitCatalogBrowserActivity::screenRows() const {
+  const int rows = renderedRows.load();
+  if (renderedListing.load(std::memory_order_acquire) != listingGeneration || renderedTop.load() != topIndex ||
+      rows <= 0) {
+    return visibleRows;
+  }
+  return std::min(rows, visibleRows);
 }
 
 size_t BookOrbitCatalogBrowserActivity::placePageRows(const PageLoad load, const size_t count, const uint16_t page) {
@@ -819,10 +1008,142 @@ void BookOrbitCatalogBrowserActivity::performSearch(const std::string& query) {
   BookOrbitBookQuery bookQuery;
   bookQuery.sort = "title";
   bookQuery.query = query;
-  if (!loadBooks(bookQuery, query, 1, /*fromFacet=*/false, PageLoad::Open, /*allowNetwork=*/false)) {
-    showLoadingBeforeFetch();
-    loadBooks(bookQuery, query, 1, /*fromFacet=*/false);
+  openBookListing(bookQuery, query, /*fromFacet=*/false);
+}
+
+void BookOrbitCatalogBrowserActivity::openBookListing(const BookOrbitBookQuery& query, const std::string& title,
+                                                      const bool fromFacet) {
+  {
+    // Only the root and facet listings open a book listing, and their header does not
+    // read this; the lock covers a render that would.
+    RenderLock lock(*this);
+    listDefaultReadStatus = query.readStatus;
   }
+  if (!loadBooks(query, title, 1, fromFacet, PageLoad::Open, /*allowNetwork=*/false)) {
+    showLoadingBeforeFetch();
+    loadBooks(query, title, 1, fromFacet);
+  }
+}
+
+bool BookOrbitCatalogBrowserActivity::listOptionsAvailable() const {
+  // A shelf comes in the server's own order, which nothing on the request changes.
+  return state == BrowserState::BROWSING && navLevel == NavLevel::Books && !listIsLocal && listQuery.shelf.empty();
+}
+
+void BookOrbitCatalogBrowserActivity::showListOptions(const ListOption option) {
+  auto popup = makeUniqueNoThrow<OptionPopup>();
+  if (!popup) {
+    LOG_ERR("BookOrbit", "Cannot allocate the listing's %s picker", option == ListOption::Sort ? "sort" : "filter");
+    return;
+  }
+  // Only records the pick: applying it fetches a listing, which must not run inside
+  // the picker's input handling (it holds the render lock).
+  auto onPick = [this](const int choice) { pendingListChoice = choice; };
+  if (option == ListOption::Sort) {
+    // The Library's button layout: the direction first, then the methods. The list view
+    // rides along, so the sections can be turned off without leaving the catalog.
+    const std::string listView = std::string(tr(STR_LIBRARY_LIST_VIEW)) + ": " +
+                                 (SETTINGS.libraryListExpanded ? tr(STR_LIBRARY_EXPANDED) : tr(STR_COMPACT));
+    const char* labels[SORT_ROW_FIRST_METHOD + SORT_CHOICE_COUNT];
+    labels[SORT_ROW_DIRECTION] = sortsDescending(listQuery) ? "Z-A" : "A-Z";
+    labels[SORT_ROW_LIST_VIEW] = listView.c_str();
+    for (int i = 0; i < SORT_CHOICE_COUNT; i++) labels[SORT_ROW_FIRST_METHOD + i] = I18N.get(SORT_CHOICES[i].label);
+    popup->show(tr(STR_LIBRARY_SORT_BY), labels, SORT_ROW_FIRST_METHOD + SORT_CHOICE_COUNT,
+                SORT_ROW_FIRST_METHOD + sortChoiceIndex(listQuery.sort), std::move(onPick));
+    popup->setDividerAfterOption(SORT_ROW_FIRST_METHOD - 1);
+  } else {
+    StrId labels[READ_STATUS_CHOICE_COUNT];
+    for (int i = 0; i < READ_STATUS_CHOICE_COUNT; i++) labels[i] = READ_STATUS_CHOICES[i].label;
+    popup->show(StrId::STR_BOOKORBIT_READ_STATUS, labels, READ_STATUS_CHOICE_COUNT,
+                readStatusChoiceIndex(listQuery.readStatus), std::move(onPick));
+  }
+  popup->setDismissOnOutsideTouchDown(true);
+  {
+    RenderLock lock(*this);  // the render task draws the picker
+    openListOption = option;
+    pendingListChoice = -1;
+    listOptions = std::move(popup);
+  }
+  requestUpdate();
+}
+
+bool BookOrbitCatalogBrowserActivity::handleListOptions() {
+  if (!listOptions) return false;
+  {
+    RenderLock lock(*this);
+    listOptions->handleInput(mappedInput, [this] { requestUpdate(); });
+    if (listOptions->isActive()) return true;
+    // Closed: picked or dismissed. Its strings go now, before a pick fetches the listing.
+    listOptions.reset();
+  }
+  const int choice = std::exchange(pendingListChoice, -1);
+  if (choice >= 0) applyListChoice(openListOption, choice);
+  return true;
+}
+
+void BookOrbitCatalogBrowserActivity::applyListChoice(const ListOption option, const int choice) {
+  BookOrbitBookQuery query = listQuery;
+  if (option == ListOption::Filter) {
+    if (choice >= READ_STATUS_CHOICE_COUNT) return;
+    query.readStatus = READ_STATUS_CHOICES[choice].id;
+  } else if (choice == SORT_ROW_LIST_VIEW) {
+    // The Library's own setting: its list shows the same sections, or not.
+    SETTINGS.libraryListExpanded = SETTINGS.libraryListExpanded ? 0 : 1;
+    if (!SETTINGS.saveToFile()) LOG_ERR("BookOrbit", "Cannot save the list view");
+    requestUpdate();
+    return;
+  } else if (choice == SORT_ROW_DIRECTION) {
+    // The direction row. Spelled out only where it departs from the sort's own, so
+    // the query, and the cache key built from it, stay the same for the same order.
+    const bool descending = !sortsDescending(query);
+    query.order = descending == SORT_CHOICES[sortChoiceIndex(query.sort)].descendingFirst ? ""
+                  : descending                                                            ? "desc"
+                                                                                          : "asc";
+  } else {
+    const int method = choice - SORT_ROW_FIRST_METHOD;
+    // The current method keeps its direction; another starts in its own, as in the Library.
+    if (method >= SORT_CHOICE_COUNT || method == sortChoiceIndex(query.sort)) return;
+    query.sort = SORT_CHOICES[method].id;
+    query.order.clear();
+  }
+  if (query.sort == listQuery.sort && query.order == listQuery.order && query.readStatus == listQuery.readStatus) {
+    return;
+  }
+  LOG_INF("BookOrbit", "Listing now sorted by %s%s%s, read status '%s'",
+          query.sort.empty() ? SORT_CHOICES[DEFAULT_SORT_CHOICE].id : query.sort.c_str(),
+          query.order.empty() ? "" : " ", query.order.c_str(), query.readStatus.c_str());
+  reloadListing(query);
+}
+
+void BookOrbitCatalogBrowserActivity::reloadListing(const BookOrbitBookQuery& query) {
+  // The listing on screen stays in memory until the new one has loaded, so a failed
+  // request ends on the error screen, whose Back returns to it unchanged.
+  if (!loadBooks(query, listTitle, 1, booksFromFacet, PageLoad::Open, /*allowNetwork=*/false)) {
+    showLoadingBeforeFetch();
+    if (!loadBooks(query, listTitle, 1, booksFromFacet)) return;
+  }
+  if (!entries.empty()) return;
+  // A filter can leave nothing to show. Stay on the listing, whose pickers can undo it,
+  // rather than on the error screen, whose Back would leave it.
+  {
+    RenderLock lock(*this);
+    state = BrowserState::BROWSING;
+  }
+  requestUpdate();
+}
+
+std::string BookOrbitCatalogBrowserActivity::headerTitle() const {
+  if (navLevel == NavLevel::FacetList && !facetTitle.empty()) return facetTitle;
+  if (navLevel != NavLevel::Books || listTitle.empty()) return tr(STR_BOOKORBIT_CATALOG);
+  std::string title = listTitle;
+  if (!listIsLocal && !listQuery.readStatus.empty() && listQuery.readStatus != listDefaultReadStatus) {
+    title += " \xC2\xB7 ";  // U+00B7 middle dot, in the built-in fonts' Latin-1 range
+    title += I18N.get(READ_STATUS_CHOICES[readStatusChoiceIndex(listQuery.readStatus)].label);
+  }
+  // The listing's own total: a facet badge counts every format, and no badge knows the
+  // filter. Only once it is on screen; a download boot draws this header before it loads.
+  if (state == BrowserState::BROWSING) title += " (" + std::to_string(listTotal) + ")";
+  return title;
 }
 
 void BookOrbitCatalogBrowserActivity::showDownloadScreen(const std::string& title) {
@@ -891,6 +1212,7 @@ bool BookOrbitCatalogBrowserActivity::restartForDownload(const int64_t bookId, c
   resume.title = title;
   resume.path = path;
   resume.listQuery = listQuery;
+  resume.listDefaultReadStatus = listDefaultReadStatus;
   resume.listTitle = listTitle;
   resume.listPage = listPage;
   resume.booksFromFacet = booksFromFacet;
@@ -1087,14 +1409,10 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
   // A reference into the rows: the loads below copy what they need before replacing them.
   const auto& entry = *selected;
   switch (entry.type) {
-    case EntryType::SECTION: {
-      const BookOrbitBookQuery query = BookOrbitCatalogClient::sectionBookQuery(entry.sectionId);
-      if (!loadBooks(query, entry.title, 1, /*fromFacet=*/false, PageLoad::Open, /*allowNetwork=*/false)) {
-        showLoadingBeforeFetch();
-        loadBooks(query, entry.title, 1, /*fromFacet=*/false);
-      }
+    case EntryType::SECTION:
+      openBookListing(BookOrbitCatalogClient::sectionBookQuery(entry.sectionId), titleWithoutBadge(entry),
+                      /*fromFacet=*/false);
       break;
-    }
     case EntryType::FACET_SECTION:
       if (!loadFacetEntries(entry.sectionId, entry.title, 1, PageLoad::Open, /*allowNetwork=*/false)) {
         showLoadingBeforeFetch();
@@ -1135,10 +1453,7 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       // Back reopens the facet listing on this row.
       facetSelectorIndex = selectorIndex;
       facetTopIndex = topIndex;
-      if (!loadBooks(query, entry.title, 1, /*fromFacet=*/true, PageLoad::Open, /*allowNetwork=*/false)) {
-        showLoadingBeforeFetch();
-        loadBooks(query, entry.title, 1, /*fromFacet=*/true);
-      }
+      openBookListing(query, titleWithoutBadge(entry), /*fromFacet=*/true);
       break;
     }
     case EntryType::SEARCH:
@@ -1254,6 +1569,8 @@ void BookOrbitCatalogBrowserActivity::loop() {
     return;
   }
 
+  if (handleListOptions()) return;
+
   if (consumeConfirm && mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     consumeConfirm = false;
     return;
@@ -1326,12 +1643,36 @@ void BookOrbitCatalogBrowserActivity::loop() {
       if (snap.touchPressed || snap.touchReleased) {
         const auto event = app.route(snap);
         if (app.invalidated()) requestUpdate();
-        if (event) return;  // dispatched to onRowEvent
+        if (event) return;  // dispatched to onRowEvent or onControlEvent
         if (state != BrowserState::BROWSING) return;
       }
     }
 
+    // A server book list on a button-only device takes the Library's layout: Left sorts,
+    // Right filters, and Up and Down alone move through the rows.
+    const bool listButtons = listOptionsAvailable() && !mappedInput.hasTouchHardware();
+    if (listButtons) {
+      if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+        showListOptions(ListOption::Sort);
+        return;
+      }
+      if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+        showListOptions(ListOption::Filter);
+        return;
+      }
+    }
+    using NavButtons = std::array<MappedInputManager::Button, 2>;
+    const NavButtons nextButtons = listButtons
+                                       ? NavButtons{MappedInputManager::Button::Down, MappedInputManager::Button::Down}
+                                       : ButtonNavigator::getNextButtons();
+    const NavButtons previousButtons = listButtons
+                                           ? NavButtons{MappedInputManager::Button::Up, MappedInputManager::Button::Up}
+                                           : ButtonNavigator::getPreviousButtons();
+
     if (!entries.empty()) {
+      // Section headings can move the screen further down than this loop put it; start
+      // from where the last frame really was.
+      if (sectionsShown()) adoptRenderedViewport();
       // Rows the list actually drew, so page jumps land where the display pages;
       // a fixed constant would drift from the theme's row height. Every index below
       // counts rows from the start of the listing (see `entries`), so the pages a
@@ -1365,7 +1706,9 @@ void BookOrbitCatalogBrowserActivity::loop() {
             if (!appendNextPageForCurrentList()) break;
           }
         }
-        const int delta = swipe == MappedInputManager::SwipeDir::Up ? visibleRows : -visibleRows;
+        // A screen with section headings holds fewer rows: the next one starts where it ended.
+        const int rowsOnScreen = screenRows();
+        const int delta = swipe == MappedInputManager::SwipeDir::Up ? rowsOnScreen : -rowsOnScreen;
         const int previousTop = topIndex;
         topIndex = scrollListBy(topIndex, delta, visibleRows, loadedEnd());
         if (!revealRow(topIndex)) topIndex = windowStart;
@@ -1386,7 +1729,7 @@ void BookOrbitCatalogBrowserActivity::loop() {
           if (!appendNextPageForCurrentList()) break;
         }
       };
-      buttonNavigator.onNextRelease([this, extendIfOnLastPage, followSelection, reachSelection, holdPosition] {
+      buttonNavigator.onRelease(nextButtons, [this, extendIfOnLastPage, followSelection, reachSelection, holdPosition] {
         if (selectorIndex + 1 >= loadedEnd() && hasMorePages() && !appendNextPageForCurrentList()) {
           requestUpdate();  // could not load past the end (e.g. network); hold position, no wrap
           return;
@@ -1400,7 +1743,7 @@ void BookOrbitCatalogBrowserActivity::loop() {
       // Backward from the very top: when the session cache holds the rest of the
       // listing, walk it (no requests) and wrap to the real end. A cache miss keeps
       // the clamp -- a Previous press should not start a network crawl.
-      buttonNavigator.onPreviousRelease([this, followSelection, reachSelection, holdPosition] {
+      buttonNavigator.onRelease(previousButtons, [this, followSelection, reachSelection, holdPosition] {
         const int from = selectorIndex;
         if (from == 0 && hasMorePages() && !wrapToEndFromCache()) return holdPosition();
         selectorIndex = ButtonNavigator::previousIndex(from, loadedEnd());
@@ -1408,8 +1751,8 @@ void BookOrbitCatalogBrowserActivity::loop() {
         followSelection();
         requestUpdate();
       });
-      buttonNavigator.onNextContinuous(
-          [this, pageItems, extendIfOnLastPage, followSelection, reachSelection, holdPosition] {
+      buttonNavigator.onContinuous(
+          nextButtons, [this, pageItems, extendIfOnLastPage, followSelection, reachSelection, holdPosition] {
             if (selectorIndex / pageItems == (loadedEnd() - 1) / pageItems && hasMorePages() &&
                 !appendNextPageForCurrentList()) {
               requestUpdate();
@@ -1421,7 +1764,7 @@ void BookOrbitCatalogBrowserActivity::loop() {
             followSelection();
             requestUpdate();
           });
-      buttonNavigator.onPreviousContinuous([this, pageItems, followSelection, reachSelection, holdPosition] {
+      buttonNavigator.onContinuous(previousButtons, [this, pageItems, followSelection, reachSelection, holdPosition] {
         const int from = selectorIndex;
         if (from / pageItems == 0 && hasMorePages()) {
           if (from > 0) {
@@ -1451,6 +1794,14 @@ void BookOrbitCatalogBrowserActivity::buildListScreen(UiApp::ScreenType& screen)
   screen.setContentMargin(fui::Insets{static_cast<int16_t>(CompactHeader::contentTop(metrics)), 0,
                                       static_cast<int16_t>(metrics.buttonHintsHeight), 0});
 
+  if (mappedInput.hasTouchHardware() && listOptionsAvailable()) {
+    addListHeaderControls(screen, renderer, sortsDescending(listQuery));
+  }
+  // A filter that matches nothing leaves the header controls to undo it; render() says
+  // the listing is empty.
+  if (entries.empty()) return;
+
+  const bool sections = sectionsShown();
   // Transient per-render: points into `entries`, freed on scope exit. The list gets
   // the rows in memory, so its indices are those rows' own (row - windowStart).
   std::vector<fui::ListItem> items;
@@ -1463,6 +1814,7 @@ void BookOrbitCatalogBrowserActivity::buildListScreen(UiApp::ScreenType& screen)
     // are indistinguishable.
     if (!entry.subtitle.empty()) item.subtitle = entry.subtitle.c_str();
     if (entry.onDevice) item.value = ON_DEVICE_MARKER;
+    if (sections) item.sectionHeading = sectionHeading(i);
     item.actionValue = static_cast<int16_t>(i);
     items.push_back(item);
   }
@@ -1470,19 +1822,59 @@ void BookOrbitCatalogBrowserActivity::buildListScreen(UiApp::ScreenType& screen)
   fui::ListProps props;
   props.items = items.data();
   props.count = static_cast<uint16_t>(items.size());
-  props.selectedIndex = entryAt(selectorIndex) ? static_cast<int16_t>(selectorIndex - windowStart) : -1;
+  const int selected = entryAt(selectorIndex) ? selectorIndex - windowStart : -1;
+  props.selectedIndex = static_cast<int16_t>(selected);
   props.action = ACTION_ROW;
   props.inputMask = static_cast<uint16_t>(fui::InputTouch | fui::InputLongPress);  // physical buttons stay in loop()
   props.valueInset = 8;  // air between the on-device dot and the row edge
+  if (sections) configureUiListSectionHeaders(props, screen.theme());
   const auto rows = configureUiList(props, screen.theme(), screen.body(), UiListRowType::WithSubtitle);
   visibleRows = rows > 0 ? rows : 1;
   // Clamped for this frame only: the loop owns topIndex, and a listing being rebuilt
   // around a wanted position (reopenListing) must not see it pulled into a partial window.
-  const int top = std::max(windowStart, scrollListBy(topIndex, 0, visibleRows, loadedEnd()));
+  // With sections the fixed-height clamp would pull back a top the last frame moved down
+  // to fit the listing's end: only the window bounds it.
+  int top = renderTop;
+  if (renderPass == 0) {
+    top = sections ? std::clamp(topIndex, windowStart, loadedEnd() - 1)
+                   : std::max(windowStart, scrollListBy(topIndex, 0, visibleRows, loadedEnd()));
+  }
   props.topIndex = static_cast<uint16_t>(top - windowStart);
+  // A nav only to measure: it makes the list skip its fixed-height clamp too.
+  if (sections) {
+    listMeasure.reset();
+    props.nav = &listMeasure;
+  }
 
   const fui::Rect listRect = screen.body();
   screen.list(props);
+
+  renderTop = top;
+  if (sections) {
+    const int drawn = listMeasure.drawnRows;
+    const int relativeTop = top - windowStart;
+    const int count = static_cast<int>(entries.size());
+    int wanted = top;
+    if (drawn > 0 && selected >= relativeTop && selected >= relativeTop + drawn) {
+      // The selection fell below what fitted: down just far enough for it.
+      wanted = top + selected - (relativeTop + drawn) + 1;
+    } else if (drawn > 0 && !hasMorePages() && relativeTop + drawn < count && top >= loadedEnd() - visibleRows) {
+      // The listing ends on this screen, but its last rows did not fit under the headings.
+      wanted = top + count - (relativeTop + drawn);
+      if (selected >= relativeTop) wanted = std::min(wanted, windowStart + selected);
+    }
+    if (wanted > top && renderPass + 1 < MAX_RENDER_PASSES) {
+      renderTop = wanted;
+      renderPassAgain = true;
+      return;
+    }
+  }
+  // What the loop may take for its next move (adoptRenderedViewport, screenRows).
+  renderedTop.store(top);
+  renderedRows.store(sections ? listMeasure.drawnRows : 0);
+  renderedFromTop.store(renderFromTop);
+  renderedFromSelection.store(renderFromSelection);
+  renderedListing.store(listingGeneration, std::memory_order_release);
 
   // A long listing keeps only a few pages in memory, so the list sized its
   // indicator on that window: a 500-book listing would look like it ends one swipe
@@ -1504,19 +1896,22 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
 
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
-  const auto& metrics = UITheme::getInstance().getMetrics();
+  const bool listOptionsShown = listOptionsAvailable();
 
-  std::string headerTitle = tr(STR_BOOKORBIT_CATALOG);
-  if (navLevel == NavLevel::FacetList && !facetTitle.empty()) {
-    headerTitle = facetTitle;
-  } else if (navLevel == NavLevel::Books && !listTitle.empty()) {
-    headerTitle = listTitle;
-  }
-  if (mappedInput.hasTouchHardware()) {
-    TouchHeaderBackButton::drawCompact(renderer, headerTitle.c_str());
-  } else {
-    CompactHeader::drawTitle(renderer, headerTitle.c_str());
-  }
+  const std::string title = headerTitle();
+  const auto drawHeader = [this, &title, listOptionsShown] {
+    if (mappedInput.hasTouchHardware() && listOptionsShown) {
+      // The title stops short of the sort and filter controls.
+      TouchHeaderBackButton::draw(
+          renderer, TouchHeaderBackButton::compactHeaderRect(renderer), title.c_str(), /*readerContext=*/false,
+          2 * HEADER_CONTROL_SIZE + HEADER_CONTROL_GAP + TouchHeaderBackButton::controlRightInset() + 10);
+    } else if (mappedInput.hasTouchHardware()) {
+      TouchHeaderBackButton::drawCompact(renderer, title.c_str());
+    } else {
+      CompactHeader::drawTitle(renderer, title.c_str());
+    }
+  };
+  drawHeader();
 
   // WIFI_SELECTION: the Wi-Fi screen is only pushed on the next loop, and a network
   // boot paints the catalog before that, with no listing loaded yet.
@@ -1559,18 +1954,33 @@ void BookOrbitCatalogBrowserActivity::render(RenderLock&&) {
     return;
   }
 
-  const Entry* selected = entryAt(selectorIndex);
-  const bool onRemoteBook = selected && selected->type == EntryType::BOOK && !selected->onDevice;
-  const char* confirmLabel = onRemoteBook ? tr(STR_DOWNLOAD) : tr(STR_OPEN);
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, "", "");
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-
-  if (entries.empty()) {
-    renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_NO_ENTRIES));
-  } else {
+  if (!entries.empty() || listOptionsShown) {
     uiReady = false;
-    app.render();
+    renderPass = 0;
+    renderFromTop = topIndex;
+    renderFromSelection = selectorIndex;
+    // A pass that found the selection, or the listing's end, below the screen asks for
+    // another one further down (see buildListScreen); each starts from a blank frame.
+    for (;;) {
+      renderPassAgain = false;
+      app.render();
+      if (!renderPassAgain) break;
+      renderPass++;
+      renderer.clearScreen();
+      drawHeader();
+    }
     uiReady = true;
   }
+  if (entries.empty()) renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2, tr(STR_NO_ENTRIES));
+  // The picker draws its own button hints over the listing, then pushes the frame.
+  if (listOptions && listOptions->processRender(renderer, mappedInput)) return;
+
+  const Entry* selected = entryAt(selectorIndex);
+  const bool onRemoteBook = selected && selected->type == EntryType::BOOK && !selected->onDevice;
+  const char* confirmLabel = !selected ? "" : onRemoteBook ? tr(STR_DOWNLOAD) : tr(STR_OPEN);
+  const bool listButtons = listOptionsShown && !mappedInput.hasTouchHardware();
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, listButtons ? tr(STR_SORT) : "",
+                                            listButtons ? tr(STR_BOOKORBIT_FILTER) : "");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer();
 }

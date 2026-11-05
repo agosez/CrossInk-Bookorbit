@@ -77,6 +77,12 @@ bool wasTapped(const MappedInputManager& input, const GfxRenderer& renderer) {
   return wasTapped(input, headerRect(renderer, input));
 }
 
+int controlRightInset() {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  // Inline battery themes need a separate lane for the controls.
+  return metrics.headerBatteryDetached || metrics.headerBatterySide == 1 ? 10 : metrics.batteryWidth + 80;
+}
+
 void draw(GfxRenderer& renderer, const Rect& header, const char* title, const bool readerContext,
           const int rightReserve, const char* subtitle, const int verticalOffset, const bool showStatus) {
   auto target = makeUiTarget(renderer);
