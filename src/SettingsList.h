@@ -590,17 +590,17 @@ inline SettingInfo buildSideButtonActionSetting(const StrId nameId, uint8_t Cros
 // #1636) so the per-entry SettingInfo cost is paid once. Read-only consumers
 // can use it directly; mutable device UI lists use getSettingsList(), which
 // returns an owned copy and can add SD-card font and dictionary options.
-// The count is this fork's: upstream's entries plus the seven BookOrbit ones and the clock
-// latch toggle. Nine gesture entries (two-finger and edge) are compiled only for touch
-// devices, the five KOReader account entries only with its build switch, and two tilt
-// entries are added at run time on boards with the sensor.
+// The count is this fork's: upstream's entries plus the seven BookOrbit ones, the clock
+// latch toggle and the release-candidate update toggle. Nine gesture entries (two-finger and edge) are compiled only
+// for touch devices, the five KOReader account entries only with its build switch, and two tilt entries are added at
+// run time on boards with the sensor.
 #if CROSSINK_APP_CAP_KOREADER_SYNC
 inline constexpr size_t BASE_SETTINGS_KOREADER_ENTRIES = 5;
 #else
 inline constexpr size_t BASE_SETTINGS_KOREADER_ENTRIES = 0;
 #endif
 inline constexpr size_t BASE_SETTINGS_CAPACITY =
-    101 + 2 + (CROSSINK_APP_CAP_TOUCH ? 9 : 0) + BASE_SETTINGS_KOREADER_ENTRIES;
+    102 + 2 + (CROSSINK_APP_CAP_TOUCH ? 9 : 0) + BASE_SETTINGS_KOREADER_ENTRIES;
 
 const std::vector<SettingInfo>& getBaseSettingsList();
 
@@ -1054,7 +1054,7 @@ inline std::vector<SettingInfo> buildDisplaySleepSettingsList(const std::vector<
 
 inline std::vector<SettingInfo> buildSystemSettingsParentList(const std::vector<SettingInfo>& allSettings) {
   std::vector<SettingInfo> systemSettings;
-  systemSettings.reserve(9);
+  systemSettings.reserve(10);
   systemSettings.push_back(SettingInfo::Submenu(StrId::STR_SYSTEM_DEVICE, SettingAction::SystemDevice));
   systemSettings.push_back(SettingInfo::Submenu(StrId::STR_SYSTEM_FILES_CACHE, SettingAction::SystemFilesCache));
   systemSettings.push_back(SettingInfo::Submenu(StrId::STR_READING_STATS, SettingAction::SystemReadingStats));
@@ -1065,6 +1065,7 @@ inline std::vector<SettingInfo> buildSystemSettingsParentList(const std::vector<
   systemSettings.push_back(SettingInfo::Action(StrId::STR_BOOKORBIT_SYNC, SettingAction::BookOrbitSync));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates));
+  addSettingByName(systemSettings, allSettings, StrId::STR_OTA_INCLUDE_PRERELEASES);
   systemSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
   return systemSettings;
 }

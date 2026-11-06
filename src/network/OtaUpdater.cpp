@@ -32,7 +32,16 @@ namespace {
 #define CROSSINK_OTA_RELEASE_URL "https://api.github.com/repos/uxjulia/CrossInk/releases/latest"
 #endif
 
+// GitHub's /releases/latest never returns a pre-release, so a check that also wants release
+// candidates reads the newest few releases instead and keeps the highest version. GitHub
+// lists releases newest first, so the highest sits near the top; each one listed costs
+// about 12 KB of response.
+#ifndef CROSSINK_OTA_RELEASE_LIST_URL
+#define CROSSINK_OTA_RELEASE_LIST_URL "https://api.github.com/repos/uxjulia/CrossInk/releases?per_page=5"
+#endif
+
 constexpr char latestReleaseUrl[] = CROSSINK_OTA_RELEASE_URL;
+constexpr char releaseListUrl[] = CROSSINK_OTA_RELEASE_LIST_URL;
 
 #ifdef CROSSINK_FIRMWARE_DEVICE_TYPE
 constexpr char firmwareAssetStem[] = "firmware-" CROSSINK_FIRMWARE_DEVICE_TYPE;
@@ -118,6 +127,18 @@ struct OtaInstallContext {
   OtaUpdater::ProgressCallback onProgress = nullptr;
   void* progressCtx = nullptr;
 };
+
+// Visits each release of a GET /releases list and keeps, in `ctx`, the newest one this
+// device's firmware can be ordered against. On a tie the earlier, more recent entry stays.
+void keepNewestListedRelease(void* ctx, const ReleaseJsonParser::Release& release) {
+  auto* newest = static_cast<ReleaseJsonParser::Release*>(ctx);
+  if (!firmware_version::isComparable(release.tagName)) {
+    LOG_DBG("OTA", "Skipping listed release %s: its tag is not a version", release.tagName);
+    return;
+  }
+  if (newest->tagFound && firmware_version::compare(release.tagName, newest->tagName) <= 0) return;
+  *newest = release;
+}
 
 esp_err_t release_manifest_event_handler(esp_http_client_event_t* event) {
   if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
@@ -215,11 +236,24 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   processedSize = 0;
   totalSize = 0;
 
+  // The newest listed release lives on the heap, not next to the parser: an OTA launched at
+  // boot checks inside setup()'s frames, on the 8 KB loop stack the TLS handshake also uses
+  // (OtaUpdateActivity::onEnter). Value-initialised, so it starts with nothing found.
+  std::unique_ptr<ReleaseJsonParser::Release> newestListed;
+  if (includePrereleases) {
+    newestListed = makeUniqueNoThrow<ReleaseJsonParser::Release>();
+    if (!newestListed) {
+      LOG_ERR("OTA", "OOM for the release list check (%zu bytes)", sizeof(ReleaseJsonParser::Release));
+      return OOM_ERROR;
+    }
+  }
+
   esp_err_t esp_err;
-  ReleaseJsonParser releaseParser(isMatchingFirmwareAssetName);
+  ReleaseJsonParser releaseParser(isMatchingFirmwareAssetName, newestListed ? keepNewestListedRelease : nullptr,
+                                  newestListed.get());
 
   esp_http_client_config_t client_config = {
-      .url = latestReleaseUrl,
+      .url = includePrereleases ? releaseListUrl : latestReleaseUrl,
       .event_handler = release_manifest_event_handler,
       // 4096 holds the API response headers; the 32KB body streams through the
       // parser in chunks so RX needn't be larger. TX only carries our GET.
@@ -232,7 +266,8 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   };
 
   totalBytesReceived = 0;
-  LOG_DBG("OTA", "Checking for update (current: %s)", AppVersion::version());
+  LOG_DBG("OTA", "Checking for update (current: %s, pre-releases: %s)", AppVersion::version(),
+          includePrereleases ? "yes" : "no");
 
   esp_http_client_handle_t client_handle = esp_http_client_init(&client_config);
   if (!client_handle) {
@@ -261,24 +296,36 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   }
 
   LOG_DBG("OTA", "Response received: %zu bytes total", totalBytesReceived);
-  LOG_DBG("OTA", "Parser results: tag=%s firmware=%s", releaseParser.foundTag() ? "yes" : "no",
-          releaseParser.foundFirmware() ? "yes" : "no");
 
-  if (!releaseParser.foundTag()) {
+  // A list leaves the parser on its last release; the one to offer is the newest kept above.
+  // Any other answer to the list request (GitHub's rate-limit message, say) is an object and
+  // fails below the way it does for /releases/latest.
+  const ReleaseJsonParser::Release* release = &releaseParser.release();
+  if (releaseParser.isReleaseList()) {
+    if (!newestListed || !newestListed->tagFound) {
+      LOG_ERR("OTA", "No listed release offers a %s asset", firmwareAssetStem);
+      return NO_UPDATE;
+    }
+    release = newestListed.get();
+  }
+  LOG_DBG("OTA", "Parser results: list=%s tag=%s firmware=%s", releaseParser.isReleaseList() ? "yes" : "no",
+          release->tagFound ? "yes" : "no", release->firmwareFound ? "yes" : "no");
+
+  if (!release->tagFound) {
     LOG_ERR("OTA", "No tag_name in release JSON");
     return JSON_PARSE_ERROR;
   }
 
-  latestVersion = releaseParser.getTagName();
+  latestVersion = release->tagName;
 
-  if (!releaseParser.foundFirmware()) {
+  if (!release->firmwareFound) {
     LOG_ERR("OTA", "No matching %s asset found for release %s", firmwareAssetStem, latestVersion.c_str());
     return NO_UPDATE;
   }
 
-  otaUrl = releaseParser.getFirmwareUrl();
-  otaSha256 = releaseParser.getFirmwareSha256();
-  otaSize = releaseParser.getFirmwareSize();
+  otaUrl = release->firmwareUrl;
+  otaSha256 = release->firmwareSha256;
+  otaSize = release->firmwareSize;
   totalSize = otaSize;
   updateAvailable = true;
 

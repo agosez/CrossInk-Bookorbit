@@ -5,6 +5,7 @@
 
 class OtaUpdater {
   bool updateAvailable = false;
+  bool includePrereleases = false;
   std::string latestVersion;
   std::string otaUrl;
   std::string otaSha256;
@@ -39,6 +40,10 @@ class OtaUpdater {
   OtaUpdater() = default;
   bool isUpdateNewer() const;
   const std::string& getLatestVersion() const;
+  // Lets checkForUpdate() offer the newest release candidate too, when it is newer than both
+  // the installed firmware and the latest final release. Inline, so the simulator's own
+  // OtaUpdater definitions (crossink-simulator) need nothing new.
+  void setIncludePrereleases(const bool include) { includePrereleases = include; }
   OtaUpdaterError checkForUpdate();
   OtaUpdaterError installUpdate(ProgressCallback onProgress = nullptr, void* ctx = nullptr,
                                 std::atomic<bool>* cancelRequested = nullptr);

@@ -19,7 +19,8 @@ Every path below starts from a `firmware-*.bin` downloaded from **this fork's**
 device model. CrossInk's own web installer and update feeds only carry upstream builds,
 which have no BookOrbit support. Once this fork is installed,
 `Settings > System > Check for Updates` follows this fork's releases, so later versions
-arrive over the air.
+arrive over the air. Turn on `Settings > System > Include Release Candidates` to be
+offered the test builds published ahead of each release as well.
 
 ## Web Installation via USB
 

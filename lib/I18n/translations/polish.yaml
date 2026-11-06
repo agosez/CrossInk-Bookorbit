@@ -169,6 +169,7 @@ STR_RESET_ALL_TIME_STATS_CONFIRM: "Wyczyścić statystyki z całego okresu na ty
 STR_REFRESH_FREQ: "Częst. odśw."
 STR_KOREADER_SYNC: "KOReader Sync"
 STR_CHECK_UPDATES: "Sprawdź uaktualnia"
+STR_OTA_INCLUDE_PRERELEASES: "Uwzględniaj wersje RC"
 STR_LANGUAGE: "Język"
 STR_KEYBOARD_LAYOUTS: "Układy klawiatury"
 STR_CLEAR_READING_CACHE: "Wyczyść pamięć podręczną czytnika"

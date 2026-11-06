@@ -144,6 +144,10 @@ jobs:
           tag_name: v${{ env.RELEASE_VERSION }}
           target_commitish: ${{ github.sha }}
           draft: true
+          # A release candidate (version=1.6.1+bookorbit.5-rc1) goes out as a pre-release:
+          # /releases/latest skips it, so only readers with Include Release Candidates on
+          # are offered it over the air. contains() ignores case.
+          prerelease: ${{ contains(env.RELEASE_VERSION, '-rc') }}
           files: |
             release-firmware/firmware-x3-x4-v${{ env.ASSET_VERSION }}.bin
             release-firmware/firmware-sticky-v${{ env.ASSET_VERSION }}.bin

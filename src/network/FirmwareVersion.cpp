@@ -13,6 +13,9 @@ struct ParsedVersion {
   int segments[VERSION_SEGMENT_COUNT] = {0, 0, 0, 0};
   bool valid = false;
   bool releaseCandidate = false;
+  // The number after the "-rc" marker: 2 for `-rc2` or `-rc-2`, 0 for a bare `-rc` or the
+  // RC workflow's `-<hash>-RC`. Orders the candidates of one release.
+  int rcNumber = 0;
   // This fork releases as <upstream version>+bookorbit.<n>, so what distinguishes two of
   // its releases lives in semver build metadata — which is defined to carry no precedence
   // and which the numeric parse below therefore stops at. Read it out separately, or every
@@ -52,14 +55,29 @@ int parseForkBuild(const char* version) {
   return value;
 }
 
-bool containsRcMarker(const char* version) {
-  if (version == nullptr) return false;
+// The first "-rc" in `version`, in either case, or nullptr.
+const char* findRcMarker(const char* version) {
+  if (version == nullptr) return nullptr;
   for (const char* p = version; p[0] != '\0' && p[1] != '\0' && p[2] != '\0'; ++p) {
     if (p[0] == '-' && (p[1] == 'r' || p[1] == 'R') && (p[2] == 'c' || p[2] == 'C')) {
-      return true;
+      return p;
     }
   }
-  return false;
+  return nullptr;
+}
+
+// Reads the digits right after an "-rc" marker, past one '-' or '.' separator, so that
+// `-rc2`, `-rc-2` and `-rc.2` all yield 2. The device suffix of a release build
+// (`1.6.1-bookorbit.5-rc2-x4-pro`) stops the run.
+int parseRcNumber(const char* marker) {
+  const char* p = marker + 3;
+  if (*p == '-' || *p == '.') ++p;
+  int value = 0;
+  while (isDigit(*p)) {
+    value = value * 10 + (*p - '0');
+    ++p;
+  }
+  return value;
 }
 
 ParsedVersion parseVersion(const char* version) {
@@ -86,12 +104,16 @@ ParsedVersion parseVersion(const char* version) {
   }
 
   parsed.valid = true;
-  parsed.releaseCandidate = containsRcMarker(version);
+  const char* rcMarker = findRcMarker(version);
+  parsed.releaseCandidate = rcMarker != nullptr;
+  if (rcMarker != nullptr) parsed.rcNumber = parseRcNumber(rcMarker);
   parsed.forkBuild = parseForkBuild(version);
   return parsed;
 }
 
 }  // namespace
+
+bool isComparable(const char* version) { return parseVersion(version).valid; }
 
 int compare(const char* latestVersion, const char* currentVersion) {
   const ParsedVersion latest = parseVersion(latestVersion);
@@ -107,7 +129,13 @@ int compare(const char* latestVersion, const char* currentVersion) {
   // Same upstream version: this fork's own release counter decides (see ParsedVersion).
   if (latest.forkBuild != current.forkBuild) return latest.forkBuild > current.forkBuild ? 1 : -1;
 
-  if (current.releaseCandidate && !latest.releaseCandidate) return 1;
+  // Same release: its final build comes after all of its candidates, and a later candidate
+  // after an earlier one. The updater only installs what compares newer, so a device on
+  // 1.6.1+bookorbit.5 is never offered 1.6.1+bookorbit.5-rc2.
+  if (latest.releaseCandidate != current.releaseCandidate) return latest.releaseCandidate ? -1 : 1;
+  if (latest.releaseCandidate && latest.rcNumber != current.rcNumber) {
+    return latest.rcNumber > current.rcNumber ? 1 : -1;
+  }
   return 0;
 }
 

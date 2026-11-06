@@ -269,6 +269,8 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
                            "readingIdleTimeThresholdUnits", StrId::STR_CAT_SYSTEM));
     add(SettingInfo::Toggle(StrId::STR_TRACK_READING_STATS, &CrossPointSettings::trackReadingStats, "trackReadingStats",
                             StrId::STR_CAT_SYSTEM));
+    add(SettingInfo::Toggle(StrId::STR_OTA_INCLUDE_PRERELEASES, &CrossPointSettings::otaIncludePrereleases,
+                            "otaIncludePrereleases", StrId::STR_CAT_SYSTEM));
 
     // Frontlight quick-panel state: persisted + web-exposed, category-less so
     // it stays off the Settings screen (edited from the swipe-down panel).

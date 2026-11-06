@@ -169,6 +169,7 @@ STR_RESET_ALL_TIME_STATS_CONFIRM: "Cancellare le statistiche totali di questo le
 STR_REFRESH_FREQ: "Freq. aggior."
 STR_KOREADER_SYNC: "Sincronizzazione KOReader"
 STR_CHECK_UPDATES: "Controllo aggiornamenti"
+STR_OTA_INCLUDE_PRERELEASES: "Includi le release candidate"
 STR_LANGUAGE: "Lingua"
 STR_KEYBOARD_LAYOUTS: "Layout tastiera"
 STR_CLEAR_READING_CACHE: "Svuota cache di lettura"

@@ -168,6 +168,7 @@ STR_RESET_ALL_TIME_STATS_CONFIRM: "Alle statistieken op deze reader wissen? Back
 STR_REFRESH_FREQ: "Verversing"
 STR_KOREADER_SYNC: "KOReader Sync"
 STR_CHECK_UPDATES: "Controleren op updates"
+STR_OTA_INCLUDE_PRERELEASES: "Release candidates meenemen"
 STR_LANGUAGE: "Taal"
 STR_KEYBOARD_LAYOUTS: "Toetsenbordindelingen"
 STR_CLEAR_READING_CACHE: "Leescache wissen"

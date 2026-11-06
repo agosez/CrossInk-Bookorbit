@@ -461,6 +461,12 @@ which status-bar items are shown.
 - **Check for Updates** and **SD Firmware Update**: Check for firmware updates
   over Wi-Fi or install a `firmware.bin` placed on the SD card.
 
+- **Include Release Candidates**: Off by default. When on, Check for Updates also
+  offers this fork's release candidates, the test builds published ahead of a
+  release, whenever one is newer than both the installed firmware and the latest
+  release. Turning it back off keeps the installed candidate until a newer
+  release comes out: the updater never installs an older version.
+
 - **Language**: Set the UI language. CrossInk supports 28 languages: English,
   Spanish, French, German, Czech, Brazilian Portuguese, Russian, Swedish,
   Romanian, Catalan, Ukrainian, Belarusian, Italian, Polish, Finnish, Danish,

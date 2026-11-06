@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "lib/JsonParser/ReleaseJsonParser.h"
 
@@ -897,6 +898,183 @@ void testChunkedRealisticEveryBoundary() {
 }
 
 // ============================================================================
+// Release lists (GET /releases)
+// ============================================================================
+
+// GitHub's field order, nested author/uploader objects, a release with no firmware for this
+// device in the middle, and a nested "tag_name" key that must not be read as the release's.
+static const char* kReleaseList = R"([
+  {
+    "id": 3,
+    "author": {"login": "releasebot", "tag_name": "v9.9.9", "site_admin": false},
+    "tag_name": "v2.5.0-rc2",
+    "draft": false,
+    "prerelease": true,
+    "assets": [
+      {"name": "firmware-sticky-v2.5.0-rc2.bin", "uploader": {"login": "releasebot"},
+       "size": 1111, "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+       "browser_download_url": "https://example.com/v2.5.0-rc2/sticky.bin"},
+      {"name": "firmware-x3-x4-v2.5.0-rc2.bin", "uploader": {"login": "releasebot"},
+       "size": 2222, "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+       "browser_download_url": "https://example.com/v2.5.0-rc2/x3-x4.bin"}
+    ],
+    "body": "Candidate [with] {brackets} in its notes",
+    "reactions": {"total_count": 1, "+1": 1}
+  },
+  {
+    "id": 2,
+    "tag_name": "v2.5.0-rc1",
+    "prerelease": true,
+    "assets": [
+      {"name": "firmware-sticky-v2.5.0-rc1.bin", "size": 3333,
+       "browser_download_url": "https://example.com/v2.5.0-rc1/sticky.bin"}
+    ]
+  },
+  {
+    "id": 1,
+    "tag_name": "v2.4.1",
+    "prerelease": false,
+    "labels": ["stable"],
+    "assets": [
+      {"name": "firmware-x3-x4-v2.4.1.bin", "size": 4444,
+       "browser_download_url": "https://example.com/v2.4.1/x3-x4.bin"}
+    ]
+  }
+])";
+
+static bool isX3X4AnyVersion(const char* assetName) {
+  return strncmp(assetName, "firmware-x3-x4-", strlen("firmware-x3-x4-")) == 0;
+}
+
+struct VisitedReleases {
+  std::vector<std::string> tags;
+  std::vector<std::string> urls;
+  std::vector<std::string> sha256s;
+  std::vector<size_t> sizes;
+};
+
+static void collectRelease(void* ctx, const ReleaseJsonParser::Release& release) {
+  auto* visited = static_cast<VisitedReleases*>(ctx);
+  visited->tags.emplace_back(release.tagName);
+  visited->urls.emplace_back(release.firmwareUrl);
+  visited->sha256s.emplace_back(release.firmwareSha256);
+  visited->sizes.push_back(release.firmwareSize);
+}
+
+static bool visitedAsExpected(const VisitedReleases& visited) {
+  return visited.tags.size() == 2 && visited.tags[0] == "v2.5.0-rc2" &&
+         visited.urls[0] == "https://example.com/v2.5.0-rc2/x3-x4.bin" &&
+         visited.sha256s[0] == "2222222222222222222222222222222222222222222222222222222222222222" &&
+         visited.sizes[0] == 2222u && visited.tags[1] == "v2.4.1" &&
+         visited.urls[1] == "https://example.com/v2.4.1/x3-x4.bin" && visited.sha256s[1].empty() &&
+         visited.sizes[1] == 4444u;
+}
+
+void testReleaseListVisitsEachReleaseWithFirmware() {
+  printf("testReleaseListVisitsEachReleaseWithFirmware...\n");
+
+  VisitedReleases visited;
+  ReleaseJsonParser p(isX3X4AnyVersion, collectRelease, &visited);
+  p.feed(kReleaseList, strlen(kReleaseList));
+
+  ASSERT_TRUE(p.isReleaseList());
+  // v2.5.0-rc1 offers no x3-x4 firmware, so it is skipped rather than reported with the
+  // previous release's asset; the author's nested tag_name is never taken for the tag.
+  ASSERT_TRUE(visitedAsExpected(visited));
+
+  printf("  passed\n");
+  PASS();
+}
+
+void testReleaseListChunkedEveryBoundary() {
+  printf("testReleaseListChunkedEveryBoundary...\n");
+
+  for (size_t chunk : {1u, 2u, 3u, 7u, 64u, 4096u}) {
+    VisitedReleases visited;
+    ReleaseJsonParser p(isX3X4AnyVersion, collectRelease, &visited);
+    feedChunked(p, kReleaseList, chunk);
+    if (!visitedAsExpected(visited)) {
+      fprintf(stderr, "  FAIL: chunk size %zu\n", chunk);
+      testsFailed++;
+      return;
+    }
+  }
+
+  printf("  passed\n");
+  PASS();
+}
+
+void testReleaseListTruncatedReportsOnlyCompleteReleases() {
+  printf("testReleaseListTruncatedReportsOnlyCompleteReleases...\n");
+
+  // Cut inside the last release, after its asset: it must not be reported.
+  const std::string full(kReleaseList);
+  const size_t cut = full.find("https://example.com/v2.4.1/x3-x4.bin");
+  ASSERT_TRUE(cut != std::string::npos);
+
+  VisitedReleases visited;
+  ReleaseJsonParser p(isX3X4AnyVersion, collectRelease, &visited);
+  p.feed(full.c_str(), cut + 20);
+
+  ASSERT_TRUE(p.isReleaseList());
+  ASSERT_EQ(visited.tags.size(), 1u);
+  ASSERT_STREQ(visited.tags[0].c_str(), "v2.5.0-rc2");
+
+  printf("  passed\n");
+  PASS();
+}
+
+void testEmptyReleaseList() {
+  printf("testEmptyReleaseList...\n");
+
+  VisitedReleases visited;
+  ReleaseJsonParser p(isX3X4AnyVersion, collectRelease, &visited);
+  p.feed("[]", 2);
+
+  ASSERT_TRUE(p.isReleaseList());
+  ASSERT_EQ(visited.tags.size(), 0u);
+  ASSERT_TRUE(!p.foundTag());
+
+  printf("  passed\n");
+  PASS();
+}
+
+void testSingleReleaseIsNotAList() {
+  printf("testSingleReleaseIsNotAList...\n");
+
+  VisitedReleases visited;
+  ReleaseJsonParser p(isX3X4FirmwareAsset, collectRelease, &visited);
+  p.feed(kRealisticPretty, strlen(kRealisticPretty));
+
+  ASSERT_TRUE(!p.isReleaseList());
+  ASSERT_EQ(visited.tags.size(), 0u);
+  ASSERT_TRUE(p.foundTag());
+  ASSERT_STREQ(p.release().tagName, "v2.4.1");
+
+  printf("  passed\n");
+  PASS();
+}
+
+void testResetForgetsReleaseList() {
+  printf("testResetForgetsReleaseList...\n");
+
+  // The default matcher takes firmware.bin, which only kRealisticPretty offers.
+  ReleaseJsonParser p;
+  p.feed(kReleaseList, strlen(kReleaseList));
+  ASSERT_TRUE(p.isReleaseList());
+
+  p.reset();
+  p.feed(kRealisticPretty, strlen(kRealisticPretty));
+  ASSERT_TRUE(!p.isReleaseList());
+  ASSERT_TRUE(p.foundFirmware());
+  ASSERT_STREQ(p.getTagName(), "v2.4.1");
+  ASSERT_EQ(p.getFirmwareSize(), 1572864u);
+
+  printf("  passed\n");
+  PASS();
+}
+
+// ============================================================================
 
 int main() {
   printf("=== ReleaseJsonParser Tests ===\n\n");
@@ -936,6 +1114,12 @@ int main() {
   testSizeZero();
   testMinimalValidJson();
   testChunkedRealisticEveryBoundary();
+  testReleaseListVisitsEachReleaseWithFirmware();
+  testReleaseListChunkedEveryBoundary();
+  testReleaseListTruncatedReportsOnlyCompleteReleases();
+  testEmptyReleaseList();
+  testSingleReleaseIsNotAList();
+  testResetForgetsReleaseList();
 
   printf("\n=== Results: %d passed, %d failed ===\n", testsPassed, testsFailed);
   return testsFailed > 0 ? 1 : 0;
