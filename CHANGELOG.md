@@ -12,6 +12,7 @@ Based on CrossInk v1.6.1.
 ### Fixed
 
 - With the BookOrbit theme, closing the panel pulled down from the top of the Home screen no longer freezes the X4 Pro and Sticky until a restart. The panel stayed on screen and the reader stopped responding to touch and buttons ([#107](https://github.com/agosez/CrossInk-Bookorbit/issues/107)).
+- On the X3, the frame around the selected book on the BookOrbit theme's Library page no longer runs into the frame of its shelf. The shelf covers are a little smaller to make room, and the next sync downloads them again at their new size ([#108](https://github.com/agosez/CrossInk-Bookorbit/issues/108)).
 
 ## [v1.6.1+bookorbit.5] - 2026-11-06
 
