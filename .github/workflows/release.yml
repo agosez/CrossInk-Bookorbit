@@ -139,7 +139,6 @@ jobs:
       cancel-in-progress: false
     env:
       RELEASE_VERSION: ${{ needs.prepare-release.outputs.release_version }}
-      PAGES_DIR: ${{ runner.temp }}/pages
     steps:
       - uses: actions/checkout@v6
 
@@ -149,6 +148,9 @@ jobs:
 
       - name: Check out the gh-pages branch
         run: |
+          # A job's env cannot read the runner context, so later steps get it here.
+          PAGES_DIR="$RUNNER_TEMP/pages"
+          echo "PAGES_DIR=$PAGES_DIR" >> "$GITHUB_ENV"
           if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
             git fetch --depth=1 origin gh-pages
             git worktree add "$PAGES_DIR" FETCH_HEAD
@@ -167,8 +169,8 @@ jobs:
             --output "$PAGES_DIR/assets" --version "$RELEASE_VERSION" --channel stable
 
       - name: Push to gh-pages
-        working-directory: ${{ env.PAGES_DIR }}
         run: |
+          cd "$PAGES_DIR"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add .nojekyll assets
