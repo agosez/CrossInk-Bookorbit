@@ -57,3 +57,6 @@ test/integration/library-dock/
 test/integration/library/
 test/integration/library.json
 test/integration/seed-manifest.json
+
+# Native simulator device identity (outside its SD root)
+.crossink-device-secret

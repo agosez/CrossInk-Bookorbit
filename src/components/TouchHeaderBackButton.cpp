@@ -36,20 +36,20 @@ Layout layout(const Rect& header) {
   // spare space above and below the back button/title instead of placing all
   // of it above the title.
   const int actionX = header.x;
-  const int actionY = header.y + (header.height - actionHeight) / 2;
+  const int actionY = header.y + (header.height - actionHeight + UITheme::getDisplayStatusBarHeightIncrease()) / 2;
   const int touchWidth = std::min(touchSize, header.width);
   const int touchHeight = touchSize;
   const int touchX = std::max(header.x, actionX + (actionWidth - touchWidth) / 2);
-  // The common 45px header is shorter than the minimum touch target. Let the
-  // hit box extend above and below the visual band instead of shrinking it.
-  const int touchY = std::max(0, actionY + (actionHeight - touchHeight) / 2);
+  // The common 45px header is shorter than the minimum touch target. Extend
+  // below the visual band while preserving the calibrated top boundary.
+  const int touchY = std::max(header.y, actionY + (actionHeight - touchHeight) / 2);
   return {Rect{actionX, actionY, actionWidth, actionHeight}, Rect{touchX, touchY, touchWidth, touchHeight},
           actionX + actionWidth + titleGap};
 }
 
 Rect standardHeaderRect(const GfxRenderer& renderer) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  return Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight};
+  return UITheme::getHeaderRect(renderer, metrics.headerHeight);
 }
 
 int height(const ThemeMetrics& metrics, const MappedInputManager& input) {
@@ -58,13 +58,21 @@ int height(const ThemeMetrics& metrics, const MappedInputManager& input) {
 
 Rect headerRect(const GfxRenderer& renderer, const MappedInputManager& input) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  return Rect{0, metrics.topPadding, renderer.getScreenWidth(), height(metrics, input)};
+  return UITheme::getHeaderRect(renderer, height(metrics, input));
+}
+
+Rect headerRect(const GfxRenderer& renderer, const MappedInputManager& input, const Rect& area) {
+  return UITheme::getHeaderRect(renderer, height(UITheme::getInstance().getMetrics(), input), area);
 }
 
 Rect compactHeaderRect(const GfxRenderer& renderer) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  return Rect{0, metrics.topPadding, renderer.getScreenWidth(),
-              CompactHeader::headerBottomY(metrics) - metrics.topPadding};
+  return UITheme::getHeaderRect(renderer, CompactHeader::height(metrics));
+}
+
+int contentTop(const GfxRenderer& renderer, const MappedInputManager& input, const int areaTop) {
+  const auto header = headerRect(renderer, input);
+  return std::max(areaTop, header.y) + header.height;
 }
 
 bool wasTapped(const MappedInputManager& input, const Rect& header) {
@@ -115,11 +123,11 @@ void draw(GfxRenderer& renderer, fui::GfxRendererTarget& target, const Rect& hea
 }
 
 void drawCompact(GfxRenderer& renderer, const char* title, const bool readerContext, const bool showDate,
-                 const int verticalOffset) {
+                 const int verticalOffset, const int minRightReserve) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect header = compactHeaderRect(renderer);
-  const int rightReserve =
-      metrics.batteryWidth + 2 * metrics.headerSidePadding + (showDate ? headerDateReservedWidth(renderer) : 0);
+  const int rightReserve = std::max(minRightReserve, metrics.batteryWidth + 2 * metrics.headerSidePadding +
+                                                         (showDate ? headerDateReservedWidth(renderer) : 0));
   draw(renderer, header, title, readerContext, rightReserve, nullptr, verticalOffset);
   if (showDate) {
     const Layout back = layout(header);
@@ -127,8 +135,26 @@ void drawCompact(GfxRenderer& renderer, const char* title, const bool readerCont
     const int titleBaselineY = back.iconRect.y + offset +
                                std::max(0, (back.iconRect.height - renderer.getLineHeight(UI_12_FONT_ID)) / 2) +
                                renderer.getFontAscenderSize(UI_12_FONT_ID);
-    drawHeaderDateAtBaseline(renderer, renderer.getScreenWidth(), titleBaselineY);
+    drawHeaderDateAtBaseline(renderer, header.x + header.width, titleBaselineY);
   }
+}
+
+const int TRAILING_ACTION_RESERVE = actionSize + titleGap;
+
+void drawTrailingIcon(GfxRenderer& renderer, const Rect& header, const freeink::Icon& icon, const int verticalOffset) {
+  Layout back = layout(header);
+  back.iconRect.y += effectiveVerticalOffset(back, header, verticalOffset);
+  const int x = header.x + header.width - back.iconRect.width + (back.iconRect.width - icon.w) / 2;
+  const int y = back.iconRect.y + (back.iconRect.height - icon.h) / 2;
+  auto target = makeUiTarget(renderer);
+  target.bitmap(fui::Rect{static_cast<int16_t>(x), static_cast<int16_t>(y), static_cast<int16_t>(icon.w),
+                          static_cast<int16_t>(icon.h)},
+                fui::bitmapFromIcon(icon), fui::BitmapMode::Center);
+}
+
+Rect trailingTouchRect(const Rect& header) {
+  const Rect touch = layout(header).touchRect;
+  return Rect{header.x + header.width - (touch.x - header.x) - touch.width, touch.y, touch.width, touch.height};
 }
 
 }  // namespace TouchHeaderBackButton

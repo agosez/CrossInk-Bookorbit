@@ -283,11 +283,6 @@ class ParagraphStreamer final : public Print {
   char entityBuffer[MAX_ENTITY_SIZE] = {};
   size_t entityLen = 0;
 
-  // Forward mode: count <p> paragraphs at a byte offset (legacy, used by generateXPath)
-  size_t fwdTarget;
-  int fwdResult = 0;
-  bool fwdCaptured = false;
-
   // Reverse mode shared state
   int revChar;
   bool revPFound = false;
@@ -749,29 +744,17 @@ class ParagraphStreamer final : public Print {
   }
 
  public:
-  explicit ParagraphStreamer(size_t targetByte) : fwdTarget(targetByte), revChar(0) {
-    memset(stepEnteredAtDepth, -1, sizeof(stepEnteredAtDepth));
-  }
-
   ParagraphStreamer(int paragraph, int charOff, int textNodeIdx = 1)
-      : fwdTarget(SIZE_MAX), revChar(charOff), revParagraph(paragraph), targetTextNode(textNodeIdx) {
+      : revChar(charOff), revParagraph(paragraph), targetTextNode(textNodeIdx) {
     memset(stepEnteredAtDepth, -1, sizeof(stepEnteredAtDepth));
   }
 
   ParagraphStreamer(const XPathStep* xpathSteps, int xpathStepCount, int charOff, int textNodeIdx = 1)
-      : fwdTarget(SIZE_MAX),
-        revChar(charOff),
-        steps(xpathSteps),
-        stepCount(xpathStepCount),
-        targetTextNode(textNodeIdx) {
+      : revChar(charOff), targetTextNode(textNodeIdx), steps(xpathSteps), stepCount(xpathStepCount) {
     memset(stepEnteredAtDepth, -1, sizeof(stepEnteredAtDepth));
   }
 
   size_t write(uint8_t c) override {
-    if (!fwdCaptured && bytesWritten >= fwdTarget) {
-      fwdResult = pCount;
-      fwdCaptured = true;
-    }
     bytesWritten++;
 
     if (globalInEntity) {
@@ -862,7 +845,6 @@ class ParagraphStreamer final : public Print {
     return size;
   }
 
-  int paragraphCount() const { return fwdCaptured ? fwdResult : pCount; }
   int getParagraphAtMatch() const { return paragraphAtMatch; }
   int getListItemAtMatch() const { return liCountAtMatch; }
   const char* getCapturedAnchorId() const { return capturedAnchorIdLen > 0 ? capturedAnchorId : nullptr; }
@@ -911,18 +893,22 @@ KOReaderPosition ProgressMapper::toKOReader(const std::shared_ptr<Epub>& epub, c
   if (result.xpath.empty() && pos.hasParagraphIndex && pos.paragraphIndex > 0) {
     result.xpath = ChapterXPathResolver::findXPathForParagraph(epub, pos.spineIndex, pos.paragraphIndex);
   }
-  // Fall back to progress-based XPath, then synthetic progress mapping.
+  // Fall back to a structural progress anchor. A guessed /body/p[N] loses
+  // wrappers such as <section> and can send KOReader to the start of the book.
   if (result.xpath.empty()) {
     result.xpath = ChapterXPathResolver::findXPathForProgress(epub, pos.spineIndex, intra, minimumPathDepth);
   }
   if (result.xpath.empty()) {
-    result.xpath = generateXPath(epub, pos.spineIndex, intra);
+    LOG_ERR("PM", "Cannot resolve a structural XPath for spine %d", pos.spineIndex);
+    result.valid = false;
+    return result;
   }
   if (coordinateSpace == PositionCoordinateSpace::SourceDocument &&
       !mapCurrentXPathToSource(epub, pos.spineIndex, result.xpath)) {
     LOG_ERR("PM", "Source position map unavailable for optimized spine %d; re-optimize the EPUB", pos.spineIndex);
     result.xpath.clear();
     result.valid = false;
+    result.needsReoptimization = true;
     return result;
   }
   LOG_DBG("PM", "-> KO: spine=%d page=%d/%d %.2f%% %s", pos.spineIndex, pos.pageNumber, pos.totalPages,
@@ -932,7 +918,8 @@ KOReaderPosition ProgressMapper::toKOReader(const std::shared_ptr<Epub>& epub, c
 
 std::optional<CrossPointPosition> ProgressMapper::fromRichPosition(const std::shared_ptr<Epub>& epub,
                                                                    const KOReaderRichPosition& rich,
-                                                                   GfxRenderer& renderer) {
+                                                                   GfxRenderer& renderer,
+                                                                   const char* sectionCacheSuffix) {
   const int spineCount = epub->getSpineItemsCount();
   if (static_cast<int>(rich.spineIndex) >= spineCount) {
     LOG_DBG("PM", "Rich position spine %u out of range (%d spine items)", rich.spineIndex, spineCount);
@@ -942,7 +929,7 @@ std::optional<CrossPointPosition> ProgressMapper::fromRichPosition(const std::sh
   CrossPointPosition result{};
   result.spineIndex = rich.spineIndex;
 
-  Section tempSection(epub, result.spineIndex, renderer);
+  Section tempSection(epub, result.spineIndex, renderer, sectionCacheSuffix);
   const auto cachedCount = tempSection.getCachedPageCount();
   if (!cachedCount || *cachedCount <= 0) {
     // No local layout for the target spine yet; the percentage/xpath mapping
@@ -988,7 +975,9 @@ CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epu
                                                 const PositionCoordinateSpace coordinateSpace) {
   CrossPointPosition result{};
   KOReaderPosition mappedKoPos = koPos;
-  if (coordinateSpace == PositionCoordinateSpace::SourceDocument) {
+  // Percentage-only records have no source locator to translate. They use the
+  // approximate whole-book fallback below; real source XPaths still require a map.
+  if (coordinateSpace == PositionCoordinateSpace::SourceDocument && !mappedKoPos.xpath.empty()) {
     int mappedSpineIndex = -1;
     if (!mapSourceXPathToCurrent(epub, mappedKoPos.xpath, mappedSpineIndex)) {
       LOG_ERR("PM", "Cannot map source XPath into this optimized EPUB; re-optimize the EPUB");
@@ -1114,19 +1103,4 @@ bool ProgressMapper::parseXPointerLocation(const std::string& xpath, int& outSpi
   const int hint = paragraph > 0 ? paragraph : listItem;
   outParagraphIndex = (hint > 0 && hint <= UINT16_MAX) ? static_cast<uint16_t>(hint) : UINT16_MAX;
   return true;
-}
-
-std::string ProgressMapper::generateXPath(const std::shared_ptr<Epub>& epub, int spineIndex, float intra) {
-  const std::string base = "/body/DocFragment[" + std::to_string(spineIndex + 1) + "]/body";
-  if (intra <= 0.0f) return base;
-
-  size_t spineSize = 0;
-  const auto href = epub->getSpineItem(spineIndex).href;
-  if (href.empty() || !epub->getItemSize(href, &spineSize) || spineSize == 0) return base;
-
-  ParagraphStreamer s(static_cast<size_t>(spineSize * std::min(intra, 1.0f)));
-  if (!streamSpine(epub, spineIndex, s)) return base;
-
-  const int p = s.paragraphCount();
-  return (p > 0) ? base + "/p[" + std::to_string(p) + "]" : base;
 }

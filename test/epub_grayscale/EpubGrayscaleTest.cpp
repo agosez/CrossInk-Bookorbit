@@ -21,6 +21,10 @@ void* rasterMalloc(size_t n) {
 #define malloc rasterMalloc
 #include "lib/Epub/Epub/blocks/ImageBlock.cpp"
 #undef malloc
+bool ImageDecoderFactory::supportsMemorySource(const std::string& path) {
+  return path.ends_with(".jpg") || path.ends_with(".png");
+}
+
 ImageToFramebufferDecoder* ImageDecoderFactory::getDecoder(const std::string&) { return nullptr; }
 
 namespace {
@@ -126,6 +130,73 @@ TEST_F(EpubGrayscaleTest, CachedPixelsMatchReferenceAcrossRotationsModesOffsetsA
             }
           }
         }
+}
+
+TEST_F(EpubGrayscaleTest, MonochromeCachedImagesKeepMidtoneDetailAcrossRotationsAndCacheHits) {
+  constexpr int expectedBlackPixels[] = {256, 176, 80, 0};
+  for (bool psram : {false, true}) {
+    for (int orientation = 0; orientation < 4; ++orientation) {
+      ImageBlock::releaseSessionPixelCache();
+      fakeheap::reset(psram);
+      GfxRenderer r;
+      r.orientation = GfxRenderer::Orientation(orientation);
+      for (int level = 0; level < 4; ++level) {
+        auto pixels = cache(16, 16);
+        std::fill(pixels.begin() + 4, pixels.end(), level * 0x55);
+        const std::string path = "level" + std::to_string(level) + ".pxc";
+        Storage.put(path, pixels);
+        for (int pass = 0; pass < 2; ++pass) {
+          r.clearScreen(255);
+          ASSERT_TRUE(renderFromCache(r, path, 9, 13, 16, 16, false));
+          int black = 0;
+          for (auto byte : r.bw) {
+            for (int bit = 0; bit < 8; ++bit) black += (byte & (1 << bit)) == 0;
+          }
+          EXPECT_EQ(black, expectedBlackPixels[level]);
+        }
+        // Turning grayscale back on must use the existing dark base and cache.
+        r.clearScreen(255);
+        ASSERT_TRUE(renderFromCache(r, path, 9, 13, 16, 16, true));
+        int black = 0;
+        for (auto byte : r.bw) {
+          for (int bit = 0; bit < 8; ++bit) black += (byte & (1 << bit)) == 0;
+        }
+        EXPECT_EQ(black, level < 3 ? 256 : 0);
+      }
+    }
+  }
+}
+
+TEST_F(EpubGrayscaleTest, MonochromeDitherPreservesSourceShadesAfterFourLevelQuantization) {
+  for (int orientation = 0; orientation < 4; ++orientation) {
+    GfxRenderer r;
+    r.orientation = GfxRenderer::Orientation(orientation);
+    int previousBlack = 257;
+    for (int gray : {0, 32, 64, 96, 128, 160, 192, 224, 255}) {
+      auto pixels = cache(16, 16);
+      std::fill(pixels.begin() + 4, pixels.end(), 0);
+      for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+          const auto level = applyBayerDither4Level(gray, x + 9, y + 13);
+          pixels[4 + y * 4 + x / 4] |= level << (6 - (x & 3) * 2);
+        }
+      }
+      Storage.put("source.pxc", pixels);
+      r.clearScreen(255);
+      ASSERT_TRUE(renderFromCache(r, "source.pxc", 9, 13, 16, 16, false));
+      int black = 0;
+      for (auto byte : r.bw) {
+        for (int bit = 0; bit < 8; ++bit) black += (byte & (1 << bit)) == 0;
+      }
+      // Increasing source brightness must retain distinct tones, including
+      // quarter tones; the two ordered dither stages must not cancel out.
+      EXPECT_LT(black, previousBlack) << gray;
+      if (gray == 0) EXPECT_EQ(black, 256);
+      if (gray == 255) EXPECT_EQ(black, 0);
+      if (gray == 128) EXPECT_EQ(black, 128);
+      previousBlack = black;
+    }
+  }
 }
 
 TEST_F(EpubGrayscaleTest, NoStripUsesFullScreenAndRetainedHitAvoidsReads) {
@@ -284,6 +355,36 @@ TEST_F(EpubGrayscaleTest, PlanePathsProduceIdenticalBytesAndRestoreBw) {
         EXPECT_EQ(r.events, expected);
       }
     }
+}
+
+TEST_F(EpubGrayscaleTest, DisabledImageGrayscaleNeverVisitsImagesWithTextAaOrWithoutIt) {
+  for (bool text : {false, true}) {
+    for (int path = 0; path < 4; ++path) {
+      fakeheap::reset(path != 0);
+      if (path == 1) fakeheap::external.failOnAttempt = 1;
+      if (path == 2) fakeheap::external.failOnAttempt = 2;
+      GfxRenderer r;
+      ImageBlock image("disabled.jpg", "", 21, 23);
+      Page page;
+      page.images = {{&image, 0, 0}};
+      const auto live = r.bw;
+      std::vector<uint8_t> scratch(r.stride * 80);
+      EXPECT_EQ(EpubGrayscale::runTiledGrayscalePass(r, page, 1, 0, 0, true, text, false, scratch.data(),
+                                                     scratch.size(), path != 0),
+                text);
+      EXPECT_EQ(page.imageVisits, 0);
+      EXPECT_EQ(page.allVisits, text ? (path < 2 ? 14 : 2) : 0);
+      EXPECT_EQ(r.bw, live);
+      EXPECT_EQ(r.mode, GfxRenderer::BW);
+      EXPECT_FALSE(r.active);
+      if (text) {
+        EXPECT_TRUE(std::all_of(r.lsb.begin(), r.lsb.end(), [](auto b) { return b == 0; }));
+        EXPECT_TRUE(std::all_of(r.msb.begin(), r.msb.end(), [](auto b) { return b == 0; }));
+      } else {
+        EXPECT_TRUE(r.events.empty());
+      }
+    }
+  }
 }
 
 TEST_F(EpubGrayscaleTest, MissingScratchAndUnsupportedPathsPreserveFallbackContract) {

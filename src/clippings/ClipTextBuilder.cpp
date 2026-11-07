@@ -96,12 +96,30 @@ bool isSelectedTableWord(const WordRef& word, const uint16_t tableSelection) {
 
 }  // namespace
 
+AllocationBudget allocationBudget(const ClipWordStore& wordStore, const uint16_t* wordOrder, const int fromOrder,
+                                  const int toOrder, const uint16_t tableSelection) {
+  AllocationBudget budget;
+  size_t longestWord = 0;
+  for (int i = fromOrder; i <= toOrder; ++i) {
+    const auto& word = wordStore.words[wordOrder[i]];
+    if (!isSelectedTableWord(word, tableSelection)) continue;
+    // Cleaning only removes bytes; allow one separator per selected word.
+    budget.textCapacity += word.textLength + 1U;
+    longestWord = std::max(longestWord, static_cast<size_t>(word.textLength));
+  }
+  // Original, cleaned, dehyphenated and previous word can overlap during assembly.
+  budget.temporaryBytes = 4 * (longestWord + 1U);
+  return budget;
+}
+
 ClippingResult build(const ClipWordStore& wordStore, const uint16_t* wordOrder, const int fromOrder, const int toOrder,
                      const int startPageInSection, const int sectionPageCount, const SelectionBounds* selectionBounds,
                      const uint16_t tableSelection) {
   const auto& words = wordStore.words;
   std::string text;
-  text.reserve(256);
+  // Reserve once for the complete selection instead of repeatedly growing and
+  // copying the result. The activity checks this same budget before assembly.
+  text.reserve(allocationBudget(wordStore, wordOrder, fromOrder, toOrder, tableSelection).textCapacity);
 
   const WordRef& firstWord = words[wordOrder[fromOrder]];
   const WordRef& lastWord = words[wordOrder[toOrder]];

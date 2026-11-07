@@ -18,7 +18,7 @@ void BookOrbitAuthActivity::onWifiSelectionComplete(const bool success) {
     {
       RenderLock lock(*this);
       state = FAILED;
-      errorMessage = tr(STR_WIFI_CONN_FAILED);
+      errorMessage = tr(STR_CONNECTION_FAILED);
     }
     requestUpdate();
     return;

@@ -108,7 +108,8 @@ const char* withoutSoftHyphens(const char* word, const size_t length, char* scra
 int16_t measureWordAdvanceX(const GfxRenderer& renderer, const int fontId, const char* word, const size_t length,
                             const EpdFontFamily::Style style, char* scratch, const size_t scratchCapacity) {
   const char* measured = withoutSoftHyphens(word, length, scratch, scratchCapacity);
-  return static_cast<int16_t>(renderer.getTextAdvanceX(fontId, measured, style));
+  return static_cast<int16_t>(renderer.getTextAdvanceX(
+      fontId, measured, style, 0, CrossPointSettings::characterSpacingLevel(SETTINGS.characterSpacing)));
 }
 
 int16_t measureWordAdvanceX(const GfxRenderer& renderer, const int fontId, const char* word, const size_t length,
@@ -118,7 +119,9 @@ int16_t measureWordAdvanceX(const GfxRenderer& renderer, const int fontId, const
     return measureWordAdvanceX(renderer, fontId, word, length, style, scratch, scratchCapacity);
   }
   const size_t suffixStart = std::min<size_t>(focusBoundary, length);
-  return static_cast<int16_t>(focusSuffixX + renderer.getTextAdvanceX(fontId, word + suffixStart, style));
+  return static_cast<int16_t>(
+      focusSuffixX + renderer.getTextAdvanceX(fontId, word + suffixStart, style, 0,
+                                              CrossPointSettings::characterSpacingLevel(SETTINGS.characterSpacing)));
 }
 
 int16_t measureWordAdvanceX(const GfxRenderer& renderer, const int fontId, const char* word, const size_t length,
@@ -135,7 +138,9 @@ int16_t measureWordAdvanceX(const GfxRenderer& renderer, const int fontId, const
   const size_t boldLen = std::min<size_t>({static_cast<size_t>(focusBoundary), length, sizeof(boldBuf) - 1});
   memcpy(boldBuf, word, boldLen);
   boldBuf[boldLen] = '\0';
-  return static_cast<int16_t>(focusRunOffset + renderer.getTextAdvanceX(fontId, boldBuf, boldStyle));
+  return static_cast<int16_t>(
+      focusRunOffset + renderer.getTextAdvanceX(fontId, boldBuf, boldStyle, 0,
+                                                CrossPointSettings::characterSpacingLevel(SETTINGS.characterSpacing)));
 }
 
 bool isRtlWord(const char* word, const bool fallbackRtl) {
@@ -160,7 +165,6 @@ void DictionaryWordSelectActivity::onEnter() {
   if (!buildWorkingSet(consumeInitialConfirm)) {
     if (workingSetMemoryError_) {
       GUI.drawPopup(renderer, tr(STR_MEMORY_ERROR));
-      renderer.displayBuffer();
       delay(1000);
     }
     ActivityResult result;
@@ -195,7 +199,7 @@ bool DictionaryWordSelectActivity::buildWorkingSet(const bool consumeInitialConf
   navigator.loadView(workingSet_.words.get(), workingSet_.wordCount, workingSet_.rows.get(), workingSet_.rowCount,
                      workingSet_.textPool.get(), consumeInitialConfirm);
 #if CROSSINK_APP_CAP_TOUCH
-  navigator.setTouchDragCursorVisible(mappedInput.hasTouch());
+  navigator.setTouchDragCursorVisible(false);
   bool initialTouchHit = false;
   if (initialTouchX_ >= 0 && initialTouchY_ >= 0) {
     navigator.selectWordAtPoint(initialTouchX_, initialTouchY_, renderer.getLineHeight(SETTINGS.getReaderFontId()),
@@ -211,6 +215,7 @@ bool DictionaryWordSelectActivity::buildWorkingSet(const bool consumeInitialConf
       return false;
     }
     touchDragLookup_ = navigator.beginTouchMultiSelect();
+    touchSelectionActive_ = touchDragLookup_;
     touchDragStartX_ = initialTouchX_;
     touchDragStartY_ = initialTouchY_;
   }
@@ -311,7 +316,7 @@ void DictionaryWordSelectActivity::prebuildAdvanceTable() {
 
 void DictionaryWordSelectActivity::clearFrontButtonHintArea() {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int hintSize = metrics.buttonHintsHeight;
+  const int hintSize = UITheme::getButtonHintsReserve(renderer);
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
 
@@ -378,10 +383,13 @@ bool DictionaryWordSelectActivity::allocateWorkingSet() {
   forEachPageTextLine(*page, [&](const PageTextLine& line) {
     const auto* block = line.block;
     if (!block) return true;
-    const int16_t screenY = static_cast<int16_t>(
-        line.yPos + marginTop +
-        block->getRubyShift(renderer.getFontAscenderSize(block->resolvedFontId(renderer, SETTINGS.getReaderFontId()))));
     for (uint16_t wordIndex = 0; wordIndex < block->wordCount(); ++wordIndex) {
+      const int baseFont = SETTINGS.getReaderFontId();
+      const int baseline = block->maxAscender(renderer, baseFont);
+      const int16_t screenY =
+          static_cast<int16_t>(line.yPos + marginTop + baseline -
+                               renderer.getFontAscenderSize(block->wordFontId(renderer, baseFont, wordIndex)) +
+                               block->getRubyShift(baseline));
       const char* word = block->wordText(wordIndex);
       const size_t wordLength = block->wordTextLen(wordIndex);
       budget.maxSourceWordBytes = std::max(budget.maxSourceWordBytes, wordLength + 1);
@@ -573,28 +581,31 @@ bool DictionaryWordSelectActivity::extractWords() {
     const auto* block = line.block;
     if (!block) return true;
     const int lineFontId = block->resolvedFontId(renderer, SETTINGS.getReaderFontId());
-    const int16_t naturalSpaceWidth =
-        static_cast<int16_t>(renderer.getTextAdvanceX(lineFontId, " ", EpdFontFamily::REGULAR));
+    const int16_t naturalSpaceWidth = static_cast<int16_t>(
+        renderer.getTextAdvanceX(lineFontId, " ", EpdFontFamily::REGULAR, 0,
+                                 CrossPointSettings::characterSpacingLevel(SETTINGS.characterSpacing)));
 
     const uint16_t sourceWordCount = block->wordCount();
-    const int rubyShift = block->getRubyShift(renderer.getFontAscenderSize(lineFontId));
+    const int rubyShift = block->getRubyShift(block->maxAscender(renderer, lineFontId));
     int16_t lineGapWidth = naturalSpaceWidth;
     if (sourceWordCount >= 2 && block->wordTextLen(0) > 0) {
-      const char* firstWord = block->wordText(0);
-      const size_t firstLength = block->wordTextLen(0);
+      const char* firstWord = block->visibleWordText(0);
+      const size_t firstLength = block->visibleWordTextLen(0);
       const auto firstStyle = block->wordStyle(0);
       const uint8_t firstFocusBoundary = block->focusBoundary(0);
       const uint16_t firstFocusSuffixX = block->focusRunOffset(0);
       const bool firstWordIsRtl = isRtlWord(firstWord, block->getBlockStyle().isRtl);
       const int16_t firstWidth =
-          measureWordAdvanceX(renderer, lineFontId, firstWord, firstLength, firstStyle, firstFocusBoundary,
-                              firstFocusSuffixX, firstWordIsRtl, sanitizeScratch, scratchHalf);
+          measureWordAdvanceX(renderer, block->wordFontId(renderer, lineFontId, 0), firstWord, firstLength, firstStyle,
+                              firstFocusBoundary, firstFocusSuffixX, firstWordIsRtl, sanitizeScratch, scratchHalf);
       const int16_t derivedGap = static_cast<int16_t>(block->wordXpos(1) - block->wordXpos(0) - firstWidth);
       if (derivedGap > naturalSpaceWidth / 2) lineGapWidth = derivedGap;
     }
 
     int lastSelectableWordIndex = -2;
     for (uint16_t wordIndex = 0; wordIndex < sourceWordCount; ++wordIndex) {
+      const int wordFontId = block->wordFontId(renderer, lineFontId, wordIndex);
+      const int wordYOffset = block->maxAscender(renderer, lineFontId) - renderer.getFontAscenderSize(wordFontId);
       const char* wordText = block->wordText(wordIndex);
       const size_t wordLength = block->wordTextLen(wordIndex);
       const auto wordStyle = block->wordStyle(wordIndex);
@@ -613,7 +624,7 @@ bool DictionaryWordSelectActivity::extractWords() {
       }
       const uint16_t sourcePageWordOrdinal = pageWordOrdinal++;
       const int16_t screenX = static_cast<int16_t>(line.xPos + sourceGeometry.xOffset + marginLeft);
-      const int16_t screenY = static_cast<int16_t>(line.yPos + marginTop + rubyShift);
+      const int16_t screenY = static_cast<int16_t>(line.yPos + wordYOffset + marginTop + rubyShift);
 
       if (!utf8ContainsLookupCharacter(wordText)) {
         lastSelectableWordIndex = -2;
@@ -623,13 +634,13 @@ bool DictionaryWordSelectActivity::extractWords() {
       if (!containsDictionaryWordPartSeparator(wordText, wordLength)) {
         int16_t wordWidth;
         if (focusBoundary > 0 && focusSuffixX > 0) {
-          wordWidth = measureWordAdvanceX(renderer, lineFontId, wordText, wordLength, wordStyle, focusBoundary,
+          wordWidth = measureWordAdvanceX(renderer, wordFontId, wordText, wordLength, wordStyle, focusBoundary,
                                           focusSuffixX, wordIsRtl, sanitizeScratch, scratchHalf);
         } else if (wordIndex + 1 < sourceWordCount) {
           const int16_t raw = static_cast<int16_t>(block->wordXpos(wordIndex + 1) - block->wordXpos(wordIndex));
           wordWidth = std::max(static_cast<int16_t>(1), static_cast<int16_t>(raw - lineGapWidth));
         } else {
-          wordWidth = measureWordAdvanceX(renderer, lineFontId, wordText, wordLength, wordStyle, focusBoundary,
+          wordWidth = measureWordAdvanceX(renderer, wordFontId, wordText, wordLength, wordStyle, focusBoundary,
                                           focusSuffixX, sanitizeScratch, scratchHalf);
         }
         wordWidth = static_cast<int16_t>(std::min<int>(wordWidth, sourceGeometry.width));
@@ -642,11 +653,12 @@ bool DictionaryWordSelectActivity::extractWords() {
         if (lastSelectableWordIndex == static_cast<int>(wordIndex) - 1 && workingSet_.wordCount > 0) {
           const uint16_t previousIndex = wordIndex - 1;
           const auto previousStyle = block->wordStyle(previousIndex);
-          const int16_t previousMeasuredWidth =
-              static_cast<int16_t>(renderer.getTextAdvanceX(lineFontId, block->wordText(previousIndex), previousStyle));
-          const int16_t currentMeasuredWidth =
-              measureWordAdvanceX(renderer, lineFontId, wordText, wordLength, wordStyle, focusBoundary, focusSuffixX,
-                                  wordIsRtl, sanitizeScratch, scratchHalf);
+          const int16_t previousMeasuredWidth = static_cast<int16_t>(renderer.getTextAdvanceX(
+              block->wordFontId(renderer, lineFontId, previousIndex), block->visibleWordText(previousIndex),
+              previousStyle, 0, CrossPointSettings::characterSpacingLevel(SETTINGS.characterSpacing)));
+          const int16_t currentMeasuredWidth = measureWordAdvanceX(
+              renderer, wordFontId, block->visibleWordText(wordIndex), block->visibleWordTextLen(wordIndex), wordStyle,
+              focusBoundary, focusSuffixX, wordIsRtl, sanitizeScratch, scratchHalf);
           const int currentLeft = screenX;
           const int currentRight = screenX + currentMeasuredWidth;
           auto& previousWord = workingSet_.words[workingSet_.wordCount - 1];
@@ -663,17 +675,19 @@ bool DictionaryWordSelectActivity::extractWords() {
         uint16_t offset = 0;
         if (!appendText(wordText, wordLength, offset)) return false;
         WordSelectNavigator::WordInfo word;
-        word.textOffset = offset;
-        word.textLen = static_cast<uint16_t>(wordLength);
+        const auto prefixBytes = static_cast<uint8_t>(block->visibleWordText(wordIndex) - wordText);
+        word.textOffset = offset + prefixBytes;
+        word.textLen = static_cast<uint16_t>(wordLength - prefixBytes);
         word.lookupOffset = offset;
-        word.lookupLen = word.textLen;
+        word.lookupLen = static_cast<uint16_t>(wordLength);
+        word.sourcePrefixBytes = prefixBytes;
         word.pageWordOrdinal = sourcePageWordOrdinal;
         word.sourceWordByteOffset = 0;
         word.screenX = screenX;
         word.screenY = screenY;
         word.width = wordWidth;
         word.style = wordStyle;
-        word.fontId = lineFontId;
+        word.fontId = wordFontId;
         word.setLineHeight(line.lineHeight);
         word.isRtl = wordIsRtl;
         word.joinWithoutSpaceBefore = joinWithoutSpaceBefore;
@@ -686,7 +700,10 @@ bool DictionaryWordSelectActivity::extractWords() {
       }
 
       bool partSucceeded = true;
-      int fullWordWidth = renderer.getTextAdvanceX(lineFontId, wordText, wordStyle);
+      const size_t prefixBytes = block->visibleWordText(wordIndex) - wordText;
+      int fullWordWidth =
+          renderer.getTextAdvanceX(wordFontId, wordText + prefixBytes, wordStyle, 0,
+                                   CrossPointSettings::characterSpacingLevel(SETTINGS.characterSpacing));
       if (wordIndex + 1 < sourceWordCount && block->wordXpos(wordIndex + 1) > block->wordXpos(wordIndex)) {
         fullWordWidth =
             std::min(fullWordWidth, static_cast<int>(block->wordXpos(wordIndex + 1) - block->wordXpos(wordIndex)));
@@ -694,14 +711,14 @@ bool DictionaryWordSelectActivity::extractWords() {
       forEachDictionaryWordPart(wordText, wordLength, [&](const DictionaryWordPart& part) {
         if (!partSucceeded || part.length == 0) return;
         int16_t offsetX = 0;
-        if (part.sourceOffset > 0) {
+        if (part.sourceOffset > prefixBytes) {
           if (!prefixScratch || part.sourceOffset + 1 > scratchHalf) {
             partSucceeded = false;
             return;
           }
-          memcpy(prefixScratch, wordText, part.sourceOffset);
-          prefixScratch[part.sourceOffset] = '\0';
-          offsetX = measureWordAdvanceX(renderer, lineFontId, prefixScratch, part.sourceOffset, wordStyle,
+          memcpy(prefixScratch, wordText + prefixBytes, part.sourceOffset - prefixBytes);
+          prefixScratch[part.sourceOffset - prefixBytes] = '\0';
+          offsetX = measureWordAdvanceX(renderer, wordFontId, prefixScratch, part.sourceOffset - prefixBytes, wordStyle,
                                         sanitizeScratch, scratchHalf);
         }
 
@@ -710,25 +727,28 @@ bool DictionaryWordSelectActivity::extractWords() {
           partSucceeded = false;
           return;
         }
-        const char* storedPart = textPool + offset;
-        const int16_t measuredPartWidth =
-            measureWordAdvanceX(renderer, lineFontId, storedPart, part.length, wordStyle, sanitizeScratch, scratchHalf);
+        const size_t partPrefix =
+            part.sourceOffset < prefixBytes ? std::min(part.length, prefixBytes - part.sourceOffset) : 0;
+        const char* storedPart = textPool + offset + partPrefix;
+        const int16_t measuredPartWidth = measureWordAdvanceX(
+            renderer, wordFontId, storedPart, part.length - partPrefix, wordStyle, sanitizeScratch, scratchHalf);
         const int partOffsetX = dictionaryWordPartVisualOffset(fullWordWidth, offsetX, measuredPartWidth, wordIsRtl);
         const PageWordGeometry partGeometry =
             clipPageTextRange(line, block->wordXpos(wordIndex) + partOffsetX, measuredPartWidth);
         if (partGeometry.width <= 0) return;
         WordSelectNavigator::WordInfo word;
-        word.textOffset = offset;
-        word.textLen = static_cast<uint16_t>(part.length);
+        word.textOffset = offset + partPrefix;
+        word.textLen = static_cast<uint16_t>(part.length - partPrefix);
         word.lookupOffset = offset;
-        word.lookupLen = word.textLen;
+        word.lookupLen = static_cast<uint16_t>(part.length);
+        word.sourcePrefixBytes = static_cast<uint8_t>(partPrefix);
         word.pageWordOrdinal = sourcePageWordOrdinal;
         word.sourceWordByteOffset = static_cast<uint16_t>(part.sourceOffset);
         word.screenX = static_cast<int16_t>(line.xPos + marginLeft + partGeometry.xOffset);
         word.screenY = screenY;
         word.width = static_cast<int16_t>(partGeometry.width);
         word.style = wordStyle;
-        word.fontId = lineFontId;
+        word.fontId = wordFontId;
         word.setLineHeight(line.lineHeight);
         word.isRtl = wordIsRtl;
         word.compoundSeparatorBefore = static_cast<uint8_t>(part.separatorBefore);
@@ -745,7 +765,7 @@ bool DictionaryWordSelectActivity::extractWords() {
 bool DictionaryWordSelectActivity::captureCurrentClippingRequest(DictionaryClippingRequest& request) const {
   int firstIdx = -1;
   int lastIdx = -1;
-  if (!navigator.getLookupSelectionRange(firstIdx, lastIdx)) {
+  if (!navigator.getExpandedSelectionRange(firstIdx, lastIdx)) {
     LOG_ERR("CLIP", "Dictionary clipping has no selected words");
     return false;
   }
@@ -753,12 +773,6 @@ bool DictionaryWordSelectActivity::captureCurrentClippingRequest(DictionaryClipp
   const auto* last = navigator.getWordAt(lastIdx);
   if (!first || !last) {
     LOG_ERR("CLIP", "Dictionary clipping selection indexes are invalid");
-    return false;
-  }
-  if (first->continuationOf >= 0) first = navigator.getWordAt(first->continuationOf);
-  if (last->continuationIndex >= 0) last = navigator.getWordAt(last->continuationIndex);
-  if (!first || !last) {
-    LOG_ERR("CLIP", "Dictionary clipping hyphenated selection is invalid");
     return false;
   }
   const bool firstPrecedesLast =
@@ -771,7 +785,8 @@ bool DictionaryWordSelectActivity::captureCurrentClippingRequest(DictionaryClipp
   request.lastPageOffset = static_cast<uint8_t>(activePageOffset_);
   request.lastPageWordOrdinal = rangeLast->pageWordOrdinal;
   request.firstWordByteOffset = rangeFirst->sourceWordByteOffset;
-  request.lastWordByteEndOffset = static_cast<uint16_t>(rangeLast->sourceWordByteOffset + rangeLast->textLen);
+  request.lastWordByteEndOffset =
+      static_cast<uint16_t>(rangeLast->sourceWordByteOffset + rangeLast->textLen + rangeLast->sourcePrefixBytes);
   return true;
 }
 
@@ -804,8 +819,11 @@ void DictionaryWordSelectActivity::finishTouchLookupOnCurrentPage(const std::str
                                                                   const DictionaryClippingRequest& request) {
   pendingClippingRequest_ = request;
   hasPendingClippingRequest_ = true;
-  touchDragLookup_ = false;
+#if CROSSINK_APP_CAP_TOUCH
+  showTouchSelectionActions(phrase, wordCount);
+#else
   controller.lookupOrPopup(phrase, wordCount);
+#endif
 }
 
 bool DictionaryWordSelectActivity::continueTouchSelectionOnNextPage() {
@@ -871,12 +889,22 @@ bool DictionaryWordSelectActivity::continueTouchSelectionOnNextPage() {
     return true;
   }
 
-  hasCrossPageSelection_ = true;
-  crossPageFirstRequest_ = currentRequest;
-  crossPageLookupPrefix_ = std::move(prefix);
-  crossPageLookupWordCount_ = prefixWordCount;
-  crossPageMergedFirstWord_ = std::move(mergedFirstWord);
-  crossPageFirstWordWasMerged_ = firstWordWasMerged;
+  {
+    RenderLock lock(*this);
+    hasCrossPageSelection_ = true;
+    crossPageFirstRequest_ = currentRequest;
+    crossPageLookupPrefix_ = std::move(prefix);
+    crossPageLookupWordCount_ = prefixWordCount;
+    crossPageMergedFirstWord_ = std::move(mergedFirstWord);
+    crossPageFirstWordWasMerged_ = firstWordWasMerged;
+#if CROSSINK_APP_CAP_TOUCH
+    // The finger is still at the old page's bottom. Keep the new first-word
+    // endpoint until it moves again, instead of selecting the whole next page.
+    mappedInput.isScreenTouchHeld(touchDragStartX_, touchDragStartY_);
+    touchDragHasMoved_ = false;
+    touchDragOffsetX_ = touchDragOffsetY_ = 0;
+#endif
+  }
   requestUpdate();
   return true;
 }
@@ -929,16 +957,17 @@ bool DictionaryWordSelectActivity::mergeHyphenatedWords() {
     auto& last = workingSet_.words[lastWordIndex];
     auto& next = workingSet_.words[nextWordIndex];
     if (last.isTableText || next.isTableText) continue;
-    const char* lastText = textPool + last.textOffset;
-    if (!utf8EndsWithHyphen(lastText, last.textLen) || lastText[0] == '-') continue;
+    const char* lastText = textPool + last.textOffset - last.sourcePrefixBytes;
+    const size_t lastLength = last.textLen + last.sourcePrefixBytes;
+    if (!utf8EndsWithHyphen(lastText, lastLength) || lastText[0] == '-') continue;
 
     const char* nextText = textPool + next.textOffset;
     const size_t nextSkip = next.textLen > 0 && nextText[0] == '-' ? 1 : 0;
     uint16_t mergedOffset = 0;
-    if (!appendMergedText(lastText, last.textLen - 1, nextText + nextSkip, next.textLen - nextSkip, mergedOffset)) {
+    if (!appendMergedText(lastText, lastLength - 1, nextText + nextSkip, next.textLen - nextSkip, mergedOffset)) {
       return false;
     }
-    const size_t mergedLength = last.textLen - 1 + next.textLen - nextSkip;
+    const size_t mergedLength = lastLength - 1 + next.textLen - nextSkip;
     last.continuationIndex = static_cast<int>(nextWordIndex);
     next.continuationOf = static_cast<int>(lastWordIndex);
     last.lookupOffset = mergedOffset;
@@ -951,15 +980,16 @@ bool DictionaryWordSelectActivity::mergeHyphenatedWords() {
     const auto& lastRow = workingSet_.rows[workingSet_.rowCount - 1];
     if (lastRow.wordCount > 0) {
       auto& last = workingSet_.words[lastRow.firstWord + lastRow.wordCount - 1];
-      const char* lastText = textPool + last.textOffset;
-      if (!last.isTableText && utf8EndsWithHyphen(lastText, last.textLen) && lastText[0] != '-') {
+      const char* lastText = textPool + last.textOffset - last.sourcePrefixBytes;
+      const size_t lastLength = last.textLen + last.sourcePrefixBytes;
+      if (!last.isTableText && utf8EndsWithHyphen(lastText, lastLength) && lastText[0] != '-') {
         uint16_t mergedOffset = 0;
-        if (!appendMergedText(lastText, last.textLen - 1, nextPageFirstWord.c_str(), nextPageFirstWord.size(),
+        if (!appendMergedText(lastText, lastLength - 1, nextPageFirstWord.c_str(), nextPageFirstWord.size(),
                               mergedOffset)) {
           return false;
         }
         last.lookupOffset = mergedOffset;
-        last.lookupLen = static_cast<uint16_t>(last.textLen - 1 + nextPageFirstWord.size());
+        last.lookupLen = static_cast<uint16_t>(lastLength - 1 + nextPageFirstWord.size());
       }
     }
   }
@@ -989,6 +1019,216 @@ void DictionaryWordSelectActivity::openDictionarySwitch() {
     controller.startLookup(controller.getLookupWord(), false);
   });
 }
+
+#if CROSSINK_APP_CAP_TOUCH
+void DictionaryWordSelectActivity::showTouchSelectionActions(std::string phrase, const size_t wordCount) {
+  RenderLock lock(*this);
+  pendingTouchPhrase_ = std::move(phrase);
+  pendingTouchWordCount_ = wordCount;
+  touchDragLookup_ = false;
+  int x = 0, y = 0;
+  ignoreTouchUntilRelease_ = mappedInput.isScreenTouchHeld(x, y);
+  touchSelectionActive_ = true;
+  touchLookupEnabled_ = Dictionary::exists(cachePath.c_str());
+  forceFullRepaintOnNextRender();
+  requestUpdate();
+}
+
+TextSelectionOverlay::Layout DictionaryWordSelectActivity::touchSelectionLayout() const {
+  TextSelectionOverlay::Layout layout;
+  const auto safe = TextSelectionOverlay::safeArea(renderer);
+  int first = -1, last = -1;
+  navigator.getExpandedSelectionRange(first, last);
+  // The previous page is no longer resident: only its end handle is editable.
+  const auto* startWord = navigator.getWordAt(first);
+  const auto* endWord = navigator.getWordAt(last);
+  const int lineHeight = renderer.getLineHeight(SETTINGS.getReaderFontId());
+  const auto wordRect = [lineHeight](const WordSelectNavigator::WordInfo& word) {
+    return TextSelectionOverlay::Rect{word.screenX, word.screenY, word.width,
+                                      static_cast<int16_t>(word.heightOr(lineHeight))};
+  };
+  const auto firstRect = startWord ? wordRect(*startWord) : TextSelectionOverlay::Rect{};
+  const auto lastRect = endWord ? wordRect(*endWord) : TextSelectionOverlay::Rect{};
+  if (startWord && !hasCrossPageSelection_) {
+    layout.start = TextSelectionOverlay::handle(safe, firstRect, !startWord->isRtl, true);
+  }
+  if (endWord) {
+    layout.end = TextSelectionOverlay::handle(safe, lastRect, endWord->isRtl, false);
+  }
+  TextSelectionOverlay::placeActions(renderer, layout, firstRect, lastRect, touchLookupEnabled_);
+  return layout;
+}
+
+void DictionaryWordSelectActivity::drawTouchSelection() const {
+  if (touchSelectionActive_) TextSelectionOverlay::draw(renderer, touchSelectionLayout(), !touchDragLookup_);
+}
+
+void DictionaryWordSelectActivity::performTouchSelectionAction(const int action) {
+  RenderLock lock(*this);
+  if (action == TextSelectionOverlay::lookupAction && !touchLookupEnabled_) return;
+  if (action == TextSelectionOverlay::clipAction && !hasPendingClippingRequest_) return;
+  touchSelectionActive_ = false;
+  forceFullRepaintOnNextRender();
+  if (action == TextSelectionOverlay::lookupAction) {
+    const size_t wordCount = pendingTouchPhrase_.empty()
+                                 ? crossPageLookupWordCount_ + navigator.getLookupSelectionWordCount()
+                                 : pendingTouchWordCount_;
+    auto phrase = pendingTouchPhrase_.empty() ? finishTouchLookupPhrase() : std::move(pendingTouchPhrase_);
+    lock.unlock();
+    controller.lookupOrPopup(phrase, wordCount);
+  } else if (action == TextSelectionOverlay::clipAction) {
+    finishWithClippingRequest();
+  }
+}
+
+bool DictionaryWordSelectActivity::isWithinSelectedPageEndDwellSlop(const int x, const int y) const {
+  const int current = navigator.getCurrentFlatIndex();
+  const auto* word = navigator.getSelected();
+  if (!word || navigator.getWordAt(current + 1)) return false;
+  const WordRef bounds{.x = word->screenX,
+                       .y = word->screenY,
+                       .w = word->width,
+                       .h = word->heightOr(renderer.getLineHeight(SETTINGS.getReaderFontId()))};
+  return ClipSelectionPaging::isWithinPageEndDwellSlop(bounds, x, y) ||
+         ClipSelectionPaging::isWithinPageEndDwellSlop(bounds, x + touchDragOffsetX_, y + touchDragOffsetY_);
+}
+
+bool DictionaryWordSelectActivity::handleTouchSelection() {
+  RenderLock lock(*this);
+  if (ignoreTouchUntilRelease_) {
+    // A failed page advance finished the drag while contact was still held.
+    // Its release belongs to that drag, not to toolbar taps or Back gestures.
+    int x = 0, y = 0;
+    ignoreTouchUntilRelease_ = mappedInput.isScreenTouchHeld(x, y);
+    return true;
+  }
+  if (touchDragLookup_) {
+    int x = 0, y = 0;
+    if (mappedInput.isScreenTouchHeld(x, y)) {
+      touchDragHasMoved_ =
+          touchDragHasMoved_ || ClipSelectionPaging::hasDraggedFrom(touchDragStartX_, touchDragStartY_, x, y);
+      // Once the final-word hold is armed, tolerate contact jitter before
+      // nearest-word selection can move the cursor back and reset its timer.
+      const bool keepPageEnd =
+          touchPageEndIndex_ == navigator.getCurrentFlatIndex() && isWithinSelectedPageEndDwellSlop(x, y);
+      if (touchDragHasMoved_ && !keepPageEnd &&
+          navigator.selectNearestWord(x + touchDragOffsetX_, y + touchDragOffsetY_,
+                                      renderer.getLineHeight(SETTINGS.getReaderFontId()))) {
+        requestUpdate();
+      }
+      const int current = navigator.getCurrentFlatIndex();
+      const bool atPageEnd = keepPageEnd || isWithinSelectedPageEndDwellSlop(x, y);
+      if (touchDragHasMoved_ && atPageEnd) {
+        const auto now = static_cast<uint32_t>(millis());
+        if (touchPageEndIndex_ != current) {
+          touchPageEndIndex_ = current;
+          touchPageEndHeldSince_ = now;
+        } else if (ClipSelectionPaging::hasHeldPageEndLongEnough(now, touchPageEndHeldSince_)) {
+          touchPageEndIndex_ = -1;
+          lock.unlock();
+          if (continueTouchSelectionOnNextPage()) return true;
+        }
+      } else {
+        touchPageEndIndex_ = -1;
+      }
+      return true;
+    }
+    touchDragLookup_ = false;
+    touchPageEndIndex_ = -1;
+    hasPendingClippingRequest_ = false;
+    captureClippingRequest();
+    touchLookupEnabled_ = Dictionary::exists(cachePath.c_str());
+    forceFullRepaintOnNextRender();
+    requestUpdate();
+    return true;
+  }
+
+  if (touchSelectionActive_ && mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    if (!page) {
+      DictUtils::cancelAndFinish(*this);
+      return true;
+    }
+    navigator.clearTouchSelection();
+    touchSelectionActive_ = false;
+    pendingTouchPhrase_.clear();
+    resetCrossPageSelection();
+    forceFullRepaintOnNextRender();
+    requestUpdate();
+    return true;
+  }
+  if (touchSelectionActive_ && mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    lock.unlock();
+    performTouchSelectionAction(1);
+    return true;
+  }
+
+  int x = 0, y = 0;
+  const bool tapped = mappedInput.wasScreenTapped(x, y);
+  const bool pressed = mappedInput.wasScreenTouchDown(x, y);
+  if (!tapped && !pressed) return touchSelectionActive_;
+  const auto layout = touchSelectionLayout();
+  if (touchSelectionActive_ && tapped) {
+    const int action = TextSelectionOverlay::actionAt(layout, x, y);
+    if (action >= 0) {
+      if (action == touchPressedAction_) {
+        lock.unlock();
+        performTouchSelectionAction(action);
+      }
+      touchPressedAction_ = -1;
+      return true;
+    }
+    if (layout.start.hit.contains(x, y) || layout.end.hit.contains(x, y)) return true;
+    int first = -1, last = -1;
+    navigator.getExpandedSelectionRange(first, last);
+    for (int i = first; i <= last; ++i) {
+      const auto* word = navigator.getWordAt(i);
+      if (word && x >= word->screenX && x <= word->screenX + word->width && y >= word->screenY &&
+          y <= word->screenY + word->heightOr(renderer.getLineHeight(SETTINGS.getReaderFontId())))
+        return true;
+    }
+    DictUtils::cancelAndFinish(*this);
+    return true;
+  }
+  if (pressed) {
+    touchPressedAction_ = touchSelectionActive_ ? TextSelectionOverlay::actionAt(layout, x, y) : -1;
+    if (touchPressedAction_ >= 0) return true;
+    bool startDrag = false;
+    touchDragOffsetX_ = touchDragOffsetY_ = 0;
+    if (touchSelectionActive_) {
+      const bool start = layout.start.hit.contains(x, y);
+      const bool end = layout.end.hit.contains(x, y);
+      if (!start && !end) return true;
+      int first = -1, last = -1;
+      navigator.getExpandedSelectionRange(first, last);
+      startDrag = navigator.setTouchSelection(start ? last : first, start ? first : last);
+      if (const auto* word = navigator.getSelected()) {
+        touchDragOffsetX_ = word->screenX + word->width / 2 - x;
+        touchDragOffsetY_ = word->screenY + word->heightOr(renderer.getLineHeight(SETTINGS.getReaderFontId())) / 2 - y;
+      }
+    } else {
+      resetCrossPageSelection();
+      pendingTouchPhrase_.clear();
+      bool hit = false;
+      navigator.selectWordAtPoint(x, y, renderer.getLineHeight(SETTINGS.getReaderFontId()), &hit);
+      startDrag = hit && navigator.beginTouchMultiSelect();
+    }
+    if (startDrag) {
+      // A failed page advance may have cached the old phrase. A live endpoint
+      // edit must use its new range when the user chooses Look Up.
+      pendingTouchPhrase_.clear();
+      touchSelectionActive_ = touchDragLookup_ = true;
+      touchPageEndIndex_ = -1;
+      touchDragHasMoved_ = false;
+      touchDragStartX_ = x;
+      touchDragStartY_ = y;
+      forceFullRepaintOnNextRender();
+      requestUpdate();
+    }
+    return true;
+  }
+  return touchSelectionActive_;
+}
+#endif
 
 void DictionaryWordSelectActivity::loop() {
   if (ignoreInitialBackRelease_) {
@@ -1063,6 +1303,10 @@ void DictionaryWordSelectActivity::loop() {
     return;
   }
 
+#if CROSSINK_APP_CAP_TOUCH
+  if (handleTouchSelection()) return;
+#endif
+
   if (navigator.isEmpty()) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       DictUtils::cancelAndFinish(*this);
@@ -1073,50 +1317,6 @@ void DictionaryWordSelectActivity::loop() {
   if (navigator.handleNavigation(mappedInput, renderer)) {
     requestUpdate();
   }
-
-#if CROSSINK_APP_CAP_TOUCH
-  if (touchDragLookup_) {
-    int dragX = 0;
-    int dragY = 0;
-    if (mappedInput.isScreenTouchHeld(dragX, dragY)) {
-      touchDragHasMoved_ =
-          touchDragHasMoved_ || ClipSelectionPaging::hasDraggedFrom(touchDragStartX_, touchDragStartY_, dragX, dragY);
-      const int previousIdx = navigator.getCurrentFlatIndex();
-      bool hit = false;
-      if (navigator.selectWordAtPoint(dragX, dragY, renderer.getLineHeight(SETTINGS.getReaderFontId()), &hit)) {
-        requestUpdate();
-      } else if (hit && touchDragHasMoved_ && navigator.getCurrentFlatIndex() == previousIdx &&
-                 navigator.getWordAt(previousIdx + 1) == nullptr && continueTouchSelectionOnNextPage()) {
-        return;
-      }
-      return;
-    }
-
-    touchDragLookup_ = false;
-    const size_t wordCount = crossPageLookupWordCount_ + navigator.getLookupSelectionWordCount();
-    controller.lookupOrPopup(finishTouchLookupPhrase(), wordCount);
-    if (controller.isLookingUp()) captureClippingRequest();
-    return;
-  }
-
-  int touchX = 0;
-  int touchY = 0;
-  if (mappedInput.wasScreenTouchDown(touchX, touchY)) {
-    resetCrossPageSelection();
-    bool touchedWord = false;
-    navigator.selectWordAtPoint(touchX, touchY, renderer.getLineHeight(SETTINGS.getReaderFontId()), &touchedWord);
-    if (touchedWord && navigator.beginTouchMultiSelect()) {
-      touchDragLookup_ = true;
-      touchDragHasMoved_ = false;
-      touchDragStartX_ = touchX;
-      touchDragStartY_ = touchY;
-      // Finish this fast refresh before lookup can replace the screen, so the
-      // touched word always provides visible press feedback on e-ink.
-      requestUpdateAndWait();
-    }
-    return;
-  }
-#endif
 
   // Check Back early when not in multi-select mode. This allows exit even when
   // confirmReleaseConsumed is stuck true (menu-triggered entry has no Confirm release).
@@ -1211,6 +1411,9 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
       }
       clearFrontButtonHintArea();
       DictUtils::drawWordSelectButtonHints(renderer, mappedInput, navigator);
+#if CROSSINK_APP_CAP_TOUCH
+      drawTouchSelection();
+#endif
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
       prevHighlightIdx_ = currIdx;
       nextRenderMode_ = snapshotPrimed ? RenderMode::Differential : RenderMode::FullPage;
@@ -1229,6 +1432,13 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
     return;
   }
 
+  if (!page) {
+#if CROSSINK_APP_CAP_TOUCH
+    drawTouchSelection();
+#endif
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    return;
+  }
   if (page->hasImages()) {
     GfxRenderer::FrameBufferLoan loan(renderer);
     page->prepareImageCaches();
@@ -1269,6 +1479,9 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
 
   clearFrontButtonHintArea();
   DictUtils::drawWordSelectButtonHints(renderer, mappedInput, navigator);
+#if CROSSINK_APP_CAP_TOUCH
+  drawTouchSelection();
+#endif
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 
   prevHighlightIdx_ = currIdx;

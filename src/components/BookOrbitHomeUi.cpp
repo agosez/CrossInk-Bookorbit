@@ -1060,7 +1060,8 @@ void BookOrbitHomeUi::drawYear(const Rect& tile) const {
     previousMonth = monday.month;
     if (week > 0 || monday.day <= 7) {
       if (monthsSeen++ % 2 == 0) {
-        char token[8];
+        // Room for a short month name in any script: Arabic has no abbreviations (12 bytes).
+        char token[16];
         copyToken(months, monday.month - 1, token, sizeof(token));
         renderer.drawText(SMALL_FONT_ID, gridX + week * kYearCellPitch, tile.y + 29, token);
       }
@@ -1117,7 +1118,7 @@ void BookOrbitHomeUi::drawForecast(const Rect& tile) const {
     renderer.drawText(UI_12_FONT_ID, tile.x + kPad, tile.y + 37, "-", true, EpdFontFamily::BOLD);
     return;
   }
-  char month[8];
+  char month[16];
   copyToken(tr(STR_HOME_MONTHS_SHORT), finishDate.month - 1, month, sizeof(month));
   char date[24];
   snprintf(date, sizeof(date), "%u %s", static_cast<unsigned>(finishDate.day), month);

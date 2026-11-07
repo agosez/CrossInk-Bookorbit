@@ -17,6 +17,7 @@ class GfxRenderer {
   int getWriteOriginY() const { return 0; }
   int getWriteRows() const { return height; }
   RenderMode getRenderMode() const { return BW; }
+  bool isDisplayInverted() const { return false; }
   Orientation getOrientation() const { return LandscapeCounterClockwise; }
 
  private:

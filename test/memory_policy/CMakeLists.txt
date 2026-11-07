@@ -39,6 +39,7 @@ gtest_discover_tests(CssArenaBackingTest PROPERTIES ENVIRONMENT "UBSAN_OPTIONS=h
 function(add_layout_test name root)
   add_executable(${name} TextLayoutBackingTest.cpp
     ${root}/lib/Epub/Epub/ParsedText.cpp ${root}/lib/Epub/Epub/blocks/TextBlock.cpp
+    ${root}/lib/Epub/Epub/hyphenation/HyphenationCommon.cpp
     ${root}/lib/MiniBidi/BidiUtils.cpp ${root}/lib/MiniBidi/minibidi.c ${root}/lib/Utf8/Utf8.cpp)
   target_include_directories(${name} PRIVATE stubs ${root}/lib/Memory ${root}/lib/MemoryBudget
     ${root}/lib/Epub ${root}/lib/EpdFont ${root}/lib/Utf8 ${root}/lib/MiniBidi ${root}/lib/Serialization)

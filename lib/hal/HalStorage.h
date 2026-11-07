@@ -42,6 +42,7 @@ class HalStorage {
   size_t readFileToBuffer(const char* path, char* buffer, size_t bufferSize, size_t maxBytes = 0);
   // Write a string to `path` on the SD card. Overwrites existing file.
   // Returns true on success.
+  bool readFileToString(const char* moduleName, const std::string& path, size_t cap, std::string& out);
   bool writeFile(const char* path, const String& content);
   // Ensure a directory exists, creating it if necessary. Returns true on success.
   bool ensureDirectoryExists(const char* path);

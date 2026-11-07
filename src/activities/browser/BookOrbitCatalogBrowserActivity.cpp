@@ -70,7 +70,7 @@ struct SortChoice {
 };
 constexpr SortChoice SORT_CHOICES[] = {
     {"recently_added", StrId::STR_LIBRARY_DATE_ADDED, true},
-    {"title", StrId::STR_LIBRARY_TITLE, false},
+    {"title", StrId::STR_TITLE, false},
     {"author", StrId::STR_LIBRARY_AUTHOR_LAST_NAME, false},
     {"recently_read", StrId::STR_BOOKORBIT_SORT_RECENTLY_READ, true},
     {"series", StrId::STR_LIBRARY_SERIES, false},
@@ -1314,10 +1314,10 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
   // TLS runs with a few KB of headroom on the C3 and reads can drop mid-transfer;
   // keep the partial file and resume instead of restarting a multi-MB download.
   downloadOptions.preservePartial = true;
-  // Small client RX buffer (see BookOrbitCatalogClient::fetchJson) so the
-  // headers-time body cache can't demand a large realloc next to the TLS buffers.
-  downloadOptions.clientRxBufferSize = 2048;
-  downloadOptions.largeBody = true;
+  // A book spans many TLS records: once the request is out, the SDK grows the
+  // connection's input buffer to a full record while the heap still has the block
+  // (skipped when the server agreed to small records, issue #96).
+  downloadOptions.reserveFullRecord = true;
   // CrossInk v1.6.1's download safeguards, as its OPDS browser uses them: stage the file
   // as "<book>.part", refuse a book the card cannot hold before writing any of it, and
   // only put the file in place once it opens as an EPUB. A body cut short without a

@@ -112,7 +112,7 @@ TEST_F(CssArenaBackingTest, PreviousCacheVersionIsInvalidated) {
   std::vector<uint8_t> bytes(file.size());
   ASSERT_EQ(file.read(bytes.data(), bytes.size()), static_cast<int>(bytes.size()));
   file.close();
-  bytes[4] = 16;
+  bytes[4] = CssParser::CSS_CACHE_VERSION - 1;
   Storage.put("book/css_rules.cache", bytes);
   EXPECT_EQ(css.inspectCache(), CssParser::CacheStatus::Invalid);
 }
@@ -166,4 +166,108 @@ TEST_F(CssArenaBackingTest, ManyRulesSurviveArenaGrowthAndCacheRoundTrip) {
   ASSERT_EQ(css.ruleCount(), 1303u);
   for (int i = 0; i < 1303; ++i)
     EXPECT_EQ(css.resolveStyle("div", "rule" + std::to_string(i)).display, CssDisplay::None);
+}
+
+TEST_F(CssArenaBackingTest, BorderSuppressionSurvivesHydrationAndDiskFallback) {
+  for (int mode = 0; mode < 3; ++mode) {
+    fakeheap::reset(mode != 0);
+    const std::string text =
+        "hr.transition { border: none; } hr.visible { border: none; border-top: 1px solid; } "
+        "div hr { border-width: 0; }";
+    Storage.put("input.css", {text.begin(), text.end()});
+    FsFile file;
+    ASSERT_TRUE(Storage.openFileForRead("test", "input.css", file));
+    CssParser css("book");
+    ASSERT_TRUE(css.loadFromStream(file));
+    file.close();
+    EXPECT_TRUE(css.resolveStyle("hr", "transition").suppressesHorizontalRule());
+    EXPECT_FALSE(css.resolveStyle("hr", "visible").suppressesHorizontalRule());
+    ASSERT_TRUE(css.saveToCache());
+    css.clear();
+    if (mode == 2) fakeheap::external.fail = 1;
+    ASSERT_TRUE(css.loadFromCache());
+    if (mode == 2) EXPECT_TRUE(fakeheap::live.empty());
+    EXPECT_TRUE(css.resolveStyle("hr", "transition").suppressesHorizontalRule());
+    EXPECT_FALSE(css.resolveStyle("hr", "visible").suppressesHorizontalRule());
+    EXPECT_TRUE(css.resolveStyle("hr", "", {{0, "div", ""}}).suppressesHorizontalRule());
+  }
+}
+
+TEST_F(CssArenaBackingTest, PublisherDecorationsAndContextSurviveAllCacheBackings) {
+  for (int mode = 0; mode < 3; ++mode) {
+    fakeheap::reset(mode != 0);
+    const std::string text =
+        "section#chapter > p.note.wide { border: 2px dashed; background: #ddd; white-space: pre-wrap; } "
+        "p.note::first-letter { initial-letter: 3; float: left; }";
+    Storage.put("input.css", {text.begin(), text.end()});
+    FsFile file;
+    ASSERT_TRUE(Storage.openFileForRead("test", "input.css", file));
+    CssParser css("book");
+    ASSERT_TRUE(css.loadFromStream(file));
+    file.close();
+    ASSERT_TRUE(css.saveToCache());
+    css.clear();
+    if (mode == 2) fakeheap::external.fail = 1;
+    ASSERT_TRUE(css.loadFromCache());
+    auto style = css.resolveStyle("p", "wide note", {{0, "section", "", "chapter"}});
+    EXPECT_EQ(style.borders[0].width, 2);
+    EXPECT_EQ(style.borders[0].style, CssBorderStyle::Dashed);
+    EXPECT_TRUE(style.shaded);
+    EXPECT_TRUE(style.preserveWhitespace);
+    auto cap = css.resolveStyle("p", "note", {}, {}, true);
+    EXPECT_EQ(cap.initialLetter, 3);
+    EXPECT_TRUE(cap.floatLeft);
+  }
+}
+
+TEST_F(CssArenaBackingTest, PublisherFacesShareTheRulesCacheAndDetectTruncation) {
+  const std::string source =
+      "@font-face {font-family: Body; src:url(../font.ttf);font-weight:bold} p {font-family:Body}";
+  Storage.put("input.css", {source.begin(), source.end()});
+  FsFile file;
+  ASSERT_TRUE(Storage.openFileForRead("test", "input.css", file));
+  CssParser css("book");
+  ASSERT_TRUE(css.loadFromStream(file, "EPUB/css/"));
+  file.close();
+  ASSERT_TRUE(css.saveToCache());
+  EXPECT_EQ(css.inspectCache(), CssParser::CacheStatus::Complete);
+  std::vector<CssFontFace> faces;
+  ASSERT_TRUE(CssParser::loadFontFaces("book", faces));
+  ASSERT_EQ(faces.size(), 1u);
+  EXPECT_EQ(faces[0].family, CssParser::hashFontFamily("Body"));
+  EXPECT_EQ(faces[0].href, "EPUB/css/../font.ttf");
+  EXPECT_TRUE(faces[0].bold);
+  EXPECT_TRUE(css.loadFromCache());
+  Storage.data("book/css_rules.cache").bytes.pop_back();
+  EXPECT_EQ(css.inspectCache(), CssParser::CacheStatus::Invalid);
+  EXPECT_FALSE(CssParser::loadFontFaces("book", faces));
+  EXPECT_TRUE(faces.empty());
+}
+
+TEST_F(CssArenaBackingTest, EmptyPublisherManifestIsValidAndRequired) {
+  CssParser css("book");
+  ASSERT_TRUE(css.saveToCache());
+  std::vector<CssFontFace> faces;
+  ASSERT_TRUE(CssParser::loadFontFaces("book", faces));
+  EXPECT_TRUE(faces.empty());
+  EXPECT_EQ(css.inspectCache(), CssParser::CacheStatus::Complete);
+  auto& bytes = Storage.data("book/css_rules.cache").bytes;
+  bytes.resize(bytes.size() - 5);
+  EXPECT_EQ(css.inspectCache(), CssParser::CacheStatus::Invalid);
+}
+
+TEST_F(CssArenaBackingTest, PublisherMetadataRespectsInternalReserve) {
+  fakeheap::reset(false);
+  fakeheap::internal.free = 64 * 1024;
+  const std::string source = "@font-face {font-family: Body; src:url(font.ttf)}";
+  Storage.put("input.css", {source.begin(), source.end()});
+  FsFile file;
+  ASSERT_TRUE(Storage.openFileForRead("test", "input.css", file));
+  CssParser css("book");
+  EXPECT_FALSE(css.loadFromStream(file));
+  file.close();
+  ASSERT_TRUE(css.saveToCache());
+  std::vector<CssFontFace> faces;
+  ASSERT_TRUE(CssParser::loadFontFaces("book", faces));
+  EXPECT_TRUE(faces.empty());
 }

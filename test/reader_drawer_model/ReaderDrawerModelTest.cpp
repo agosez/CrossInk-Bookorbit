@@ -112,6 +112,7 @@ TEST(ReaderDrawerModel, CatalogOrderAndConditionalRowsMatchTouchDesign) {
   EXPECT_EQ(layout.count, 9);
   EXPECT_EQ(layout.items[0], ReaderDrawerCatalogItem::Margins);
   EXPECT_EQ(layout.items[3], ReaderDrawerCatalogItem::Images);
+  EXPECT_EQ(layout.items[4], ReaderDrawerCatalogItem::Hyphenation);
 
   const auto& minimalMore = minimal[static_cast<size_t>(ReaderDrawerTab::More)];
   EXPECT_EQ(minimalMore.count, 3);
@@ -327,4 +328,33 @@ TEST(ReaderDrawerModel, SamplePreviewCoversLiveTextSettingsOnly) {
   for (const auto row : {Row::Orientation, Row::DictionaryFontFamily, Row::DictionaryFontSize, Row::Images})
     EXPECT_FALSE(readerDrawerShowsSamplePreview(Pane::EnumOptions, Tab::Layout, row));
   EXPECT_FALSE(readerDrawerShowsSamplePreview(Pane::DictionaryFont, Tab::Font, Row::FontSize));
+}
+
+TEST(PendingOverlayResume, FileBrowserReturnPreservesLargeListPosition) {
+  PendingOverlayResume stored;
+  stored.origin = PendingOverlayOrigin::FileBrowser;
+  EXPECT_FALSE(stored.valid());
+  stored.fileBrowserPath = "/books";
+  stored.selectedIndex = 40000;
+  stored.scrollPosition = 39990;
+
+  PendingOverlayResume consumed;
+  ASSERT_TRUE(consumePendingOverlayResumeOnce(stored, consumed));
+  EXPECT_EQ(consumed.fileBrowserPath, "/books");
+  EXPECT_EQ(consumed.selectedIndex, 40000);
+  EXPECT_EQ(consumed.scrollPosition, 39990);
+  EXPECT_FALSE(stored.valid());
+  EXPECT_TRUE(stored.fileBrowserPath.empty());
+}
+
+TEST(ReaderDrawerModel, LandscapePreviewPanesPlaceSamplePreviewBesideControls) {
+  EXPECT_TRUE(readerDrawerSamplePreviewBesideControls(true));
+  EXPECT_FALSE(readerDrawerSamplePreviewBesideControls(false));
+}
+
+TEST(ReaderDrawerModelTest, CharacterSpacingReservesPreviewAndUsesSliderInput) {
+  EXPECT_TRUE(readerDrawerStepChangesSettings(ReaderDrawerPane::CharacterSpacing));
+  EXPECT_TRUE(readerDrawerShowsSamplePreview(ReaderDrawerPane::CharacterSpacing, ReaderDrawerTab::Font,
+                                             ReaderDrawerCatalogItem::CharacterSpacing));
+  EXPECT_TRUE(readerDrawerSliderPreviewsText(ReaderDrawerPane::CharacterSpacing));
 }

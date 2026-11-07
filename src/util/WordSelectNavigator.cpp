@@ -114,6 +114,17 @@ bool WordSelectNavigator::getLookupSelectionRange(int& fromIdx, int& toIdx) cons
   return true;
 }
 
+bool WordSelectNavigator::getExpandedSelectionRange(int& fromIdx, int& toIdx) const {
+  if (!getLookupSelectionRange(fromIdx, toIdx)) return false;
+  if (fromIdx > toIdx) std::swap(fromIdx, toIdx);
+  const auto* first = getWordAt(fromIdx);
+  const auto* last = getWordAt(toIdx);
+  if (!first || !last) return false;
+  if (first->continuationOf >= 0) fromIdx = std::min(fromIdx, first->continuationOf);
+  if (last->continuationIndex >= 0) toIdx = std::max(toIdx, last->continuationIndex);
+  return getWordAt(fromIdx) && getWordAt(toIdx);
+}
+
 size_t WordSelectNavigator::getLookupSelectionWordCount() const {
   int fromIdx = -1;
   int toIdx = -1;
@@ -378,20 +389,43 @@ bool WordSelectNavigator::selectWordAtPoint(const int x, const int y, const int 
 
   if (bestIdx < 0) return false;
   if (hit) *hit = true;
-  const int targetRow = words[bestIdx].row;
+  return selectIndex(bestIdx);
+}
+
+bool WordSelectNavigator::selectIndex(const int index) {
+  if (!getWordAt(index)) return false;
+  const int targetRow = words[index].row;
   if (targetRow < 0 || targetRow >= static_cast<int>(rows.size())) return false;
-
-  int targetWordInRow = -1;
-  if (bestIdx >= rows[targetRow].firstWord && bestIdx < rows[targetRow].firstWord + rows[targetRow].wordCount) {
-    targetWordInRow = bestIdx - rows[targetRow].firstWord;
-  }
-  if (targetWordInRow < 0) return false;
-
-  const bool changed = currentRow != targetRow || currentWordInRow != targetWordInRow;
+  const int offset = index - rows[targetRow].firstWord;
+  if (offset < 0 || offset >= rows[targetRow].wordCount) return false;
+  const bool changed = currentRow != targetRow || currentWordInRow != offset;
   currentRow = targetRow;
-  currentWordInRow = targetWordInRow;
+  currentWordInRow = offset;
   pendingSnapIdx = -1;
   return changed;
+}
+
+bool WordSelectNavigator::selectNearestWord(const int x, const int y, const int lineHeight) {
+  int nearest = -1, bestY = INT_MAX, bestX = INT_MAX;
+  for (int i = 0; i < static_cast<int>(words.size()); ++i) {
+    const auto& word = words[i];
+    const int dy = std::abs(word.screenY + word.heightOr(lineHeight) / 2 - y);
+    const int dx = std::max({word.screenX - x, 0, x - (word.screenX + word.width)});
+    if (dy < bestY || (dy == bestY && dx < bestX)) {
+      nearest = i;
+      bestY = dy;
+      bestX = dx;
+    }
+  }
+  return selectIndex(nearest);
+}
+
+bool WordSelectNavigator::setTouchSelection(const int anchor, const int cursor) {
+  if (!getWordAt(anchor) || !getWordAt(cursor)) return false;
+  selectIndex(anchor);
+  beginTouchMultiSelect();
+  selectIndex(cursor);
+  return true;
 }
 
 WordSelectNavigator::MultiSelectAction WordSelectNavigator::handleMultiSelectInput(const MappedInputManager& input,

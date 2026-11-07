@@ -18,7 +18,11 @@
 #include "util/WordSelectNavigator.h"
 
 class DictionaryDefinitionActivity final : public Activity {
+#ifdef SIMULATOR
+  friend struct ScreenCalibrationSmokeTest;
+#endif
  public:
+  bool usesMenuButtonOrientation() const override { return false; }
   using BackgroundRenderFn = void (*)(void* context);
 
   // showLookupButton=true:

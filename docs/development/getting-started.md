@@ -68,6 +68,29 @@ pio run -e default
 
 `pio run` without an environment builds the X3/X4 and Sticky firmware targets listed in `platformio.ini`.
 
+### Font download hosting
+
+Font downloads accept a `CROSSINK_FONT_BASE_URL` build environment
+variable to use a custom host. When it is unset, font downloads use the matching
+versioned GitHub release in `uxjulia/crossink-fonts`, including its individual
+font files.
+
+Use an HTTP or HTTPS URL ending in `/`. Firmware appends
+`sd-fonts-m<manifest-version>-b<font-version>/fonts.json`, so point the variable
+at the parent directory of those versioned folders. The catalog's `baseUrl`
+should also point at your own font files.
+
+For GitHub release and release-candidate builds, add `CROSSINK_FONT_BASE_URL`
+under **Settings → Secrets and variables → Actions → Variables**. For local
+builds, export the same environment variable before running PlatformIO.
+The separate `CROSSINK_ASSET_BASE_URL` setting controls language and hyphenation
+downloads.
+
+HTTP remains supported for public font hosting. HTTPS font downloads use the
+streaming wolfSSL transport already used by other network features, avoiding
+the esp_http_client path that has stalled on ESP32-C3 devices. Downloaded font
+files are validated by CRC before installation.
+
 ## Flash
 
 ```sh

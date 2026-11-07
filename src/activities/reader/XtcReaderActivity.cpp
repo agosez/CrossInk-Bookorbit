@@ -9,24 +9,29 @@
 
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
 
 #include <algorithm>
+#include <optional>
 
 #include "BookStatsActivity.h"
 #include "BookStatsTracking.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "EpubReaderPercentSelectionActivity.h"
 #include "GlobalActions.h"
 #include "MappedInputManager.h"
 #include "QuickActions.h"
 #include "ReaderUtils.h"
+#include "ReadingDailyMinutes.h"
 #include "ReadingSessionStats.h"
 #include "RecentBooksStore.h"
 #include "XtcReaderChapterSelectionActivity.h"
 #include "XtcReaderMenuActivity.h"
+#include "XtcReaderNavigation.h"
 #include "activities/boot_sleep/SleepCoverAssets.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
@@ -108,8 +113,14 @@ bool streamXtchRenderPass(const Xtc& xtc, const uint32_t pageIndex, const uint16
 }
 }  // namespace
 
+bool XtcReaderActivity::usesMenuButtonOrientation() const {
+  return quickActionsPopup.isActive() ||
+         (xtc && currentPage >= xtc->getPageCount() && endOfBookMenuActive.load(std::memory_order_relaxed));
+}
+
 void XtcReaderActivity::onEnter() {
   Activity::onEnter();
+  showOpeningFeedback();
 
   if (!xtc) {
     return;
@@ -130,7 +141,9 @@ void XtcReaderActivity::onEnter() {
   paceDirty = false;
   pendingStatsCommit = false;
   sessionReadingSeconds = 0;
-  hasSessionStartLocalDateTime = getCurrentLocalReadingStatsDateTime(sessionStartLocalDateTime);
+  statsCheckpointRevision = 0;
+  dailyReadingSession.reset();
+  readingSessionDates.reset();
 
   // Save current XTC as last opened book and add to recent books
   APP_STATE.openEpubPath = xtc->getPath();
@@ -138,8 +151,10 @@ void XtcReaderActivity::onEnter() {
   if (!skipRecentBookUpdateOnEntry) {
     RECENT_BOOKS.addOrUpdateBook(xtc->getPath(), xtc->getTitle(), xtc->getAuthor(), xtc->getThumbBmpPath());
   }
+  showOpeningFeedback();
   SleepCoverAssets::prepareXtc(*xtc);
 
+  showOpeningFeedback();
   // Trigger first update
   requestUpdate();
 }
@@ -153,6 +168,7 @@ void XtcReaderActivity::onExit() {
   if (!flushQueuedProgress()) {
     LOG_ERR("XTR", "Failed to flush debounced reader progress on exit");
   }
+  pluginEvents.exit(getCurrentBookPath(), getScreenshotInfo().progressPercent);
 
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
@@ -198,6 +214,8 @@ void XtcReaderActivity::openReaderMenu() {
 }
 
 void XtcReaderActivity::loop() {
+  if (mappedInput.hasPendingActivity() || RenderLock::peek()) statsSaveDelay.defer(millis());
+  pluginEvents.pollWhenIdle(getCurrentBookPath());
   if (!xtc) {
     return;
   }
@@ -214,9 +232,12 @@ void XtcReaderActivity::loop() {
   shortcutPreviousPagePendingFromSide = false;
 
   const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
-  const int bottomHeight = UITheme::getReaderStatusBarHeight(ReaderStatusBarPosition::Bottom);
-  const int topHeight =
-      SETTINGS.legacyXtcTopUsesBottom ? bottomHeight : UITheme::getReaderStatusBarHeight(ReaderStatusBarPosition::Top);
+  const int bottomHeight = UITheme::getReaderStatusBarHeight(ReaderStatusBarPosition::Bottom, renderer);
+  const auto topConfig = xtcStatusBarConfigForDisplay(ReaderStatusBarPosition::Top, SETTINGS.legacyXtcTopUsesBottom,
+                                                      SETTINGS.readerStatusBar(ReaderStatusBarPosition::Top),
+                                                      SETTINGS.readerStatusBar(ReaderStatusBarPosition::Bottom));
+  const int topHeight = UITheme::getReaderStatusBarHeight(
+      xtcStatusBarConfigPosition(ReaderStatusBarPosition::Top, SETTINGS.legacyXtcTopUsesBottom), renderer, &topConfig);
   const auto statusBarMode = static_cast<CrossPointSettings::XTC_STATUS_BAR_MODE>(SETTINGS.xtcStatusBarMode);
   const bool tappedStatusBar = touch.tapped && (((statusBarMode == CrossPointSettings::XTC_STATUS_BAR_TOP ||
                                                   statusBarMode == CrossPointSettings::XTC_STATUS_BAR_BOTH) &&
@@ -224,11 +245,9 @@ void XtcReaderActivity::loop() {
                                                 ((statusBarMode == CrossPointSettings::XTC_STATUS_BAR_BOTTOM ||
                                                   statusBarMode == CrossPointSettings::XTC_STATUS_BAR_BOTH) &&
                                                  ReaderUtils::isBottomStatusBarTap(renderer, touch.y, bottomHeight)));
-  if (tappedStatusBar) {
-    if (SETTINGS.tapToHideStatusBar) {
-      statusBarVisible = !statusBarVisible;
-      requestUpdate();
-    }
+  if (SETTINGS.tapToHideStatusBar && tappedStatusBar) {
+    statusBarVisible = !statusBarVisible;
+    requestUpdate();
     return;
   }
 
@@ -237,6 +256,7 @@ void XtcReaderActivity::loop() {
     RenderLock lock(*this);
     if (currentPage < xtc->getPageCount() && endOfBookOptions) {
       endOfBookOptions.reset();
+      endOfBookMenuActive.store(false, std::memory_order_relaxed);
     }
   }
 
@@ -301,12 +321,18 @@ void XtcReaderActivity::loop() {
     return;
   }
 
-  if (longPressMenuAction == CrossPointSettings::LONG_MENU_LIBRARY && mappedInput.getHeldTime() >= LONG_PRESS_MENU_MS &&
+  if ((longPressMenuAction == CrossPointSettings::LONG_MENU_LIBRARY ||
+       ReaderUtils::isNavigationLongPressAction(longPressMenuAction) ||
+       longPressMenuAction == CrossPointSettings::LONG_MENU_SELECT_CHAPTER) &&
+      mappedInput.getHeldTime() >= LONG_PRESS_MENU_MS &&
       (mappedInput.isPressed(MappedInputManager::Button::Confirm) ||
        mappedInput.wasReleased(MappedInputManager::Button::Confirm))) {
     longPressMenuHandled = mappedInput.isPressed(MappedInputManager::Button::Confirm);
     mappedInput.suppressNextConfirmRelease();
-    activityManager.goToLibrary();
+    if (longPressMenuAction == CrossPointSettings::LONG_MENU_SELECT_CHAPTER)
+      openChapterSelection();
+    else if (!ReaderUtils::dispatchNavigationLongPressAction(longPressMenuAction))
+      activityManager.goToLibrary();
     return;
   }
 
@@ -338,13 +364,17 @@ void XtcReaderActivity::loop() {
     return;
   }
 
-  const bool chordPageTurn = mappedInput.hasInjectedRelease(MappedInputManager::Button::Right);
-  const auto side = sideButtonShortcuts.update(mappedInput, millis());
-  if (SideButtonShortcuts::shouldConsume(side, mappedInput)) {
+  const auto side = readerButtonShortcuts.update(mappedInput, mappedInput.buttonSampleTime());
+  if (ReaderButtonShortcuts::shouldConsume(side, mappedInput)) {
     if (side.triggered) {
-      if (side.longPress)
-        mappedInput.suppressNextSideRelease(side.up ? MappedInputManager::Button::Up
-                                                    : MappedInputManager::Button::Down);
+      if (side.longPress) {
+        if (side.front)
+          mappedInput.suppressNextFrontRelease(side.up ? MappedInputManager::Button::Left
+                                                       : MappedInputManager::Button::Right);
+        else
+          mappedInput.suppressNextSideRelease(side.up ? MappedInputManager::Button::Up
+                                                      : MappedInputManager::Button::Down);
+      }
       switch (side.action) {
         case CrossPointSettings::PAGE_TURN:
           shortcutPageTurn = true;
@@ -371,7 +401,7 @@ void XtcReaderActivity::loop() {
             } else {
               uint32_t forwardReadSeconds = 0;
               const bool recordForward = next && forwardPageReadElapsed(forwardReadSeconds, "side_long_press");
-              recordCurrentPageReadingTime("side_long_press");
+              recordCurrentPageReadingTime("side_long_press", /*deferStorage=*/true);
               currentPage =
                   next ? std::min<uint32_t>(currentPage + 10, pageCount) : (currentPage >= 10 ? currentPage - 10 : 0);
               if (recordForward) recordForwardPageTurn(forwardReadSeconds, false);
@@ -394,7 +424,7 @@ void XtcReaderActivity::loop() {
         default: {
           const auto action = static_cast<CrossPointSettings::SHORT_PWRBTN>(side.action);
           if (action == CrossPointSettings::QUICK_LOCK)
-            handleGlobalPowerButtonAction(action, SideButtonShortcuts::quickLockTrigger(side));
+            handleGlobalPowerButtonAction(action, ReaderButtonShortcuts::quickLockTrigger(side));
           else if (!handleShortcutAction(action))
             handleGlobalPowerButtonAction(action);
           break;
@@ -404,8 +434,7 @@ void XtcReaderActivity::loop() {
     if (!shortcutPageTurn && !shortcutPreviousPage) return;
   }
 
-  const bool tiltNext = SETTINGS.tiltPageTurn && halTiltSensor.wasTiltedForward();
-  const bool tiltPrev = SETTINGS.tiltPageTurn && halTiltSensor.wasTiltedBack();
+  const auto tilt = detectReaderTiltPageTurn(halTiltSensor, SETTINGS.tiltPageTurn, SETTINGS.tiltNextPageOnly);
   const bool frontPrev = mappedInput.wasReleased(MappedInputManager::Button::Left);
   const bool powerReleased = mappedInput.wasReleased(MappedInputManager::Button::Power);
   if (longPowerPageTurnHandled && (powerReleased || !mappedInput.isPressed(MappedInputManager::Button::Power))) {
@@ -440,82 +469,12 @@ void XtcReaderActivity::loop() {
   const bool powerPageTurn = shortPowerTurn || longPowerTurn || timedLongPowerTurn;
   const bool frontNext = mappedInput.wasReleased(MappedInputManager::Button::Right) || powerPageTurn;
 
-  const bool frontLongPressAction = SETTINGS.longPressButtonBehavior == CrossPointSettings::CHAPTER_SKIP ||
-                                    SETTINGS.longPressButtonBehavior == CrossPointSettings::FONT_SIZE_CHANGE;
-  if (frontLongPressAction) {
-    const bool leftReleased = mappedInput.wasReleased(MappedInputManager::Button::Left);
-    const bool rightReleased = mappedInput.wasReleased(MappedInputManager::Button::Right);
-    if (frontButtonLongPressHandled && (leftReleased || rightReleased)) {
-      frontButtonLongPressHandled = false;
-      return;
-    }
-
-    const bool longPressReady = mappedInput.getHeldTime() > ReaderUtils::SKIP_HOLD_MS;
-    const bool prevLongPressed = longPressReady && mappedInput.isPressed(MappedInputManager::Button::Left);
-    const bool nextLongPressed = longPressReady && mappedInput.isPressed(MappedInputManager::Button::Right);
-    if (!frontButtonLongPressHandled && (prevLongPressed || nextLongPressed)) {
-      frontButtonLongPressHandled = true;
-      if (SETTINGS.longPressButtonBehavior == CrossPointSettings::FONT_SIZE_CHANGE) {
-        return;
-      }
-
-      bool goHome = false;
-      bool needsUpdate = false;
-      {
-        RenderLock lock(*this);
-        const uint32_t pageCount = xtc->getPageCount();
-        if (currentPage >= pageCount) {
-          if (nextLongPressed) {
-            goHome = true;
-          } else {
-            currentPage = pageCount > 0 ? pageCount - 1 : 0;
-            needsUpdate = true;
-          }
-        } else if (!(prevLongPressed && currentPage == 0)) {
-          uint32_t forwardReadSeconds = 0;
-          const bool shouldRecordForwardRead =
-              nextLongPressed && forwardPageReadElapsed(forwardReadSeconds, "front_long_press");
-          recordCurrentPageReadingTime("front_long_press");
-          if (prevLongPressed) {
-            currentPage = currentPage >= 10 ? currentPage - 10 : 0;
-          } else {
-            currentPage += 10;
-            if (currentPage >= pageCount) {
-              currentPage = pageCount;
-            }
-            if (shouldRecordForwardRead) {
-              recordForwardPageTurn(forwardReadSeconds, false);
-            }
-          }
-          needsUpdate = true;
-        }
-      }
-      if (goHome) {
-        onGoHome();
-        return;
-      }
-      if (needsUpdate) {
-        requestUpdate();
-      }
-      return;
-    }
-  }
-
-  const bool fromTilt = tiltPrev || tiltNext;
-  bool prevTriggered = tiltPrev || frontPrev;
-  bool nextTriggered = tiltNext || frontNext;
-  prevTriggered = prevTriggered || touch.prev || shortcutPreviousPage;
-  nextTriggered = nextTriggered || touch.next || shortcutPageTurn;
-
+  const bool prevTriggered = tilt.prev || frontPrev || touch.prev || shortcutPreviousPage;
+  const bool nextTriggered = tilt.next || frontNext || touch.next || shortcutPageTurn;
   if (!prevTriggered && !nextTriggered) {
+    checkpointReadingStatsWhenIdle();
     return;
   }
-
-  // Touch page turns deliberately ignore the physical-button long-press
-  // settings. Keep those saved settings intact for a later move back to a
-  // button device, but never let a held screen tap skip pages.
-  const bool fromTouch = touch.prev || touch.next;
-  const unsigned long heldMs = fromTouch ? touch.heldMs : mappedInput.getHeldTime();
 
   // Mirror EPUB's manual-turn guard: the render task updates the panel
   // concurrently, so accepting another turn before it owns RenderLock can mix
@@ -531,11 +490,7 @@ void XtcReaderActivity::loop() {
   }
   lastPageTurnTime = now;
 
-  const bool sideShortcutPageTurn = shortcutPageTurnFromSide || shortcutPreviousPageFromSide;
-  const bool skipPages = !chordPageTurn && !sideShortcutPageTurn && !fromTouch && !fromTilt && !powerPageTurn &&
-                         heldMs > ReaderUtils::SKIP_HOLD_MS &&
-                         SETTINGS.longPressButtonBehavior == CrossPointSettings::CHAPTER_SKIP;
-  const int skipAmount = skipPages ? 10 : 1;
+  constexpr int skipAmount = 1;
 
   bool goHome = false;
   bool needsUpdate = false;
@@ -557,7 +512,8 @@ void XtcReaderActivity::loop() {
         needsUpdate = true;
       }
     } else if (prevTriggered && currentPage > 0) {
-      recordCurrentPageReadingTime("page_back");
+      pluginEvents.noteTurn(false);
+      recordCurrentPageReadingTime("page_back", /*deferStorage=*/true);
       if (currentPage >= static_cast<uint32_t>(skipAmount)) {
         currentPage -= skipAmount;
       } else {
@@ -567,13 +523,14 @@ void XtcReaderActivity::loop() {
     } else if (nextTriggered) {
       uint32_t forwardReadSeconds = 0;
       const bool shouldRecordForwardRead = forwardPageReadElapsed(forwardReadSeconds, "page_forward");
-      recordCurrentPageReadingTime("page_forward");
+      recordCurrentPageReadingTime("page_forward", /*deferStorage=*/true);
+      pluginEvents.noteTurn(true);
       currentPage += skipAmount;
       if (currentPage >= pageCount) {
         currentPage = pageCount;  // Allow showing "End of book"
       }
       if (shouldRecordForwardRead) {
-        recordForwardPageTurn(forwardReadSeconds, !skipPages);
+        recordForwardPageTurn(forwardReadSeconds, true);
       }
       needsUpdate = true;
     }
@@ -588,7 +545,11 @@ void XtcReaderActivity::loop() {
 #if CROSSINK_APP_CAP_TOUCH
 // Virtual overrides pin their bodies through the vtable even when
 // supportsMultiTouch() folds to false, so non-touch builds gate them out.
-bool XtcReaderActivity::handleTwoFingerSwipeAction(const CrossPointSettings::TWO_FINGER_SWIPE_ACTION) {
+bool XtcReaderActivity::handleTwoFingerSwipeAction(const CrossPointSettings::TWO_FINGER_SWIPE_ACTION action) {
+  if (action == CrossPointSettings::TWO_FINGER_SWIPE_SELECT_CHAPTER) {
+    openChapterSelection();
+    return true;
+  }
   // XTC pages are pre-rendered images: they cannot be reflowed for font-size
   // changes, and the reader does not expose stable chapter jumps. Consume the
   // configured command without letting it turn into a regular page swipe.
@@ -623,13 +584,17 @@ void XtcReaderActivity::syncStatsTrackingState() {
   }
   statsTrackingActive = active;
   sessionReadingSeconds = 0;
-  hasSessionStartLocalDateTime = getCurrentLocalReadingStatsDateTime(sessionStartLocalDateTime);
+  statsCheckpointRevision = 0;
+  dailyReadingSession.reset();
+  readingSessionDates.reset();
   pageShownAtMs = millis();
+  startDailyReadingInterval();
 }
 
 void XtcReaderActivity::resumeReadingStatsTimer(const char*) {
   if (xtc && currentPage < xtc->getPageCount()) {
     pageShownAtMs = millis();
+    startDailyReadingInterval();
   } else {
     pageShownAtMs = 0UL;
   }
@@ -690,19 +655,7 @@ bool XtcReaderActivity::currentPageReadingSecondsForStats(uint32_t& seconds, con
     return false;
   }
 
-  const unsigned long elapsedMs = millis() - pageShownAtMs;
-  const uint32_t elapsedSeconds = static_cast<uint32_t>(elapsedMs / 1000UL);
-  if (elapsedSeconds == 0) {
-    return false;
-  }
-
-  const uint32_t thresholdSeconds = SETTINGS.getReadingIdleTimeThresholdSeconds();
-  if (elapsedSeconds > thresholdSeconds) {
-    return false;
-  }
-
-  seconds = elapsedSeconds;
-  return true;
+  return readingStatsIntervalSeconds(millis(), pageShownAtMs, SETTINGS.getReadingIdleTimeThresholdSeconds(), seconds);
 }
 
 bool XtcReaderActivity::forwardPageReadElapsed(uint32_t& seconds, const char*) const {
@@ -725,12 +678,68 @@ bool XtcReaderActivity::forwardPageReadElapsed(uint32_t& seconds, const char*) c
   return true;
 }
 
-void XtcReaderActivity::recordCurrentPageReadingTime(const char* source) {
+void XtcReaderActivity::recordCurrentPageReadingTime(const char* source, const bool deferStorage) {
+  // Shortcuts can reach this without a lock; rendering/page turns already hold it.
+  std::optional<RenderLock> statsLock;
+  if (!RenderLock::heldByCurrentTask()) statsLock.emplace(*this);
+  // An unrendered turn must never overwrite the preceding accepted interval.
+  flushDeferredReadingStats(!deferStorage);
   uint32_t seconds = 0;
   if (currentPageReadingSecondsForStats(seconds, source)) {
     sessionReadingSeconds = sessionReadingSeconds > UINT32_MAX - seconds ? UINT32_MAX : sessionReadingSeconds + seconds;
+    ReadingStatsDateTime end;
+    getCurrentLocalDailyReadingDateTime(end);
+    readingSessionDates.accept(end, SETTINGS.clockUtcOffsetQ, seconds);
+    deferredReadingStats = {end, seconds, SETTINGS.clockUtcOffsetQ};
+    if (!deferStorage) flushDeferredReadingStats();
   }
   pageShownAtMs = 0UL;
+}
+
+void XtcReaderActivity::checkpointReadingStatsWhenIdle() {
+  const uint32_t now = millis();
+  RenderLock lock(RenderLock::Mode::Try);
+  if (!lock.ownsLock() || mappedInput.hasPendingActivity() || shortcutPageTurnPending || shortcutPreviousPagePending ||
+      deferredReadingStats.seconds != 0) {
+    statsSaveDelay.defer(now);
+    return;
+  }
+  if (!statsSaveDelay.ready(now) || (pageShownAtMs != 0 && uint32_t(now - pageShownAtMs) < 1000)) return;
+  statsSaveDelay.defer(now);  // Failed writes retry at most once per quiet second.
+  if (!readingSessionJournal.checkpointIfDue()) LOG_ERR("SessionStats", "Reading session checkpoint deferred");
+  // A captured press during the journal write gets priority over the next file.
+  if (mappedInput.hasPendingActivity()) {
+    statsSaveDelay.defer(millis());
+    return;
+  }
+  if (xtc && readingSessionJournal.revision() != statsCheckpointRevision &&
+      saveReadingSessionCheckpoint(stats, globalStats, sessionReadingSeconds, &readingSessionDates,
+                                   xtc->getCachePath())) {
+    statsCheckpointRevision = readingSessionJournal.revision();
+  }
+  if (!DailyReadingStats::checkpointIfDue()) LOG_ERR("DailyStats", "Reading counters checkpoint deferred");
+}
+
+void XtcReaderActivity::flushDeferredReadingStats(const bool allowCheckpoint) {
+  if (deferredReadingStats.seconds == 0) return;
+  const auto interval = deferredReadingStats;
+  deferredReadingStats = {};
+  const unsigned long startedAt = millis();
+  if (xtc && !readingSessionJournal.accept(xtc->getPath().c_str(), interval.end, interval.utcOffset, interval.seconds,
+                                           allowCheckpoint)) {
+    LOG_ERR("SessionStats", "Reading session checkpoint deferred");
+  }
+  if (allowCheckpoint && xtc && readingSessionJournal.revision() != statsCheckpointRevision &&
+      saveReadingSessionCheckpoint(stats, globalStats, sessionReadingSeconds, &readingSessionDates,
+                                   xtc->getCachePath())) {
+    statsCheckpointRevision = readingSessionJournal.revision();
+  }
+  if (!dailyReadingSession.accept(interval.end, interval.utcOffset, interval.seconds, sessionReadingSeconds,
+                                  allowCheckpoint)) {
+    LOG_ERR("DailyStats", "Cannot record accepted reading interval");
+  }
+  const unsigned long duration = millis() - startedAt;
+  if (duration >= 20) LOG_DBG("SessionStats", "Reading stats storage took %lu ms", duration);
 }
 
 void XtcReaderActivity::recordForwardPageTurn(const uint32_t seconds, const bool recordPace) {
@@ -762,7 +771,7 @@ bool XtcReaderActivity::formatTimeLeftLabel(char* buf, const size_t len, const u
   }
 
   const uint64_t estimatedSeconds =
-      static_cast<uint64_t>(total - current) * static_cast<uint64_t>(stats.avgSecondsPerForwardPage);
+      (static_cast<uint64_t>(total - current) * stats.averageForwardPageMillis() + 500U) / 1000U;
   formatCompactReadingDuration(static_cast<uint32_t>(std::min<uint64_t>(estimatedSeconds, UINT32_MAX)), buf, len);
   return true;
 }
@@ -773,15 +782,18 @@ void XtcReaderActivity::commitReadingStats() {
   }
   if (statsTrackingActive) {
     recordCurrentPageReadingTime("session_commit");
-    commitReadingSession(stats, globalStats, sessionReadingSeconds,
-                         hasSessionStartLocalDateTime ? &sessionStartLocalDateTime : nullptr);
+    readingSessionJournal.flush();
+    commitReadingSession(stats, globalStats, sessionReadingSeconds, &readingSessionDates);
+    ReadingDailyMinutes::recordSession(sessionReadingSeconds);
   }
   sessionReadingSeconds = 0;
+  readingSessionDates.reset();
+  statsCheckpointRevision = 0;
   if ((statsTrackingActive || paceDirty || pendingStatsCommit) && stats.save(xtc->getCachePath())) {
+    pendingSync.mark(xtc->getPath(), SyncPending::STATS_BIT);
     paceDirty = false;
     if (statsTrackingActive || pendingStatsCommit) {
-      globalStats.save();
-      pendingStatsCommit = false;
+      if (globalStats.save()) pendingStatsCommit = false;
     }
   }
 }
@@ -800,9 +812,12 @@ void XtcReaderActivity::applyBookStatsEditsFromDisk() {
 }
 
 void XtcReaderActivity::resetCurrentBookStatsAfterDelete() {
+  readingSessionJournal.flush();
   stats = BookReadingStats{};
   sessionReadingSeconds = 0;
-  hasSessionStartLocalDateTime = getCurrentLocalReadingStatsDateTime(sessionStartLocalDateTime);
+  statsCheckpointRevision = 0;
+  dailyReadingSession.reset();
+  readingSessionDates.reset();
 }
 
 void XtcReaderActivity::setBookCompleted(const bool isCompleted) {
@@ -818,7 +833,9 @@ void XtcReaderActivity::setBookCompleted(const bool isCompleted) {
     }
   }
 
-  if (stats.save(xtc->getCachePath()) && statsTrackingActive) {
+  const bool saved = stats.save(xtc->getCachePath());
+  if (saved) pendingSync.mark(xtc->getPath(), SyncPending::STATS_BIT);
+  if (saved && statsTrackingActive) {
     if (isCompleted) {
       globalStats.completedBooks++;
     } else if (globalStats.completedBooks > 0) {
@@ -867,13 +884,15 @@ std::unique_ptr<Activity> XtcReaderActivity::createFrontlightReadingStatsActivit
   }
 
   const bool hasSyncedStats = GlobalReadingStats::hasSyncedStats();
-  if (hasSyncedStats) {
-    return makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, xtc->getTitle(), xtc->getCachePath(),
-                                                displayStats, getCurrentBookProgressPercent(), false, 0, globalStats,
-                                                GlobalReadingStats::loadAggregated(globalStats));
-  }
-  return makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, xtc->getTitle(), xtc->getCachePath(), displayStats,
-                                              getCurrentBookProgressPercent(), false, 0, globalStats);
+  auto statsActivity =
+      hasSyncedStats
+          ? makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, xtc->getTitle(), xtc->getCachePath(),
+                                                 displayStats, getCurrentBookProgressPercent(), false, 0, globalStats,
+                                                 GlobalReadingStats::loadAggregated(globalStats))
+          : makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, xtc->getTitle(), xtc->getCachePath(),
+                                                 displayStats, getCurrentBookProgressPercent(), false, 0, globalStats);
+  if (statsActivity) statsActivity->setSyncBookPath(xtc->getPath());
+  return statsActivity;
 }
 
 void XtcReaderActivity::onFrontlightPanelClosed() {
@@ -886,6 +905,9 @@ void XtcReaderActivity::onFrontlightPanelClosed() {
 }
 
 void XtcReaderActivity::openChapterSelection() {
+  // Direct shortcuts have not passed through the already-paused reader menu.
+  // Record their current interval before any success or failure path restarts it.
+  pauseReadingStatsTimer("chapter_selection");
   uint32_t pageToSelect = 0;
   bool hasChapters = false;
   {
@@ -896,20 +918,65 @@ void XtcReaderActivity::openChapterSelection() {
     }
   }
   if (!hasChapters) {
+    {
+      RenderLock lock(*this);
+      drawToast(renderer, tr(STR_NO_CHAPTERS));
+    }
+    delay(1000);
     resumeReadingStatsTimer("chapter_selection_unavailable");
     requestUpdate();
     return;
   }
 
-  startActivityForResult(std::make_unique<XtcReaderChapterSelectionActivity>(renderer, mappedInput, xtc, pageToSelect),
-                         [this](const ActivityResult& result) {
-                           if (!result.isCancelled) {
-                             RenderLock lock(*this);
-                             currentPage = std::get<PageResult>(result.data).page;
-                           }
-                           resumeReadingStatsTimer("chapter_selection_return");
-                           requestUpdate();
-                         });
+  auto chapterSelection =
+      makeUniqueNoThrow<XtcReaderChapterSelectionActivity>(renderer, mappedInput, xtc, pageToSelect);
+  if (!chapterSelection) {
+    LOG_ERR("XTR", "OOM: chapter selection activity");
+    resumeReadingStatsTimer("chapter_selection_oom");
+    requestUpdate();
+    return;
+  }
+  mappedInput.suppressNextConfirmRelease();
+  mappedInput.suppressNextPowerRelease();
+  mappedInput.suppressNextPowerConfirmRelease();
+  startActivityForResult(std::move(chapterSelection), [this](const ActivityResult& result) {
+    if (!result.isCancelled) {
+      RenderLock lock(*this);
+      currentPage = std::get<PageResult>(result.data).page;
+    }
+    resumeReadingStatsTimer("chapter_selection_return");
+    requestUpdate();
+  });
+}
+
+void XtcReaderActivity::openPercentSelection() {
+  pauseReadingStatsTimer("percent_selection");
+  float progress = 0.0f;
+  {
+    RenderLock lock(*this);
+    if (xtc) progress = getCurrentBookProgressPercent();
+  }
+  auto selection = makeUniqueNoThrow<EpubReaderPercentSelectionActivity>(renderer, mappedInput, progress);
+  if (!selection) {
+    LOG_ERR("XTR", "OOM: percent selection activity");
+    resumeReadingStatsTimer("percent_selection_oom");
+    requestUpdate();
+    return;
+  }
+  mappedInput.suppressNextConfirmRelease();
+  mappedInput.suppressNextPowerRelease();
+  mappedInput.suppressNextPowerConfirmRelease();
+  startActivityForResult(std::move(selection), [this](const ActivityResult& result) {
+    const auto* percent = std::get_if<PercentResult>(&result.data);
+    if (!result.isCancelled && percent) {
+      RenderLock lock(*this);
+      if (xtc && xtc->getPageCount() > 0) {
+        currentPage = xtcPageForPercent(percent->percent, xtc->getPageCount());
+      }
+    }
+    resumeReadingStatsTimer("percent_selection_return");
+    requestUpdate();
+  });
 }
 
 void XtcReaderActivity::openReadingStats() {
@@ -984,6 +1051,9 @@ void XtcReaderActivity::onReaderMenuConfirm(const int action) {
     case XtcReaderMenuActivity::MenuAction::SELECT_CHAPTER:
       openChapterSelection();
       break;
+    case XtcReaderMenuActivity::MenuAction::GO_TO_PERCENT:
+      openPercentSelection();
+      break;
     case XtcReaderMenuActivity::MenuAction::READING_STATS:
       openReadingStats();
       break;
@@ -1028,6 +1098,7 @@ bool XtcReaderActivity::handleFrontlightPanelResult(const FrontlightPanelResult&
 
 bool XtcReaderActivity::supportsQuickAction(const CrossPointSettings::SHORT_PWRBTN action) {
   switch (action) {
+    case CrossPointSettings::SHORT_PWRBTN::SELECT_CHAPTER:
     case CrossPointSettings::SHORT_PWRBTN::PREVIOUS_PAGE:
     case CrossPointSettings::SHORT_PWRBTN::SLEEP:
     case CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH:
@@ -1038,7 +1109,9 @@ bool XtcReaderActivity::supportsQuickAction(const CrossPointSettings::SHORT_PWRB
     case CrossPointSettings::SHORT_PWRBTN::FILE_BROWSER:
     case CrossPointSettings::SHORT_PWRBTN::LIBRARY:
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_FRONTLIGHT:
+    case CrossPointSettings::SHORT_PWRBTN::TOGGLE_PAGE_TURN_GESTURES:
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_TOUCHSCREEN:
+    case CrossPointSettings::SHORT_PWRBTN::BACK_HOME:
     case CrossPointSettings::SHORT_PWRBTN::HOME_READER:
       return true;
     default:
@@ -1054,19 +1127,34 @@ bool XtcReaderActivity::executeReaderShortcutAction(const CrossPointSettings::SH
     case CrossPointSettings::SHORT_PWRBTN::PREVIOUS_PAGE:
       shortcutPreviousPagePending = true;
       return true;
+    case CrossPointSettings::SHORT_PWRBTN::SELECT_CHAPTER:
+      openChapterSelection();
+      return true;
     case CrossPointSettings::SHORT_PWRBTN::FILE_TRANSFER:
       activityManager.goToFileTransfer(xtc ? xtc->getPath() : "");
       return true;
     case CrossPointSettings::SHORT_PWRBTN::CALIBRE_WIRELESS:
-      saveProgressBeforeRestart();
+      if (!saveProgressBeforeRestart()) {
+        resumeReadingStatsTimer("restart_save_failed");
+        requestUpdate();
+        return true;
+      }
       activityManager.goToCalibreWireless(xtc ? xtc->getPath() : "");
       return true;
     case CrossPointSettings::SHORT_PWRBTN::JOIN_NETWORK:
-      saveProgressBeforeRestart();
+      if (!saveProgressBeforeRestart()) {
+        resumeReadingStatsTimer("restart_save_failed");
+        requestUpdate();
+        return true;
+      }
       activityManager.goToJoinNetworkFileTransfer(xtc ? xtc->getPath() : "");
       return true;
     case CrossPointSettings::SHORT_PWRBTN::CREATE_HOTSPOT:
-      saveProgressBeforeRestart();
+      if (!saveProgressBeforeRestart()) {
+        resumeReadingStatsTimer("restart_save_failed");
+        requestUpdate();
+        return true;
+      }
       activityManager.goToHotspotFileTransfer(xtc ? xtc->getPath() : "");
       return true;
     case CrossPointSettings::SHORT_PWRBTN::FILE_BROWSER:
@@ -1079,6 +1167,7 @@ bool XtcReaderActivity::executeReaderShortcutAction(const CrossPointSettings::SH
       toggleHomeButtonInReader();
       return true;
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_FRONTLIGHT:
+    case CrossPointSettings::SHORT_PWRBTN::TOGGLE_PAGE_TURN_GESTURES:
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_TOUCHSCREEN:
       return handleGlobalPowerButtonAction(action);
     default:
@@ -1087,6 +1176,7 @@ bool XtcReaderActivity::executeReaderShortcutAction(const CrossPointSettings::SH
 }
 
 bool XtcReaderActivity::executeLongPressBackAction() {
+  if (ReaderUtils::dispatchNavigationLongPressAction(SETTINGS.longPressBackAction)) return true;
   switch (static_cast<CrossPointSettings::LONG_PRESS_MENU_ACTION>(SETTINGS.longPressBackAction)) {
     case CrossPointSettings::LONG_PRESS_MENU_ACTION::LONG_MENU_SLEEP:
       enterDeepSleep();
@@ -1099,19 +1189,34 @@ bool XtcReaderActivity::executeLongPressBackAction() {
       activityManager.goToFileTransfer(xtc ? xtc->getPath() : "");
       return true;
     case CrossPointSettings::LONG_PRESS_MENU_ACTION::LONG_MENU_CALIBRE_WIRELESS:
-      saveProgressBeforeRestart();
+      if (!saveProgressBeforeRestart()) {
+        resumeReadingStatsTimer("restart_save_failed");
+        requestUpdate();
+        return true;
+      }
       activityManager.goToCalibreWireless(xtc ? xtc->getPath() : "");
       return true;
     case CrossPointSettings::LONG_PRESS_MENU_ACTION::LONG_MENU_JOIN_NETWORK:
-      saveProgressBeforeRestart();
+      if (!saveProgressBeforeRestart()) {
+        resumeReadingStatsTimer("restart_save_failed");
+        requestUpdate();
+        return true;
+      }
       activityManager.goToJoinNetworkFileTransfer(xtc ? xtc->getPath() : "");
       return true;
     case CrossPointSettings::LONG_PRESS_MENU_ACTION::LONG_MENU_CREATE_HOTSPOT:
-      saveProgressBeforeRestart();
+      if (!saveProgressBeforeRestart()) {
+        resumeReadingStatsTimer("restart_save_failed");
+        requestUpdate();
+        return true;
+      }
       activityManager.goToHotspotFileTransfer(xtc ? xtc->getPath() : "");
       return true;
     case CrossPointSettings::LONG_PRESS_MENU_ACTION::LONG_MENU_FILE_BROWSER:
       activityManager.goToFileBrowser(xtc ? xtc->getPath() : "");
+      return true;
+    case CrossPointSettings::LONG_PRESS_MENU_ACTION::LONG_MENU_SELECT_CHAPTER:
+      openChapterSelection();
       return true;
     case CrossPointSettings::LONG_PRESS_MENU_ACTION::LONG_MENU_LIBRARY:
       activityManager.goToLibrary();
@@ -1126,7 +1231,8 @@ bool XtcReaderActivity::executeLongPressBackAction() {
 }
 
 bool XtcReaderActivity::handleShortcutAction(const CrossPointSettings::SHORT_PWRBTN action) {
-  if (action == CrossPointSettings::SHORT_PWRBTN::HOME_READER) return dispatchShortcutAction(action);
+  if (action == CrossPointSettings::SHORT_PWRBTN::HOME_READER || action == CrossPointSettings::SHORT_PWRBTN::BACK_HOME)
+    return dispatchShortcutAction(action);
   if (action == CrossPointSettings::SHORT_PWRBTN::QUICK_ACTIONS) {
     QuickActions::showConfiguredPopup(
         quickActionsPopup, [this] { requestUpdate(); },
@@ -1145,6 +1251,14 @@ bool XtcReaderActivity::handleShortcutAction(const CrossPointSettings::SHORT_PWR
 }
 
 void XtcReaderActivity::render(RenderLock&&) {
+  // Also drain on error/end screens and early returns, while the render lock
+  // still protects the session. Normal pages drain before starting their timer.
+  struct FlushStatsOnReturn {
+    XtcReaderActivity& reader;
+    ~FlushStatsOnReturn() { reader.flushDeferredReadingStats(false); }
+  } flushStats{*this};
+
+  showOpeningFeedback();
   if (!xtc) {
     return;
   }
@@ -1165,14 +1279,19 @@ void XtcReaderActivity::render(RenderLock&&) {
     renderer.clearScreen();
     if (endOfBookOptions) {
       endOfBookOptions->loadOnce(xtc->getPath());
+      endOfBookMenuActive.store(endOfBookOptions->menuActive(), std::memory_order_relaxed);
+      mappedInput.setMenuMode(endOfBookOptions->menuActive());
       endOfBookOptions->render(renderer, mappedInput);
     }
+    openingFeedback.finish();
     renderer.displayBuffer();
     return;
   }
 
   renderPage(pageToRender);
+  openingFeedback.finish();
   pageShownAtMs = millis();
+  startDailyReadingInterval();
   if (!queueProgressSave(pageToRender)) {
     LOG_ERR("XTR", "Failed to save debounced reader progress");
   }
@@ -1200,7 +1319,7 @@ XtcReaderActivity::StatusBarInfo XtcReaderActivity::getStatusBarInfo(const uint3
 }
 
 void XtcReaderActivity::renderStatusBarOverlay(const StatusBarOverlayPosition position, const uint32_t pageToRender,
-                                               const bool drawContent) const {
+                                               const bool drawContent, const int batteryPercentage) const {
   const bool drawBottom = (SETTINGS.xtcStatusBarMode == CrossPointSettings::XTC_STATUS_BAR_BOTTOM ||
                            SETTINGS.xtcStatusBarMode == CrossPointSettings::XTC_STATUS_BAR_BOTH) &&
                           position == StatusBarOverlayPosition::Bottom;
@@ -1214,7 +1333,13 @@ void XtcReaderActivity::renderStatusBarOverlay(const StatusBarOverlayPosition po
   const bool legacyTop = drawTop && SETTINGS.legacyXtcTopUsesBottom;
   const auto displayedBar = drawTop ? ReaderStatusBarPosition::Top : ReaderStatusBarPosition::Bottom;
   const auto configuredBar = xtcStatusBarConfigPosition(displayedBar, legacyTop);
-  const int statusBarHeight = UITheme::getReaderStatusBarHeight(configuredBar);
+  auto config =
+      xtcStatusBarConfigForDisplay(displayedBar, legacyTop, SETTINGS.readerStatusBar(ReaderStatusBarPosition::Top),
+                                   SETTINGS.readerStatusBar(ReaderStatusBarPosition::Bottom));
+  const bool hidden = config.hidden;
+  // Preserve the bitmap-strip clearing policy even for a persistently hidden bar.
+  config.hidden = false;
+  const int statusBarHeight = UITheme::getReaderStatusBarHeight(configuredBar, renderer, &config);
   if (statusBarHeight <= 0) {
     return;
   }
@@ -1242,19 +1367,19 @@ void XtcReaderActivity::renderStatusBarOverlay(const StatusBarOverlayPosition po
 
   // XTC pages already contain a status strip in their bitmap. Clear that same
   // overlay area before returning so hiding it does not leave stale pixels.
-  if (!statusBarVisible || !drawContent) {
+  if (hidden || !statusBarVisible || !drawContent) {
     return;
   }
 
   const int pageCount = static_cast<int>(xtc->getPageCount());
   const int displayPage = static_cast<int>(pageToRender) + 1;
   const float progress = pageCount > 0 ? (static_cast<float>(displayPage) * 100.0f) / pageCount : 0.0f;
-  const auto config = SETTINGS.readerStatusBar(configuredBar);
   const auto pageInfo = getStatusBarInfo(pageToRender, config.contains(ReaderStatusBarItem::TitleChapter));
   char bookTime[24] = {};
   char chapterTime[24] = {};
   const std::string bookTitle = config.contains(ReaderStatusBarItem::TitleBook) ? xtc->getTitle() : "";
   ReaderStatusBarContent content;
+  content.batteryPercentage = batteryPercentage;
   content.bookProgress = progress;
   content.chapterPage = pageInfo.currentPage;
   content.chapterPageCount = pageInfo.pageCount;
@@ -1276,8 +1401,14 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   const uint16_t pageHeight = xtc->getPageHeight();
   const uint8_t bitDepth = xtc->getBitDepth();
   const auto renderOverlays = [this, pageToRender](const bool drawContent) {
-    renderStatusBarOverlay(StatusBarOverlayPosition::Top, pageToRender, drawContent);
-    renderStatusBarOverlay(StatusBarOverlayPosition::Bottom, pageToRender, drawContent);
+    int batteryPercentage = -1;
+    if (drawContent && statusBarVisible &&
+        (SETTINGS.readerStatusBar(ReaderStatusBarPosition::Top).contains(ReaderStatusBarItem::Battery) ||
+         SETTINGS.readerStatusBar(ReaderStatusBarPosition::Bottom).contains(ReaderStatusBarItem::Battery))) {
+      batteryPercentage = powerManager.getBatteryPercentage();
+    }
+    renderStatusBarOverlay(StatusBarOverlayPosition::Top, pageToRender, drawContent, batteryPercentage);
+    renderStatusBarOverlay(StatusBarOverlayPosition::Bottom, pageToRender, drawContent, batteryPercentage);
   };
 
   if (bitDepth == 2) {
@@ -1296,6 +1427,19 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
       return;
     }
     renderOverlays(true);
+    openingFeedback.finish();
+
+    if (ReaderUtils::displayDeferredGrayscale(renderer, pagesUntilFullRefresh, deferredGrayscalePlanes, [&]() {
+          const auto pass =
+              renderer.getRenderMode() == GfxRenderer::GRAYSCALE_LSB ? XtchRenderPass::Lsb : XtchRenderPass::Msb;
+          if (!streamXtchRenderPass(*xtc, pageToRender, pageWidth, pageHeight, renderer, pass)) return false;
+          renderOverlays(false);
+          return true;
+        })) {
+      pluginEvents.rendered(xtc->getPageCount() ? static_cast<int>((pageToRender + 1ULL) * 10000 / xtc->getPageCount())
+                                                : 0);
+      return;
+    }
 
     if (pagesUntilFullRefresh <= 1) {
       renderer.displayBuffer(pagesUntilFullRefresh < 0 ? manualScreenRefreshMode() : HalDisplay::HALF_REFRESH);
@@ -1330,6 +1474,8 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
     }
     renderOverlays(true);
     renderer.cleanupGrayscaleWithFrameBuffer();
+    pluginEvents.rendered(xtc->getPageCount() ? static_cast<int>((pageToRender + 1ULL) * 10000 / xtc->getPageCount())
+                                              : 0);
     return;
   }
 
@@ -1359,6 +1505,7 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
     return;
   }
 
+  showOpeningFeedback();
   // Clear screen first
   renderer.clearScreen();
 
@@ -1391,6 +1538,8 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
 
   // Display with appropriate refresh
   ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
+  pluginEvents.rendered(xtc->getPageCount() ? static_cast<int>((pageToRender + 1ULL) * 10000 / xtc->getPageCount())
+                                            : 0);
 }
 
 bool XtcReaderActivity::saveProgress(const uint32_t page) {
@@ -1413,6 +1562,8 @@ bool XtcReaderActivity::saveProgress(const uint32_t page) {
     return false;
   }
   progressSaveDebouncer.markPersisted(page);
+  // XTC has no KOReader position; reading only changes its stats, and only with tracking on.
+  if (statsTrackingActive) pendingSync.mark(xtc->getPath(), SyncPending::STATS_BIT);
   return true;
 }
 
@@ -1536,10 +1687,39 @@ ScreenshotInfo XtcReaderActivity::getScreenshotInfo() const {
   return info;
 }
 
-void XtcReaderActivity::saveProgressBeforeRestart() {
+void XtcReaderActivity::startDailyReadingInterval() {
+  // Shortcuts can reach this without a lock; rendering/page turns already hold it.
+  std::optional<RenderLock> statsLock;
+  if (!RenderLock::heldByCurrentTask()) statsLock.emplace(*this);
+  ReadingStatsDateTime local;
+  if (pageShownAtMs != 0) getCurrentLocalDailyReadingDateTime(local);
+  // Capture the new page clock before storage, but drain with the old start
+  // time before replacing it. Storage time is spent reading the visible page.
+  flushDeferredReadingStats(false);
+  dailyReadingSession.start(local, SETTINGS.clockUtcOffsetQ);
+  readingSessionDates.start(local, SETTINGS.clockUtcOffsetQ);
+  readingSessionJournal.start(local, SETTINGS.clockUtcOffsetQ);
+}
+
+bool XtcReaderActivity::checkpointReadingStatsBeforeRestart() {
+  recordCurrentPageReadingTime("restart_checkpoint");
+  bool saved = readingSessionJournal.checkpoint();
+  if (xtc && (statsTrackingActive || pendingStatsCommit) &&
+      !saveReadingSessionCheckpoint(stats, globalStats, sessionReadingSeconds, &readingSessionDates,
+                                    xtc->getCachePath())) {
+    saved = false;
+  }
+  if (!saved) LOG_ERR("READER", "Cannot save reading stats before restart; retaining the live session");
+  return saved;
+}
+
+bool XtcReaderActivity::saveProgressBeforeRestart() {
   // Silent network-mode restarts skip onExit(); coordinate with the render task.
   RenderLock lock(*this);
+  bool saved = checkpointReadingStatsBeforeRestart();
   if (!(flushQueuedProgress())) {
     LOG_ERR("READER", "Failed to save progress before restart");
+    saved = false;
   }
+  return saved;
 }

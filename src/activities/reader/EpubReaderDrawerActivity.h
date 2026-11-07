@@ -21,10 +21,14 @@
 #include "util/ButtonNavigator.h"
 #if CROSSINK_SCALABLE_FONTS
 #include "TtfRenderProfileStore.h"
+#include "components/OptionPopup.h"
 #endif
 
 class EpubReaderDrawerActivity final : public Activity {
  public:
+#ifdef SIMULATOR
+  friend struct SliderOrientationSmokeTest;
+#endif
   using SaveSettingsCallback = void (*)(void* ctx);
   using SaveGlobalSettingsCallback = void (*)(void* ctx);
   using GlobalSettingsEditCallback = void (*)(void* ctx);
@@ -48,7 +52,12 @@ class EpubReaderDrawerActivity final : public Activity {
       ReaderDrawerState initialState = initialReaderDrawerState(CROSSINK_APP_CAP_TOUCH),
       std::unique_ptr<EpubReaderPreviewModel> ownedPreviewModel = nullptr);
 
+  // Button menu only: shown under the book title. Set before the activity starts.
+  void setChapterTitle(std::string title) { chapterTitle = std::move(title); }
+
 #ifdef SIMULATOR
+  friend struct ReaderDrawerLayoutSmokeTest;
+  freeink::ui::Rect simulatorHandleRect() const { return drawerHandleRect; }
   const ReaderDrawerState& simulatorState() const { return state; }
   bool simulatorFocusedRowVisible() const {
     return buttonFocusActive && state.selectedIndex >= activeTopIndex() &&
@@ -115,6 +124,7 @@ class EpubReaderDrawerActivity final : public Activity {
   const uint32_t chapterPageCount = 0;
   const bool chapterPageCountEstimated = false;
   const uint32_t stablePageSeed = 0;
+  std::string chapterTitle;
   // Touch uses the Percent keypad directly. Button devices start on the slider
   // and can open this keypad by holding Confirm, as in the old selector.
   char entryText[8] = {0};
@@ -206,12 +216,14 @@ class EpubReaderDrawerActivity final : public Activity {
   void buildDrawer(UiApp::ScreenType& screen);
   void drawButtonBookHeader();
   bool showsSamplePreview() const;
+  bool samplePreviewBesideControls() const;
   void renderPreviewUnavailable();
   void renderSamplePreviewText(const ReaderSettingsDraft& settings, int fontId);
   void buildTabBar(UiApp::ScreenType& screen, freeink::ui::Rect rect, bool drawBottomRule);
   void buildPaneHeader(UiApp::ScreenType& screen);
-  void buildRootRows(UiApp::ScreenType& screen);
+  void buildRows(UiApp::ScreenType& screen);
   void buildSimplePane(UiApp::ScreenType& screen);
+  void buildCharacterSpacingPane(UiApp::ScreenType& screen);
   void buildSpacingPane(UiApp::ScreenType& screen);
   void buildMarginsPane(UiApp::ScreenType& screen);
   void buildPercentPane(UiApp::ScreenType& screen);
@@ -277,13 +289,14 @@ class EpubReaderDrawerActivity final : public Activity {
   void discoverFonts();
   void refreshTtfRenderingRow();
 #if CROSSINK_SCALABLE_FONTS
+  OptionPopup ttfResetPopup;
   TtfRenderProfile ttfRenderProfile{};
   TtfRenderProfile initialTtfRenderProfile{};
   bool ttfRenderingChanged = false;
 
   void rebuildTtfRenderingRows();
   void showTtfRenderingOptions(RowId row);
-  void saveTtfRenderingProfile();
+  bool saveTtfRenderingProfile();
   void finishTtfRenderingEdit();
 #endif
   void discoverDictionaries();

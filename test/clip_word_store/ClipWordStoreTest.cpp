@@ -233,6 +233,35 @@ TEST(ClippingTextMatcher, MatchesNonBreakingSpaceBeforeAdjacentEllipsisFragment)
   EXPECT_EQ(ellipsisFragment.tokenBytes, 4);
 }
 
+TEST(ClippingHighlightGeometry, TightSpacingUsesAdjacentNonOverlappingBands) {
+  const auto first = ClippingHighlightGeometry::lineBand(100, 35, 0, 70);
+  const auto next = ClippingHighlightGeometry::lineBand(125, 35, 0, 70);
+  EXPECT_EQ(first.y, 105);
+  EXPECT_EQ(first.height, 25);
+  EXPECT_EQ(first.y + first.height, next.y);
+}
+
+TEST(ClippingHighlightGeometry, NormalAndLooseSpacingFollowLayoutRounding) {
+  const auto normal = ClippingHighlightGeometry::lineBand(100, 35, 0, 100);
+  EXPECT_EQ(normal.y, 100);
+  EXPECT_EQ(normal.height, 35);
+  const auto loose = ClippingHighlightGeometry::lineBand(100, 35, 0, 200);
+  EXPECT_EQ(loose.y, 100);
+  EXPECT_EQ(loose.height, 70);
+}
+
+TEST(ClippingHighlightGeometry, ExplicitMixedFontAndTableHeightsTakePrecedence) {
+  const auto mixed = ClippingHighlightGeometry::lineBand(100, 50, 38, 70);
+  EXPECT_EQ(mixed.y, 106);
+  EXPECT_EQ(mixed.height, 38);
+  const auto table = ClippingHighlightGeometry::lineBand(100, 35, 24, 70);
+  EXPECT_EQ(table.y, 105);
+  EXPECT_EQ(table.height, 24);
+  const auto ruby = ClippingHighlightGeometry::lineBand(100, 35, 42, 70);
+  EXPECT_EQ(ruby.y, 100);
+  EXPECT_EQ(ruby.height, 42);
+}
+
 TEST(ClippingHighlightGeometry, BridgesVisibleWordsSeparatedByHiddenLayoutSpace) {
   const ClippingHighlightGeometry::WordRect wordBeforeEllipsis{12, 100, 200, 32, 20};
   const ClippingHighlightGeometry::WordRect ellipsis{13, 140, 200, 10, 20};
@@ -460,4 +489,25 @@ TEST(ClippingTextMatcher, PreservesCompleteShortClippingsAndLongerRelayoutRuns) 
   EXPECT_TRUE(ClippingTextMatcher::isReliableRun(4, true, 3, 3));
   EXPECT_TRUE(ClippingTextMatcher::isReliableRun(4, false, 3, 3));
   EXPECT_FALSE(ClippingTextMatcher::isReliableRun(0, false, 0, 3));
+}
+
+TEST(ClipTextBuilder, BudgetsTheCompleteSelectionAndTemporaryWords) {
+  ClipWordStore store;
+  WordRef first;
+  first.tableSelection = 1;
+  ASSERT_TRUE(store.appendText(first, "first"));
+  store.words.push_back(first);
+  WordRef second;
+  second.tableSelection = 2;
+  ASSERT_TRUE(store.appendText(second, "second"));
+  store.words.push_back(second);
+  const uint16_t order[] = {0, 1};
+  const auto budget = ClipTextBuilder::allocationBudget(store, order, 0, 1);
+  EXPECT_EQ(budget.textCapacity, 13);
+  EXPECT_EQ(budget.temporaryBytes, 28);
+  EXPECT_FALSE(budget.fits(100000, 13));
+  EXPECT_FALSE(budget.fits(1065, 100000));
+  EXPECT_TRUE(budget.fits(1066, 14));
+  EXPECT_EQ(ClipTextBuilder::allocationBudget(store, order, 0, 1, 1).textCapacity, 6);
+  EXPECT_LE(ClipTextBuilder::build(store, order, 0, 1, 0, 1).text.size(), budget.textCapacity);
 }

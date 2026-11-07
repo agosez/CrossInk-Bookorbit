@@ -19,3 +19,12 @@ TEST(PixelCache, RejectsDecodeBandAboveMemoryCeiling) {
   EXPECT_FALSE(cache.begin("/large.pxc", 480, 1000, 0, 0, 300));
   EXPECT_FALSE(Storage.exists("/large.pxc"));
 }
+
+TEST(PixelCache, FailedCloseDiscardsIncompleteImage) {
+  Storage.reset();
+  PixelCache cache;
+  ASSERT_TRUE(cache.begin("/failed.pxc", 480, 67, 0, 0, 121));
+  Storage.failClose("/failed.pxc");
+  EXPECT_FALSE(cache.finalize());
+  EXPECT_FALSE(Storage.exists("/failed.pxc"));
+}

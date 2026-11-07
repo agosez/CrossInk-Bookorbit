@@ -3,6 +3,8 @@ add_executable(KOReaderXPathResolverTest
   HighlightPositionResolverTest.cpp
   ${REPO_ROOT}/lib/EpubPosition/ChapterXPathResolver.cpp
   ${REPO_ROOT}/lib/EpubPosition/HighlightPositionResolver.cpp
+  ${REPO_ROOT}/lib/EpubPosition/ProgressMapper.cpp
+  ${REPO_ROOT}/lib/Epub/Epub/htmlEntities.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
   ${REPO_ROOT}/lib/expat/xmlparse.c
   ${REPO_ROOT}/lib/expat/xmlrole.c
@@ -12,6 +14,7 @@ add_executable(KOReaderXPathResolverTest
 target_include_directories(KOReaderXPathResolverTest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs
   ${REPO_ROOT}/lib/EpubPosition
+  ${REPO_ROOT}/lib/KOReaderSync
   ${REPO_ROOT}/lib/Epub
   ${REPO_ROOT}/lib/Utf8
   ${REPO_ROOT}/lib/XmlParserUtils
@@ -19,7 +22,7 @@ target_include_directories(KOReaderXPathResolverTest PRIVATE
 )
 
 target_compile_definitions(KOReaderXPathResolverTest PRIVATE
-  XML_CONTEXT_BYTES=1024
+  XML_CONTEXT_BYTES=0
   XML_GE=0
 )
 

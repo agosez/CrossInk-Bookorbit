@@ -50,7 +50,7 @@ void dictionaryNotFoundTitle(char (&title)[kDictionaryNotFoundTitleCapacity]) {
 }
 
 Rect dictionarySwitchTouchRect(const GfxRenderer& renderer) {
-  const int buttonHintsHeight = UITheme::getInstance().getMetrics().buttonHintsHeight;
+  const int buttonHintsHeight = UITheme::getButtonHintsReserve(renderer);
   return Rect{0, renderer.getScreenHeight() - buttonHintsHeight - kDictionarySwitchTouchHeight,
               renderer.getScreenWidth(), kDictionarySwitchTouchHeight};
 }
@@ -84,8 +84,7 @@ void DictionaryLookupController::startLookup(const std::string& word, bool recor
     // (e.g. from navigation) may still be mid-refresh, and concurrent framebuffer / SPI
     // access from two tasks crashes the e-ink driver.
     RenderLock lock;
-    GUI.drawPopup(renderer, tr(STR_DICT_LOOKING_UP));
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    GUI.drawPopup(renderer, tr(STR_DICT_LOOKING_UP));  // refreshes the panel itself
   } else if (!lookupToastEnabled_) {
     owner.requestUpdate();
   }
@@ -299,7 +298,7 @@ void DictionaryLookupController::buildAltFormPromptScreen(AltFormUiApp::ScreenTy
   // Keep the final action clear of the e-ink panel's bottom edge. The visible
   // button-hint strip is not enough margin on every touch device.
   screen.setContentMargin(
-      freeink::ui::Insets{0, 0, static_cast<int16_t>(metrics.buttonHintsHeight + theme.spaceLg), 0});
+      freeink::ui::Insets{0, 0, static_cast<int16_t>(UITheme::getButtonHintsReserve(renderer) + theme.spaceLg), 0});
   const freeink::ui::Rect band = screen.takeBottom(actionBandHeight, theme.spaceLg);
   const int16_t inset = static_cast<int16_t>(metrics.contentSidePadding);
   const freeink::ui::Rect area{static_cast<int16_t>(band.x + inset), band.y,
@@ -342,7 +341,7 @@ bool DictionaryLookupController::render() {
   if (state == LookupState::AltFormPrompt) {
     renderer.clearScreen();
     const int pageWidth = renderer.getScreenWidth();
-    const Rect header{0, metrics.topPadding, pageWidth, TouchHeaderBackButton::height(metrics, mappedInput)};
+    const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
 #if CROSSINK_APP_CAP_TOUCH
     if (mappedInput.hasTouchHardware()) {
       TouchHeaderBackButton::draw(renderer, altFormUiTarget, header, tr(STR_DICT_SEARCH_ALT_FORMS), true);
@@ -351,16 +350,15 @@ bool DictionaryLookupController::render() {
     {
       GUI.drawHeader(renderer, header, tr(STR_DICT_SEARCH_ALT_FORMS));
     }
-    const int promptTop =
-        metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing;
+    const int promptTop = TouchHeaderBackButton::contentTop(renderer, mappedInput) + metrics.verticalSpacing;
 #if CROSSINK_APP_CAP_TOUCH
     if (mappedInput.hasTouch()) {
       const int actionRows = allowCreateClipping_ ? 3 : 2;
       const auto& theme = altFormUiApp.theme();
       const int actionHeight = std::max<int>(theme.rowHeight, kDictionarySwitchTouchHeight);
       const int actionBandHeight = actionHeight * actionRows + theme.spaceMd * (actionRows - 1);
-      const int bottom =
-          renderer.getScreenHeight() - metrics.buttonHintsHeight - theme.spaceLg - actionBandHeight - theme.spaceLg;
+      const int bottom = renderer.getScreenHeight() - UITheme::getButtonHintsReserve(renderer) - theme.spaceLg -
+                         actionBandHeight - theme.spaceLg;
       freeink::ui::TextStyle phraseStyle = altFormUiApp.theme().bodyText;
       phraseStyle.align = freeink::ui::TextAlign::Center;
       phraseStyle.maxLines =
@@ -376,7 +374,8 @@ bool DictionaryLookupController::render() {
       // Keep the original alternate-form baseline on button-only devices while
       // giving multi-word phrases the same wrapped full-screen treatment.
       const int y = promptTop + renderer.getLineHeight(UI_10_FONT_ID);
-      const int bottom = renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing;
+      const int bottom =
+          renderer.getScreenHeight() - UITheme::getButtonHintsReserve(renderer) - metrics.verticalSpacing;
       const Rect textArea{metrics.contentSidePadding, y, std::max(1, pageWidth - metrics.contentSidePadding * 2),
                           std::max(1, bottom - y)};
       const int maxLines = std::max(1, textArea.height / renderer.getLineHeight(UI_10_FONT_ID));
@@ -385,7 +384,7 @@ bool DictionaryLookupController::render() {
 #if CROSSINK_APP_CAP_TOUCH
     if (mappedInput.hasTouch()) {
       altFormUiReady = false;
-      altFormUiApp.render();
+      renderUiApp(altFormUiApp, altFormUiTarget);
       altFormUiReady = true;
     } else
 #endif
@@ -400,18 +399,18 @@ bool DictionaryLookupController::render() {
   if (state == LookupState::NotFound) {
     renderer.clearScreen();
     const int pageWidth = renderer.getScreenWidth();
-    const Rect header{0, metrics.topPadding, pageWidth, TouchHeaderBackButton::height(metrics, mappedInput)};
+    const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
     char title[kDictionaryNotFoundTitleCapacity];
     dictionaryNotFoundTitle(title);
 #if CROSSINK_APP_CAP_TOUCH
     if (mappedInput.hasTouchHardware()) {
       TouchHeaderBackButton::draw(renderer, altFormUiTarget, header, title, true);
-      const int y = metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing;
+      const int y = TouchHeaderBackButton::contentTop(renderer, mappedInput) + metrics.verticalSpacing;
       const auto& theme = altFormUiApp.theme();
       const int actionHeight = std::max<int>(theme.rowHeight, kDictionarySwitchTouchHeight);
       const int actionBandHeight = allowCreateClipping_ ? actionHeight * 2 + theme.spaceMd : 0;
-      const int bottom = renderer.getScreenHeight() - metrics.buttonHintsHeight - theme.spaceLg - actionBandHeight -
-                         (allowCreateClipping_ ? theme.spaceLg : 0);
+      const int bottom = renderer.getScreenHeight() - UITheme::getButtonHintsReserve(renderer) - theme.spaceLg -
+                         actionBandHeight - (allowCreateClipping_ ? theme.spaceLg : 0);
       freeink::ui::TextStyle phraseStyle = altFormUiApp.theme().bodyText;
       phraseStyle.align = freeink::ui::TextAlign::Center;
       phraseStyle.maxLines = static_cast<uint8_t>(std::max(1, (bottom - y) / renderer.getLineHeight(UI_10_FONT_ID)));
@@ -422,7 +421,7 @@ bool DictionaryLookupController::render() {
           lookupWord.c_str(), phraseStyle);
       if (allowCreateClipping_) {
         altFormUiReady = false;
-        altFormUiApp.render();
+        renderUiApp(altFormUiApp, altFormUiTarget);
         altFormUiReady = true;
       }
       const auto labels =
@@ -433,9 +432,9 @@ bool DictionaryLookupController::render() {
     }
 #endif
     GUI.drawHeader(renderer, header, title);
-    const int y = metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing +
+    const int y = TouchHeaderBackButton::contentTop(renderer, mappedInput) + metrics.verticalSpacing +
                   renderer.getLineHeight(UI_10_FONT_ID);
-    const int bottom = renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing;
+    const int bottom = renderer.getScreenHeight() - UITheme::getButtonHintsReserve(renderer) - metrics.verticalSpacing;
     const Rect textArea{metrics.contentSidePadding, y, std::max(1, pageWidth - metrics.contentSidePadding * 2),
                         std::max(1, bottom - y)};
     const int maxLines = std::max(1, textArea.height / renderer.getLineHeight(UI_10_FONT_ID));
@@ -521,7 +520,6 @@ void DictionaryLookupController::showMemoryErrorAndReset() {
   {
     RenderLock lock;
     GUI.drawPopup(renderer, tr(STR_MEMORY_ERROR));
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
   }
   vTaskDelay(1000 / portTICK_PERIOD_MS);
   state = LookupState::Idle;
@@ -533,7 +531,6 @@ void DictionaryLookupController::showNoWordPopup() {
     // Serialize with render task — see comment in startLookup() for the race this prevents.
     RenderLock lock;
     GUI.drawPopup(renderer, tr(STR_DICT_NO_WORD));
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
   }
   vTaskDelay(1000 / portTICK_PERIOD_MS);
   owner.requestUpdate();

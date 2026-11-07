@@ -23,8 +23,18 @@ class GfxRenderer;
 
 class IntervalSelectionActivity final : public Activity {
  public:
+#ifdef SIMULATOR
+  friend struct SliderOrientationSmokeTest;
+#endif
   using ValueFormatter = void (*)(int value, char* buf, size_t len);
-  enum class ReaderPreviewSetting : uint8_t { None, LineSpacing, WordSpacing, VerticalMargin, HorizontalMargin };
+  enum class ReaderPreviewSetting : uint8_t {
+    None,
+    LineSpacing,
+    WordSpacing,
+    CharacterSpacing,
+    VerticalMargin,
+    HorizontalMargin
+  };
 
   explicit IntervalSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const char* activityName,
                                      StrId titleId, int initialValue, int minValue, int maxValue, int smallStep,

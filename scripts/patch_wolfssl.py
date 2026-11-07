@@ -39,8 +39,9 @@ def patch_user_settings(path: Path) -> None:
 # ignores max_fragment_length sends 16 KB records, so a large download on a
 # PSRAM-less C3 needs a fresh ~17 KB contiguous block for every record, and
 # fails with MEMORY_E once fragmentation leaves none. Keep the grown buffer
-# until the connection is freed: one allocation per connection, failing at the
-# first record rather than megabytes into the transfer.
+# until the connection is freed, reusing it for records that fit. A later,
+# larger record can still require growth; release a consumed buffer first so
+# growth does not require both the old and new allocations simultaneously.
 SHRINK_MARKER = "/* CrossInk: keep a grown input buffer until the connection is freed */"
 SHRINK_ORIGINAL = """    if (!forcedFree && (usedLength > STATIC_BUFFER_LEN ||
             ssl->buffers.clearOutputBuffer.length > 0))
@@ -56,60 +57,57 @@ SHRINK_PATCHED = f"""    {SHRINK_MARKER}
 #else
 {SHRINK_ORIGINAL}#endif
 """
-env.Append(CPPDEFINES=["FREEINK_WOLFSSL_RETAIN_INPUT_BUFFER"])
+env.Append(CPPDEFINES=["FREEINK_WOLFSSL_RETAIN_INPUT_BUFFER", "FREEINK_WOLFSSL_RELEASE_EMPTY_INPUT_BUFFER"])
 
 
-# A retained buffer still has to grow when a larger record arrives, and it used
-# to hold its old block while allocating the new one. Go's crypto/tls (Caddy,
-# Traefik...) ignores max_fragment_length and grows its records 1186 bytes at a
-# time up to 16 KB, so a transfer made a dozen such allocations, each larger than
-# any hole the previous ones left, and the last failed about 100 KB in, on a heap
-# that had 70 KB in one block before the handshake (issue #96). Release the old
-# block first when nothing has to be carried over, and let the app ask for a full
-# record the first time, while that block is still whole: it knows which requests
-# are worth the memory (HttpDownloader's DownloadOptions::largeBody).
-GROW_MARKER = "/* CrossInk: reach a full record in one input buffer allocation */"
+def patch_input_buffer_shrink(path: Path) -> None:
+    text = path.read_text()
+    if SHRINK_MARKER in text:
+        if text.count(SHRINK_PATCHED) != 1:
+            raise RuntimeError(f"Corrupt wolfSSL input buffer patch in {path}")
+        return
+    if text.count(SHRINK_ORIGINAL) != 1:
+        raise RuntimeError(f"Unsupported wolfSSL ShrinkInputBuffer in {path}; refusing an unverified patch")
+    path.write_text(text.replace(SHRINK_ORIGINAL, SHRINK_PATCHED, 1))
+    print(f"Patched wolfSSL input buffer: {path.relative_to(PROJECT_DIR)}")
+
+
+# A separate flag lets an older build disable this change even when its
+# dependency cache still contains the patched source.
+GROW_MARKER = "/* CrossInk: release a consumed input buffer before growing it */"
 GROW_ORIGINAL = """    tmp = (byte*)XMALLOC(size + usedLength + align,
                              ssl->heap, DYNAMIC_TYPE_IN_BUFFER);
     WOLFSSL_MSG("growing input buffer");
 """
 GROW_PATCHED = f"""    {GROW_MARKER}
-#if defined(FREEINK_WOLFSSL_RETAIN_INPUT_BUFFER)
-    tmp = NULL;
-    /* With nothing to carry over, the old block can merge with its neighbours. */
-    if (usedLength == 0 && ssl->buffers.inputBuffer.dynamicFlag)
+#if defined(FREEINK_WOLFSSL_RELEASE_EMPTY_INPUT_BUFFER)
+    /* No unread ciphertext or pending plaintext may refer to this buffer.
+     * ShrinkInputBuffer zeroes/frees it and restores valid static-buffer state,
+     * including on allocation failure below. Records that fit never get here. */
+    if (ssl->buffers.inputBuffer.dynamicFlag && usedLength == 0 &&
+            ssl->buffers.inputBuffer.length == ssl->buffers.inputBuffer.idx &&
+            ssl->buffers.clearOutputBuffer.length == 0) {{
         ShrinkInputBuffer(ssl, FORCED_FREE);
-    if (size + usedLength < FREEINK_WOLFSSL_FULL_RECORD_BUFFER) {{
-        extern int freeinkWolfsslWantsFullRecordBuffer(void);
-        if (freeinkWolfsslWantsFullRecordBuffer()) {{
-            tmp = (byte*)XMALLOC(FREEINK_WOLFSSL_FULL_RECORD_BUFFER + align,
-                                 ssl->heap, DYNAMIC_TYPE_IN_BUFFER);
-            if (tmp != NULL)
-                size = FREEINK_WOLFSSL_FULL_RECORD_BUFFER - usedLength;
-        }}
     }}
-    if (tmp == NULL)
 #endif
 {GROW_ORIGINAL}"""
-# MAX_RECORD_SIZE plus TLS 1.3's largest record expansion (RFC 8446, section 5.2).
-env.Append(CPPDEFINES=[("FREEINK_WOLFSSL_FULL_RECORD_BUFFER", 16640)])
 
 
-def patch_once(path: Path, marker: str, original: str, patched: str, description: str) -> None:
+def patch_input_buffer_growth(path: Path) -> None:
     text = path.read_text()
-    if marker in text:
-        if text.count(patched) != 1:
-            raise RuntimeError(f"Corrupt wolfSSL {description} patch in {path}")
+    if GROW_MARKER in text:
+        if text.count(GROW_PATCHED) != 1:
+            raise RuntimeError(f"Corrupt wolfSSL input growth patch in {path}")
         return
-    if text.count(original) != 1:
-        raise RuntimeError(f"Unsupported wolfSSL {description} code in {path}; refusing an unverified patch")
-    path.write_text(text.replace(original, patched, 1))
-    print(f"Patched wolfSSL {description}: {path.relative_to(PROJECT_DIR)}")
+    if text.count(GROW_ORIGINAL) != 1:
+        raise RuntimeError(f"Unsupported wolfSSL GrowInputBuffer in {path}; refusing an unverified patch")
+    path.write_text(text.replace(GROW_ORIGINAL, GROW_PATCHED, 1))
+    print(f"Patched wolfSSL input growth: {path.relative_to(PROJECT_DIR)}")
 
 
 for settings in PROJECT_DIR.glob(".pio/libdeps/*/Arduino-wolfSSL/src/user_settings.h"):
     patch_user_settings(settings)
 
 for internal in PROJECT_DIR.glob(".pio/libdeps/*/Arduino-wolfSSL/src/src/internal.c"):
-    patch_once(internal, SHRINK_MARKER, SHRINK_ORIGINAL, SHRINK_PATCHED, "input buffer shrink")
-    patch_once(internal, GROW_MARKER, GROW_ORIGINAL, GROW_PATCHED, "input buffer growth")
+    patch_input_buffer_shrink(internal)
+    patch_input_buffer_growth(internal)

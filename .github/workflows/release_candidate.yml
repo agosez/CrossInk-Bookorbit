@@ -10,6 +10,9 @@ jobs:
   build-release-candidate:
     if: startsWith(github.ref_name, 'release/')
     runs-on: ubuntu-latest
+    # Every matrix member builds the same source and computes the same tag.
+    outputs:
+      rc_tag: ${{ steps.metadata.outputs.rc_tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -22,6 +25,8 @@ jobs:
             firmware: firmware-x4-pro
           - environment: x4-classic
             firmware: firmware-x4-classic
+          - environment: picco
+            firmware: firmware-picco
     env:
       RC_BRANCH: ${{ github.ref_name }}
       RC_HASH: ${{ github.sha }}
@@ -54,12 +59,14 @@ jobs:
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
       - name: Resolve release-candidate metadata
+        id: metadata
         shell: bash
         run: |
           branch_without_prefix="${RC_BRANCH#release/}"
           branch_safe=$(printf '%s\n' "$branch_without_prefix" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//')
           hash_short="${RC_HASH::7}"
           rc_tag="rc-${branch_safe}-${hash_short}"
+          echo "rc_tag=$rc_tag" >> "$GITHUB_OUTPUT"
           echo "RC_BRANCH_RAW=$branch_without_prefix" >> "$GITHUB_ENV"
           echo "RC_BRANCH_SAFE=$branch_safe" >> "$GITHUB_ENV"
           echo "RC_HASH_SHORT=$hash_short" >> "$GITHUB_ENV"
@@ -98,6 +105,8 @@ jobs:
         shell: bash
         env:
           CROSSINK_RELEASE_VERSION: "1"
+          CROSSINK_ASSET_BASE_URL: ${{ vars.CROSSINK_ASSET_BASE_URL }}
+          CROSSINK_FONT_BASE_URL: ${{ vars.CROSSINK_FONT_BASE_URL }}
           CROSSINK_RC_BRANCH: ${{ env.RC_BRANCH_RAW }}
           CROSSINK_RC_HASH: ${{ env.RC_HASH_SHORT }}
         run: pio run -j1 -e ${{ matrix.environment }}
@@ -109,14 +118,68 @@ jobs:
           path: .pio/build/${{ matrix.environment }}/${{ matrix.firmware }}-${{ env.RC_BRANCH_SAFE }}-${{ env.RC_HASH_SHORT }}-RC.bin
           if-no-files-found: error
 
-  publish-release-candidate:
+  # Language and hyphenation downloads for -RC firmware, which reads the rc channel.
+  # Same gh-pages publication as release.yml's publish-language-assets job.
+  publish-language-assets:
     if: startsWith(github.ref_name, 'release/')
     needs: build-release-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: language-assets-pages
+      cancel-in-progress: false
+    env:
+      RC_TAG: ${{ needs.build-release-candidate.outputs.rc_tag }}
+      PAGES_DIR: ${{ runner.temp }}/pages
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Check out the gh-pages branch
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git fetch --depth=1 origin gh-pages
+            git worktree add "$PAGES_DIR" FETCH_HEAD
+          else
+            git worktree add --detach "$PAGES_DIR"
+            git -C "$PAGES_DIR" checkout -q --orphan gh-pages
+            git -C "$PAGES_DIR" rm -rq .
+          fi
+          touch "$PAGES_DIR/.nojekyll"
+
+      - name: Export language and hyphenation downloads
+        run: |
+          python3 scripts/export_pages_language_assets.py \
+            --output "$PAGES_DIR/assets" --version "$RC_TAG" --channel rc
+
+      - name: Push to gh-pages
+        working-directory: ${{ env.PAGES_DIR }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .nojekyll assets
+          if git diff --cached --quiet; then
+            echo 'Language downloads are already current'
+            exit 0
+          fi
+          git commit -q -m "Update language downloads for $RC_TAG"
+          git push origin HEAD:refs/heads/gh-pages
+
+  publish-release-candidate:
+    if: startsWith(github.ref_name, 'release/')
+    needs:
+      - build-release-candidate
+      - publish-language-assets
     runs-on: ubuntu-latest
     env:
       RC_BRANCH: ${{ github.ref_name }}
       RC_HASH: ${{ github.sha }}
     steps:
+      - uses: actions/checkout@v6
+
       - name: Resolve release-candidate metadata
         shell: bash
         run: |
@@ -136,6 +199,14 @@ jobs:
           merge-multiple: true
           path: release-candidate-firmware
 
+      - name: Package SD language files
+        run: |
+          python3 scripts/package_languages.py \
+            --version "${{ env.RC_TAG }}" \
+            --source-commit "${{ github.sha }}" --status release-build \
+            --output "release-candidate-firmware/crossink-languages-${{ env.RC_TAG }}.zip" \
+            --template-output-dir "release-candidate-firmware/language-template"
+
       - name: Create GitHub RC Prerelease
         uses: softprops/action-gh-release@v3
         with:
@@ -151,7 +222,11 @@ jobs:
           draft: true
           prerelease: true
           files: |
+            release-candidate-firmware/crossink-languages-${{ env.RC_TAG }}.zip
+            release-candidate-firmware/language-template/english_template.yaml
+            release-candidate-firmware/language-template/language-template.json
             release-candidate-firmware/firmware-x3-x4-${{ env.RC_BRANCH_SAFE }}-${{ env.RC_HASH_SHORT }}-RC.bin
             release-candidate-firmware/firmware-sticky-${{ env.RC_BRANCH_SAFE }}-${{ env.RC_HASH_SHORT }}-RC.bin
             release-candidate-firmware/firmware-x4-pro-${{ env.RC_BRANCH_SAFE }}-${{ env.RC_HASH_SHORT }}-RC.bin
             release-candidate-firmware/firmware-x4-classic-${{ env.RC_BRANCH_SAFE }}-${{ env.RC_HASH_SHORT }}-RC.bin
+            release-candidate-firmware/firmware-picco-${{ env.RC_BRANCH_SAFE }}-${{ env.RC_HASH_SHORT }}-RC.bin

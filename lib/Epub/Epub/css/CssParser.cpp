@@ -43,6 +43,8 @@ constexpr size_t READ_BUFFER_SIZE = 512;
 // Maximum number of CSS rules to store in the selector map
 // Prevents unbounded memory growth from pathological CSS files
 constexpr size_t MAX_RULES = 1500;
+constexpr size_t MAX_FONT_FACES = 32;
+constexpr size_t MAX_FONT_FACE_HREF = 255;
 
 // Maximum number of two-part descendant rules (ancestor subject) to store
 constexpr size_t MAX_DESCENDANT_RULES = CssParser::MAX_DESCENDANT_RULES;
@@ -70,8 +72,8 @@ constexpr size_t MAX_SELECTOR_LENGTH = 256;
 constexpr size_t CSS_LENGTH_FIELD_COUNT = 12;
 constexpr size_t CSS_LENGTH_BYTES = sizeof(float) + sizeof(uint8_t);
 constexpr size_t CSS_FIXED_STYLE_BYTES = 5 * sizeof(uint8_t) + (CSS_LENGTH_FIELD_COUNT * CSS_LENGTH_BYTES) +
-                                         4 * sizeof(uint8_t) + 3 * sizeof(uint8_t) + sizeof(uint32_t);
-static_assert(CSS_FIXED_STYLE_BYTES == 76,
+                                         4 * sizeof(uint8_t) + 19 * sizeof(uint8_t) + 2 * sizeof(uint32_t);
+static_assert(CSS_FIXED_STYLE_BYTES == 96,
               "CssStyle cache payload changed; update read/writeCssStylePayload and bump CSS_CACHE_VERSION");
 
 // Check if character is CSS whitespace
@@ -108,6 +110,28 @@ void forEachDelimitedToken(std::string_view s, Pred isDelimiter, F&& fn) {
       start = i + 1;
     }
   }
+}
+
+constexpr std::string_view unquoteCss(std::string_view s) {
+  s = trimCssWhitespace(s);
+  if (s.size() >= 2 && (s.front() == '"' || s.front() == '\'') && s.back() == s.front()) {
+    s = trimCssWhitespace(s.substr(1, s.size() - 2));
+  }
+  return s;
+}
+
+// Hash of the first family in a font-family list; 0 when it is a generic family or
+// keyword, which leaves the text in the reader font.
+uint32_t firstFontFamily(const std::string_view value) {
+  const size_t comma = value.find(',');
+  const std::string_view name = unquoteCss(comma == std::string_view::npos ? value : value.substr(0, comma));
+  constexpr std::string_view GENERIC[] = {"serif",   "sans-serif", "monospace", "cursive",  "fantasy",
+                                          "inherit", "initial",    "unset",     "system-ui"};
+  if (name.empty()) return 0;
+  for (const std::string_view generic : GENERIC) {
+    if (iequalsAscii(name, generic)) return 0;
+  }
+  return CssParser::hashFontFamily(name);
 }
 
 // FNV-1a per Fowler/Noll/Vo, sized to match size_t on the target. The firmware
@@ -408,6 +432,160 @@ bool CssParser::tryInterpretLength(std::string_view val, CssLength& out) {
   return true;
 }
 
+// Only border visibility is needed for <hr>; keep publisher dimensions and
+// colors out of layout. These helpers allocate no memory.
+bool tryBorderStyleSuppression(std::string_view value, bool& suppressed) {
+  static constexpr const char* styles[] = {"none",   "hidden", "dotted", "dashed", "solid",
+                                           "double", "groove", "ridge",  "inset",  "outset"};
+  for (const char* keyword : styles) {
+    if (iequalsAscii(value, keyword)) {
+      suppressed = iequalsAscii(value, "none") || iequalsAscii(value, "hidden");
+      return true;
+    }
+  }
+  return false;
+}
+
+bool tryBorderWidthSuppression(std::string_view value, bool& suppressed) {
+  if (iequalsAscii(value, "thin") || iequalsAscii(value, "medium") || iequalsAscii(value, "thick")) {
+    suppressed = false;
+    return true;
+  }
+  // Reject unsupported units rather than interpreting them as pixels.
+  for (const auto unit :
+       {std::string_view("px"), std::string_view("pt"), std::string_view("rem"), std::string_view("em")}) {
+    if (value.size() > unit.size() && iequalsAscii(value.substr(value.size() - unit.size()), unit)) {
+      float width = 0;
+      if (!tryParseNumber(value.substr(0, value.size() - unit.size()), width) || !std::isfinite(width) || width < 0)
+        return false;
+      suppressed = width == 0;
+      return true;
+    }
+  }
+  float width = 0;
+  if (!tryParseNumber(value, width) || width != 0) return false;
+  suppressed = true;
+  return true;
+}
+
+CssBorderStyle borderStyleValue(std::string_view value) {
+  if (iequalsAscii(value, "none") || iequalsAscii(value, "hidden")) return CssBorderStyle::None;
+  if (iequalsAscii(value, "double")) return CssBorderStyle::Double;
+  if (iequalsAscii(value, "dotted")) return CssBorderStyle::Dotted;
+  if (iequalsAscii(value, "dashed")) return CssBorderStyle::Dashed;
+  return CssBorderStyle::Solid;
+}
+
+uint8_t borderWidthValue(std::string_view value) {
+  if (iequalsAscii(value, "thin")) return 1;
+  if (iequalsAscii(value, "medium")) return 3;
+  if (iequalsAscii(value, "thick")) return 5;
+  float scale = 1;
+  for (const auto unit :
+       {std::string_view("rem"), std::string_view("em"), std::string_view("pt"), std::string_view("px")}) {
+    if (value.size() > unit.size() && iequalsAscii(value.substr(value.size() - unit.size()), unit)) {
+      if (unit == "em" || unit == "rem")
+        scale = 16;
+      else if (unit == "pt")
+        scale = 4.0f / 3.0f;
+      value.remove_suffix(unit.size());
+      break;
+    }
+  }
+  float width = 0;
+  if (!tryParseNumber(value, width)) return 0;
+  return static_cast<uint8_t>(std::clamp(width * scale + 0.5f, 0.0f, 8.0f));
+}
+
+bool parseBorderSuppression(std::string_view name, std::string_view value, CssStyle& style) {
+  uint8_t edges = 0x0F;
+  std::string_view suffix;
+  if (iequalsAscii(name, "border")) {
+    suffix = {};
+  } else if (name.size() > 7 && iequalsAscii(name.substr(0, 7), "border-")) {
+    suffix = name.substr(7);
+    static constexpr const char* edgeNames[] = {"top", "right", "bottom", "left"};
+    for (size_t edge = 0; edge < 4; ++edge) {
+      const std::string_view edgeName = edgeNames[edge];
+      if (suffix.size() >= edgeName.size() && iequalsAscii(suffix.substr(0, edgeName.size()), edgeName) &&
+          (suffix.size() == edgeName.size() || suffix[edgeName.size()] == '-')) {
+        edges = 1 << edge;
+        suffix.remove_prefix(edgeName.size());
+        if (!suffix.empty()) suffix.remove_prefix(1);
+        break;
+      }
+    }
+  } else {
+    return false;
+  }
+
+  value = trimCssWhitespace(stripTrailingImportant(value));
+  uint8_t styleMask = 0, widthMask = 0;
+  if (iequalsAscii(suffix, "style") || iequalsAscii(suffix, "width")) {
+    std::string_view tokens[4];
+    size_t count = 0;
+    forEachDelimitedToken(value, isCssWhitespace, [&](std::string_view token) {
+      if (count < 4) tokens[count] = token;
+      ++count;
+    });
+    if (count == 0 || count > 4 || (edges != 0x0F && count != 1)) return true;
+    CssBorderSide parsed[4];
+    for (size_t edge = 0; edge < 4; ++edge) {
+      // CSS one/two/three/four-value shorthand order: top/right/bottom/left.
+      const size_t index = edge < count ? edge : (edge == 2 ? 0 : (count > 1 ? 1 : 0));
+      bool suppressed = false;
+      const bool valid = iequalsAscii(suffix, "style") ? tryBorderStyleSuppression(tokens[index], suppressed)
+                                                       : tryBorderWidthSuppression(tokens[index], suppressed);
+      if (!valid) return true;
+      if (iequalsAscii(suffix, "style"))
+        parsed[edge].style = borderStyleValue(tokens[index]);
+      else
+        parsed[edge].width = borderWidthValue(tokens[index]);
+      if (suppressed) styleMask |= 1 << edge;
+    }
+    for (size_t edge = 0; edge < 4; ++edge) {
+      if (!(edges & (1u << edge))) continue;
+      if (iequalsAscii(suffix, "style"))
+        style.borders[edge].style = parsed[edge].style;
+      else
+        style.borders[edge].width = parsed[edge].width;
+    }
+    if (iequalsAscii(suffix, "style")) {
+      style.borderStyleSuppressed = (style.borderStyleSuppressed & ~edges) | (styleMask & edges);
+      style.borderStyleDefined |= edges;
+    } else {
+      style.borderWidthSuppressed = (style.borderWidthSuppressed & ~edges) | (styleMask & edges);
+      style.borderWidthDefined |= edges;
+    }
+  } else if (suffix.empty()) {
+    // A border shorthand resets omitted style to none and width to medium.
+    bool styleSuppressed = true, widthSuppressed = false, recognized = false;
+    CssBorderSide parsed;
+    forEachDelimitedToken(value, isCssWhitespace, [&](std::string_view token) {
+      if (tryBorderStyleSuppression(token, styleSuppressed)) {
+        parsed.style = borderStyleValue(token);
+        recognized = true;
+      } else if (tryBorderWidthSuppression(token, widthSuppressed)) {
+        parsed.width = borderWidthValue(token);
+        recognized = true;
+      }
+    });
+    if (!recognized) return true;
+    for (size_t edge = 0; edge < 4; ++edge)
+      if (edges & (1u << edge)) style.borders[edge] = parsed;
+    styleMask = styleSuppressed ? edges : 0;
+    widthMask = widthSuppressed ? edges : 0;
+    style.borderStyleSuppressed = (style.borderStyleSuppressed & ~edges) | styleMask;
+    style.borderWidthSuppressed = (style.borderWidthSuppressed & ~edges) | widthMask;
+    style.borderStyleDefined |= edges;
+    style.borderWidthDefined |= edges;
+  } else {
+    return false;
+  }
+  style.defined.border = 1;
+  return true;
+}
+
 // Declaration parsing
 
 void CssParser::parseDeclarationIntoStyle(std::string_view decl, CssStyle& style) {
@@ -419,9 +597,44 @@ void CssParser::parseDeclarationIntoStyle(std::string_view decl, CssStyle& style
 
   if (name.empty() || value.empty()) return;
 
+  if (iequalsAscii(name, "float")) {
+    const auto mode = trimCssWhitespace(stripTrailingImportant(value));
+    if (iequalsAscii(mode, "left") || iequalsAscii(mode, "none")) {
+      style.floatLeft = iequalsAscii(mode, "left");
+      style.defined.floatLeft = 1;
+    }
+  } else if (iequalsAscii(name, "initial-letter") || iequalsAscii(name, "-webkit-initial-letter")) {
+    float lines = 0;
+    const auto raw = trimCssWhitespace(stripTrailingImportant(value));
+    if (iequalsAscii(raw, "normal")) {
+      style.initialLetter = 0;
+      style.defined.initialLetter = 1;
+    } else if (tryParseNumber(raw.substr(0, raw.find_first_of(" \t")), lines) && std::isfinite(lines) && lines >= 1) {
+      style.initialLetter = static_cast<uint8_t>(std::clamp(lines, 1.0f, 4.0f));
+      style.defined.initialLetter = 1;
+    }
+  } else if (iequalsAscii(name, "white-space")) {
+    const auto mode = trimCssWhitespace(stripTrailingImportant(value));
+    if (iequalsAscii(mode, "pre") || iequalsAscii(mode, "pre-wrap") || iequalsAscii(mode, "break-spaces")) {
+      style.preserveWhitespace = true;
+      style.defined.whiteSpace = 1;
+    } else if (iequalsAscii(mode, "normal") || iequalsAscii(mode, "nowrap")) {
+      style.preserveWhitespace = false;
+      style.defined.whiteSpace = 1;
+    }
+  } else if (parseBorderSuppression(name, value, style)) {
+    return;
+  }
+
   if (iequalsAscii(name, "text-align")) {
     style.textAlign = interpretAlignment(value);
     style.defined.textAlign = 1;
+  } else if (iequalsAscii(name, "font-family")) {
+    const auto familyValue = trimCssWhitespace(stripTrailingImportant(value));
+    if (!iequalsAscii(familyValue, "inherit") && !iequalsAscii(familyValue, "unset")) {
+      style.fontFamily = firstFontFamily(familyValue);
+      style.defined.fontFamily = 1;
+    }
   } else if (iequalsAscii(name, "font-size")) {
     const auto sizeValue = trimCssWhitespace(stripTrailingImportant(value));
     CssLength size;
@@ -543,10 +756,24 @@ void CssParser::parseDeclarationIntoStyle(std::string_view decl, CssStyle& style
                                                            : CssDisplay::Block;
     style.defined.display = 1;
   } else if (iequalsAscii(name, "background") || iequalsAscii(name, "background-color")) {
+    const auto color = trimCssWhitespace(stripTrailingImportant(value));
+    if (iequalsAscii(color, "gray") || iequalsAscii(color, "grey") || iequalsAscii(color, "lightgray") ||
+        iequalsAscii(color, "lightgrey") || iequalsAscii(color, "silver") ||
+        ((color.size() == 4 || color.size() == 7) && color[0] == '#' && color != "#000" && color != "#000000" &&
+         !iequalsAscii(color, "#fff") && !iequalsAscii(color, "#ffffff"))) {
+      style.shaded = true;
+      style.defined.shaded = 1;
+    } else if (iequalsAscii(color, "transparent") || iequalsAscii(color, "white") || iequalsAscii(color, "#fff") ||
+               iequalsAscii(color, "#ffffff")) {
+      style.shaded = false;
+      style.defined.shaded = 1;
+    }
     bool backgroundBlack = false;
     if (tryInterpretBackgroundBlack(value, backgroundBlack)) {
       style.backgroundBlack = backgroundBlack;
       style.defined.backgroundBlack = 1;
+      style.shaded = false;
+      style.defined.shaded = 1;
     }
   } else if (iequalsAscii(name, "direction")) {
     const std::string_view directionValue = stripTrailingImportant(value);
@@ -622,6 +849,86 @@ bool CssParser::selectorMatchesElement(std::string_view selector, std::string_vi
   });
   return matched;
 }
+
+// Bounded compound/context matching. The existing guarded rule/cache storage owns strings;
+// matching only borrows views and uses a 100-byte index on the stack.
+namespace {
+bool compoundMatches(std::string_view selector, std::string_view tag, std::string_view classes, std::string_view id) {
+  size_t pos = selector.find_first_of(".#");
+  auto element = selector.substr(0, pos);
+  if (!element.empty() && element != "*" && !iequalsAscii(element, tag)) return false;
+  if (pos == std::string_view::npos) return !selector.empty();
+  while (pos < selector.size()) {
+    const char kind = selector[pos++];
+    const size_t end = selector.find_first_of(".#", pos);
+    const auto name = selector.substr(pos, end == std::string_view::npos ? end : end - pos);
+    if (name.empty()) return false;
+    if (kind == '#') {
+      if (!iequalsAscii(name, id)) return false;
+    } else {
+      bool found = false;
+      forEachDelimitedToken(classes, isCssWhitespace, [&](std::string_view value) {
+        if (iequalsAscii(name, value)) found = true;
+      });
+      if (!found) return false;
+    }
+    if (end == std::string_view::npos) break;
+    pos = end;
+  }
+  return true;
+}
+
+uint32_t selectorSpecificity(std::string_view selector) {
+  uint32_t score = 0;
+  bool beginsElement = true;
+  for (const char c : selector) {
+    if (c == '#') {
+      score += 65536;
+      beginsElement = false;
+    } else if (c == '.') {
+      score += 256;
+      beginsElement = false;
+    } else if (isCssWhitespace(c) || c == '>')
+      beginsElement = true;
+    else if (beginsElement) {
+      if (c != '*' && c != ':') ++score;
+      beginsElement = false;
+    }
+  }
+  return score;
+}
+
+bool contextMatches(std::string_view prefix, const std::vector<CssAncestorEntry>& ancestors) {
+  // Each bit represents a possible remaining ancestor count. Keeping all
+  // matches avoids greedily choosing the wrong nested div before a child rule.
+  if (ancestors.size() >= 32) return false;
+  uint32_t candidates = uint32_t{1} << ancestors.size();
+  while (!(prefix = trimCssWhitespace(prefix)).empty()) {
+    const bool child = prefix.back() == '>';
+    if (child) {
+      prefix.remove_suffix(1);
+      prefix = trimCssWhitespace(prefix);
+    }
+    const size_t split = prefix.find_last_of(" \t\r\n\f>");
+    const auto compound = prefix.substr(split == std::string_view::npos ? 0 : split + 1);
+    uint32_t matches = 0;
+    for (size_t remaining = 1; remaining <= ancestors.size(); ++remaining) {
+      if (!(candidates & (uint32_t{1} << remaining))) continue;
+      for (int index = static_cast<int>(remaining) - 1; index >= 0; --index) {
+        const auto& ancestor = ancestors[index];
+        if (compoundMatches(compound, ancestor.tag, ancestor.classAttr, ancestor.idAttr))
+          matches |= uint32_t{1} << index;
+        if (child) break;
+      }
+    }
+    if (!matches) return false;
+    if (split == std::string_view::npos) return true;
+    candidates = matches;
+    prefix = prefix.substr(0, split + (prefix[split] == '>' ? 1 : 0));
+  }
+  return true;
+}
+}  // namespace
 
 // Rule processing
 
@@ -700,42 +1007,45 @@ bool CssParser::processRuleBlockWithStyle(std::string_view selectorGroup, const 
           return;
         }
 
-        constexpr std::string_view kUnsupportedSelectorChars = "+>[:#~*";
-        if (sel.find_first_of(kUnsupportedSelectorChars) != std::string_view::npos) return;
-
-        const bool isDescendantSelector = sel.find_first_of(" \t\n\r\f") != std::string_view::npos;
-        if (isDescendantSelector) {
-          if (descendantRules_.size() >= MAX_DESCENDANT_RULES) return;
-
-          std::string_view parts[2];
-          size_t partCount = 0;
-          forEachDelimitedToken(sel, isCssWhitespace, [&](std::string_view part) {
-            if (partCount < 2) parts[partCount] = part;
-            ++partCount;
-          });
-          if (partCount != 2) return;
-
-          auto isSimpleSelector = [](std::string_view s) -> bool {
-            int dotCount = 0;
-            for (const char c : s) {
-              if (c == '#' || c == ':' || c == '[' || c == '+' || c == '~' || c == '>' || c == '*') return false;
-              if (c == '.') ++dotCount;
-            }
-            return dotCount <= 1;
-          };
-          if (!isSimpleSelector(parts[0]) || !isSimpleSelector(parts[1])) return;
-
+        // Keep the optimized simple-rule path; bounded complex rules include child/
+        // descendant compounds, ids, multiple classes, and ::first-letter.
+        std::string_view subject = sel;
+        bool firstLetter = false;
+        size_t pseudoBytes = 0;
+        for (const auto suffix : {std::string_view("::first-letter"), std::string_view(":first-letter")}) {
+          if (subject.size() >= suffix.size() && iequalsAscii(subject.substr(subject.size() - suffix.size()), suffix)) {
+            firstLetter = true;
+            pseudoBytes = suffix.size();
+            subject.remove_suffix(suffix.size());
+            break;
+          }
+        }
+        if (subject.empty() || subject.find_first_of("+[:~") != std::string_view::npos) return;
+        const size_t split = subject.find_last_of(" \t\n\r\f>");
+        const bool complex =
+            firstLetter || split != std::string_view::npos || subject.find('#') != std::string_view::npos ||
+            std::count(subject.begin(), subject.end(), '.') > 1 || subject.find('*') != std::string_view::npos;
+        if (complex) {
+          std::string_view prefix;
+          if (split != std::string_view::npos) {
+            prefix = trimCssWhitespace(subject.substr(0, split + (subject[split] == '>' ? 1 : 0)));
+            subject = subject.substr(split + 1);
+          }
+          if (subject.empty()) return;
+          // The sentinel denotes no ancestor constraint and keeps the on-disk fields nonempty.
+          if (prefix.empty()) prefix = "@";
+          const auto storedSubject = firstLetter ? sel.substr(sel.size() - subject.size() - pseudoBytes) : subject;
           auto it = std::find_if(descendantRules_.begin(), descendantRules_.end(), [&](const DescendantRule& rule) {
-            return iequalsAscii(rule.ancestorSelector, parts[0]) && iequalsAscii(rule.subjectSelector, parts[1]);
+            return iequalsAscii(rule.ancestorSelector, prefix) && iequalsAscii(rule.subjectSelector, storedSubject);
           });
-          if (it != descendantRules_.end()) {
+          if (it != descendantRules_.end())
             it->style.applyOver(style);
-          } else {
+          else if (descendantRules_.size() < MAX_DESCENDANT_RULES) {
             if (!hasHeapForRuleGrowth()) {
               limitReached = true;
               return;
             }
-            descendantRules_.push_back({std::string(parts[0]), std::string(parts[1]), style});
+            descendantRules_.push_back({std::string(prefix), std::string(storedSubject), style});
           }
           return;
         }
@@ -773,7 +1083,7 @@ bool CssParser::processRuleBlockWithStyle(std::string_view selectorGroup, const 
 
 // Main parsing entry point
 
-bool CssParser::loadFromStream(FsFile& source) {
+bool CssParser::loadFromStream(FsFile& source, const std::string_view baseDir) {
   if (!source) {
     LOG_ERR("CSS", "Cannot read from invalid file");
     return false;
@@ -791,6 +1101,9 @@ bool CssParser::loadFromStream(FsFile& source) {
 
   bool inAtRule = false;
   int atDepth = 0;
+  char atKeyword[16] = {};
+  size_t atKeywordLen = 0;
+  bool atKeywordDone = false, inFontFace = false, faceTruncated = false;
 
   int bodyDepth = 0;
   bool skippingRule = false;
@@ -801,11 +1114,29 @@ bool CssParser::loadFromStream(FsFile& source) {
     if (inAtRule) {
       if (c == '{') {
         ++atDepth;
+        if (atDepth == 1 && std::string_view(atKeyword, atKeywordLen) == "font-face") {
+          inFontFace = true;
+          declBuffer.clear();
+          faceTruncated = false;
+        }
       } else if (c == '}') {
         if (atDepth > 0) --atDepth;
-        if (atDepth == 0) inAtRule = false;
+        if (atDepth == 0) {
+          if (inFontFace && !faceTruncated) stopParsing = !parseFontFace(declBuffer, baseDir);
+          inFontFace = false;
+          declBuffer.clear();
+          inAtRule = false;
+        }
       } else if (c == ';' && atDepth == 0) {
         inAtRule = false;
+      } else if (atDepth == 0 && !atKeywordDone) {
+        if (!isCssWhitespace(c) && atKeywordLen < sizeof(atKeyword))
+          atKeyword[atKeywordLen++] = asciiToLower(c);
+        else
+          atKeywordDone = true;
+      } else if (inFontFace && atDepth == 1) {
+        if (declBuffer.size() == StackBuffer::CAPACITY - 1) faceTruncated = true;
+        declBuffer.push_back(c);
       }
       return;
     }
@@ -817,6 +1148,8 @@ bool CssParser::loadFromStream(FsFile& source) {
       if (c == '@' && selector.empty()) {
         inAtRule = true;
         atDepth = 0;
+        atKeywordLen = 0;
+        atKeywordDone = false;
         return;
       }
       if (c == '{') {
@@ -925,7 +1258,8 @@ bool CssParser::loadFromStream(FsFile& source) {
 // Style resolution
 
 CssStyle CssParser::resolveStyle(std::string_view tagName, std::string_view classAttr,
-                                 const std::vector<CssAncestorEntry>& ancestors) const {
+                                 const std::vector<CssAncestorEntry>& ancestors, const std::string_view idAttr,
+                                 const bool firstLetter) const {
   static bool lowHeapWarningLogged = false;
   if (ESP.getFreeHeap() < MIN_FREE_HEAP_FOR_CSS) {
     if (!lowHeapWarningLogged) {
@@ -938,26 +1272,39 @@ CssStyle CssParser::resolveStyle(std::string_view tagName, std::string_view clas
 
   CssStyle result;
 
-  // 1. Apply element-level style (lowest priority).
+  std::array<uint8_t, MAX_DESCENDANT_RULES> matches{};
+  size_t matchCount = 0;
+  for (size_t i = 0; i < descendantRules_.size(); ++i) {
+    const auto& rule = descendantRules_[i];
+    std::string_view subject = rule.subjectSelector;
+    const auto pseudo = subject.find(':');
+    if ((pseudo != std::string_view::npos) != firstLetter) continue;
+    if (pseudo != std::string_view::npos) subject = subject.substr(0, pseudo);
+    if (!compoundMatches(subject, tagName, classAttr, idAttr)) continue;
+    if (rule.ancestorSelector != "@" && !contextMatches(rule.ancestorSelector, ancestors)) continue;
+    matches[matchCount++] = static_cast<uint8_t>(i);
+  }
+  const auto specificity = [&](uint8_t index) {
+    const auto& rule = descendantRules_[index];
+    return selectorSpecificity(rule.subjectSelector) +
+           (rule.ancestorSelector == "@" ? 0 : selectorSpecificity(rule.ancestorSelector));
+  };
+  std::sort(matches.begin(), matches.begin() + matchCount, [&](uint8_t a, uint8_t b) {
+    const auto sa = specificity(a), sb = specificity(b);
+    return sa == sb ? a < b : sa < sb;
+  });
+  size_t applied = 0;
+  const auto applyThrough = [&](uint32_t limit) {
+    while (applied < matchCount && specificity(matches[applied]) <= limit)
+      result.applyOver(descendantRules_[matches[applied++]].style);
+  };
   CssStyle matchedStyle;
-  if (lookupRule(tagName, matchedStyle)) {
-    result.applyOver(matchedStyle);
+  if (!firstLetter && lookupRule(tagName, matchedStyle)) result.applyOver(matchedStyle);
+  applyThrough(255);
+  if (firstLetter) {
+    applyThrough(UINT32_MAX);
+    return result;
   }
-
-  // 2. Apply two-part descendant rules — higher specificity than bare element, lower than class.
-  if (!ancestors.empty() && !descendantRules_.empty()) {
-    for (const auto& rule : descendantRules_) {
-      if (!selectorMatchesElement(rule.subjectSelector, tagName, classAttr)) continue;
-      for (const auto& anc : ancestors) {
-        if (selectorMatchesElement(rule.ancestorSelector, anc.tag, anc.classAttr)) {
-          result.applyOver(rule.style);
-          break;
-        }
-      }
-    }
-  }
-
-  if (classAttr.empty()) return result;
 
   // TODO: Support combinations of classes (e.g. style on .class1.class2)
   // 2. Apply class styles (medium priority).
@@ -971,7 +1318,9 @@ CssStyle CssParser::resolveStyle(std::string_view tagName, std::string_view clas
     }
   });
 
-  // TODO: Support combinations of classes (e.g. style on p.class1.class2)
+  applyThrough(256);
+
+  // Compound rules follow their CSS specificity.
   // 3. Apply element.class styles (higher priority).
   forEachDelimitedToken(classAttr, isCssWhitespace, [&](std::string_view cls) {
     if (tagName.size() + 1 + cls.size() > MAX_SELECTOR_LENGTH) return;
@@ -984,6 +1333,7 @@ CssStyle CssParser::resolveStyle(std::string_view tagName, std::string_view clas
     }
   });
 
+  applyThrough(UINT32_MAX);
   return result;
 }
 
@@ -1036,10 +1386,16 @@ bool CssParser::writeCssStylePayload(FsFile& file, const CssStyle& style) {
       !writeByte(static_cast<uint8_t>(style.verticalAlign)) || !writeByte(static_cast<uint8_t>(style.direction)) ||
       !writeByte(static_cast<uint8_t>(style.pageBreakBefore ? 1 : 0)) ||
       !writeByte(static_cast<uint8_t>(style.pageBreakAfter ? 1 : 0)) ||
-      !writeByte(static_cast<uint8_t>(style.listStyleType))) {
+      !writeByte(static_cast<uint8_t>(style.listStyleType)) || !writeByte(style.borderStyleSuppressed) ||
+      !writeByte(style.borderWidthSuppressed) || !writeByte(style.borderStyleDefined) ||
+      !writeByte(style.borderWidthDefined) || !writeByte(style.preserveWhitespace)) {
     return false;
   }
 
+  for (const auto& side : style.borders) {
+    if (!writeByte(side.width) || !writeByte(static_cast<uint8_t>(side.style))) return false;
+  }
+  if (!writeByte(style.shaded) || !writeByte(style.floatLeft) || !writeByte(style.initialLetter)) return false;
   uint32_t definedBits = 0;
   if (style.defined.textAlign) definedBits |= 1 << 0;
   if (style.defined.fontStyle) definedBits |= 1 << 1;
@@ -1065,7 +1421,13 @@ bool CssParser::writeCssStylePayload(FsFile& file, const CssStyle& style) {
   if (style.defined.pageBreakAfter) definedBits |= 1 << 21;
   if (style.defined.fontVariantCaps) definedBits |= 1 << 22;
   if (style.defined.fontSize) definedBits |= 1 << 23;
-  return writeBytes(&definedBits, sizeof(definedBits));
+  if (style.defined.border) definedBits |= 1 << 24;
+  if (style.defined.whiteSpace) definedBits |= 1u << 25;
+  if (style.defined.shaded) definedBits |= 1u << 26;
+  if (style.defined.floatLeft) definedBits |= 1u << 27;
+  if (style.defined.initialLetter) definedBits |= 1u << 28;
+  if (style.defined.fontFamily) definedBits |= 1u << 29;
+  return writeBytes(&definedBits, sizeof(definedBits)) && writeBytes(&style.fontFamily, sizeof(style.fontFamily));
 }
 
 bool CssParser::readCssStylePayload(FsFile& file, CssStyle& style) {
@@ -1116,7 +1478,27 @@ bool CssParser::readCssStylePayload(FsFile& file, CssStyle& style) {
     return false;
   }
   style.listStyleType = static_cast<CssListStyleType>(listStyleTypeVal);
+  if (file.read(&style.borderStyleSuppressed, 1) != 1 || file.read(&style.borderWidthSuppressed, 1) != 1 ||
+      file.read(&style.borderStyleDefined, 1) != 1 || file.read(&style.borderWidthDefined, 1) != 1 ||
+      ((style.borderStyleDefined | style.borderWidthDefined) & ~0x0F) != 0 ||
+      (style.borderStyleSuppressed & ~style.borderStyleDefined) != 0 ||
+      (style.borderWidthSuppressed & ~style.borderWidthDefined) != 0)
+    return false;
 
+  uint8_t whitespace = 0;
+  if (file.read(&whitespace, 1) != 1 || whitespace > 1) return false;
+  style.preserveWhitespace = whitespace != 0;
+  for (auto& side : style.borders) {
+    uint8_t raw = 0;
+    if (file.read(&side.width, 1) != 1 || side.width > 8 || file.read(&raw, 1) != 1 || raw > 4) return false;
+    side.style = static_cast<CssBorderStyle>(raw);
+  }
+  uint8_t shaded = 0, floated = 0;
+  if (file.read(&shaded, 1) != 1 || shaded > 1 || file.read(&floated, 1) != 1 || floated > 1 ||
+      file.read(&style.initialLetter, 1) != 1 || style.initialLetter > 4)
+    return false;
+  style.shaded = shaded;
+  style.floatLeft = floated;
   uint32_t definedBits = 0;
   if (file.read(&definedBits, sizeof(definedBits)) != sizeof(definedBits)) return false;
   style.defined.textAlign = (definedBits & 1 << 0) != 0;
@@ -1143,6 +1525,13 @@ bool CssParser::readCssStylePayload(FsFile& file, CssStyle& style) {
   style.defined.pageBreakAfter = (definedBits & 1 << 21) != 0;
   style.defined.fontVariantCaps = (definedBits & 1 << 22) != 0;
   style.defined.fontSize = (definedBits & 1 << 23) != 0;
+  style.defined.border = (definedBits & 1 << 24) != 0;
+  style.defined.whiteSpace = (definedBits & 1u << 25) != 0;
+  style.defined.shaded = (definedBits & 1u << 26) != 0;
+  style.defined.floatLeft = (definedBits & 1u << 27) != 0;
+  style.defined.initialLetter = (definedBits & 1u << 28) != 0;
+  style.defined.fontFamily = (definedBits & 1u << 29) != 0;
+  if (file.read(&style.fontFamily, sizeof(style.fontFamily)) != sizeof(style.fontFamily)) return false;
   if (style.hasFontSize() && (!std::isfinite(style.fontSize.value) || style.fontSize.value <= 0 ||
                               static_cast<uint8_t>(style.fontSize.unit) > static_cast<uint8_t>(CssUnit::Percent)))
     return false;
@@ -1279,6 +1668,7 @@ CssParser::CacheStatus CssParser::inspectCache() const {
     }
   }
 
+  if (!readFontFaces(file)) return CacheStatus::Invalid;
   return (flags & CSS_CACHE_FLAG_PARTIAL) != 0 ? CacheStatus::Partial : CacheStatus::Complete;
 }
 
@@ -1382,6 +1772,7 @@ bool CssParser::saveToCache(const bool complete) const {
     }
   }
 
+  writeOk = writeOk && writeFontFaces(file);
   if (!writeOk) {
     LOG_ERR("CSS", "Failed to write temporary CSS cache");
     file.close();
@@ -1409,7 +1800,10 @@ bool CssParser::saveToCache(const bool complete) const {
     return false;
   }
 
-  file.close();
+  if (!file.close()) {
+    Storage.remove(tmpPath.c_str());
+    return false;
+  }
 
   Storage.remove(backupPath.c_str());
   const bool hadExistingCache = Storage.exists(finalPath.c_str());
@@ -1651,7 +2045,137 @@ bool CssParser::loadFromCache() {
     }
   }
 
+  if (!readFontFaces(file)) return false;
   LOG_DBG("CSS", "Loaded %u indexed rules + %u descendant rules from %s cache", static_cast<unsigned>(cachedRuleCount_),
           descendantCount, cachePartial_ ? "partial" : "complete");
+  return true;
+}
+
+uint32_t CssParser::hashFontFamily(const std::string_view name) {
+  uint32_t hash = 2166136261U;
+  for (char c : name) {
+    hash ^= static_cast<uint8_t>(asciiToLower(c));
+    hash *= 16777619U;
+  }
+  return hash == 0 ? 1 : hash;
+}
+bool CssParser::parseFontFace(const std::string_view declBlock, const std::string_view baseDir) {
+  CssFontFace face;
+  std::string_view src;
+  forEachDelimitedToken(
+      declBlock, [](const char c) { return c == ';'; },
+      [&](const std::string_view decl) {
+        const size_t colon = decl.find(':');
+        if (colon == std::string_view::npos) return;
+        const std::string_view name = trimCssWhitespace(decl.substr(0, colon));
+        const std::string_view value = trimCssWhitespace(decl.substr(colon + 1));
+        if (iequalsAscii(name, "font-family")) {
+          const std::string_view family = unquoteCss(value);
+          if (!family.empty()) face.family = hashFontFamily(family);
+        } else if (iequalsAscii(name, "font-weight")) {
+          face.bold = interpretFontWeight(value) == CssFontWeight::Bold;
+        } else if (iequalsAscii(name, "font-style")) {
+          face.italic = !iequalsAscii(value, "normal");
+        } else if (iequalsAscii(name, "src")) {
+          src = value;
+        }
+      });
+  if (face.family == 0) return true;
+
+  // The first url() FreeType reads without gzip: .woff/.woff2 and .svg files are skipped.
+  for (size_t pos = 0; (pos = src.find("url(", pos)) != std::string_view::npos;) {
+    const size_t close = src.find(')', pos);
+    if (close == std::string_view::npos) break;
+    const std::string_view url = unquoteCss(src.substr(pos + 4, close - pos - 4));
+    const size_t dot = url.find_last_of('.');
+    const std::string_view extension = dot == std::string_view::npos ? std::string_view{} : url.substr(dot + 1);
+    const bool skipped = iequalsAscii(extension, "woff") || iequalsAscii(extension, "woff2") ||
+                         iequalsAscii(extension, "svg") || url.empty() || url.substr(0, 5) == "data:";
+    if (!skipped) {
+      if (fontFaces_.size() >= MAX_FONT_FACES) {
+        LOG_ERR("CSS", "Ignoring @font-face past %zu faces", MAX_FONT_FACES);
+        return true;
+      }
+      if (baseDir.size() + url.size() > MAX_FONT_FACE_HREF) return true;
+      const size_t metadataBytes =
+          (fontFaces_.empty() ? MAX_FONT_FACES * sizeof(CssFontFace) : 0) + baseDir.size() + url.size() + 1;
+      if (!MemoryBudget::canAllocateInternal(metadataBytes, MIN_FREE_HEAP_FOR_RULE_GROWTH,
+                                             MIN_LARGEST_BLOCK_FOR_RULE_GROWTH)) {
+        LOG_ERR("CSS", "Skipping publisher face metadata: low memory");
+        return false;
+      }
+      if (fontFaces_.empty()) fontFaces_.reserve(MAX_FONT_FACES);
+      face.href.reserve(baseDir.size() + url.size());
+      face.href.assign(baseDir.data(), baseDir.size());
+      face.href.append(url.data(), url.size());
+      fontFaces_.push_back(std::move(face));
+      return true;
+    }
+    pos = close;
+  }
+  return true;
+}
+
+bool CssParser::writeFontFaces(HalFile& file) const {
+  // Keep the manifest in the same atomic replacement as the rules it describes.
+  const uint32_t offset = file.position();
+  bool ok = true;
+  const auto put = [&file, &ok](const void* data, const size_t size) {
+    ok = ok && file.write(static_cast<const uint8_t*>(data), size) == size;
+  };
+  const auto count = static_cast<uint8_t>(fontFaces_.size());
+  put(&count, sizeof(count));
+  for (const CssFontFace& face : fontFaces_) {
+    const uint8_t flags = (face.bold ? 1 : 0) | (face.italic ? 2 : 0);
+    const auto len = static_cast<uint8_t>(face.href.size());
+    put(&face.family, sizeof(face.family));
+    put(&flags, sizeof(flags));
+    put(&len, sizeof(len));
+    put(face.href.data(), len);
+  }
+  put(&offset, sizeof(offset));
+  return ok;
+}
+
+bool CssParser::readFontFaces(HalFile& file, std::vector<CssFontFace>* out) {
+  const uint32_t start = file.position();
+  uint8_t count = 0;
+  if (file.read(&count, sizeof(count)) != sizeof(count) || count > MAX_FONT_FACES) return false;
+  if (out) out->reserve(count);
+  for (uint8_t i = 0; i < count; ++i) {
+    uint32_t family = 0;
+    uint8_t flags = 0, len = 0;
+    if (file.read(&family, sizeof(family)) != sizeof(family) || !family ||
+        file.read(&flags, sizeof(flags)) != sizeof(flags) || flags > 3 || file.read(&len, sizeof(len)) != sizeof(len) ||
+        !len || file.available() < len)
+      return false;
+    if (out) {
+      CssFontFace face;
+      face.family = family;
+      face.bold = (flags & 1) != 0;
+      face.italic = (flags & 2) != 0;
+      face.href.resize(len);
+      if (file.read(face.href.data(), len) != len) return false;
+      out->push_back(std::move(face));
+    } else if (!file.seek(file.position() + len))
+      return false;
+  }
+  uint32_t offset = 0;
+  return file.read(&offset, sizeof(offset)) == sizeof(offset) && offset == start && file.available() == 0;
+}
+
+bool CssParser::loadFontFaces(const std::string& cachePath, std::vector<CssFontFace>& out) {
+  out.clear();
+  HalFile file;
+  if (!Storage.openFileForRead("CSS", cachePath + rulesCache, file)) return false;
+  uint32_t magic = 0, offset = 0;
+  uint8_t version = 0;
+  if (file.read(&magic, sizeof(magic)) != sizeof(magic) || magic != CSS_CACHE_MAGIC ||
+      file.read(&version, sizeof(version)) != sizeof(version) || version != CSS_CACHE_VERSION || file.size() < 15 ||
+      !file.seek(file.size() - sizeof(offset)) || file.read(&offset, sizeof(offset)) != sizeof(offset) || offset < 10 ||
+      offset >= file.size() - sizeof(offset) || !file.seek(offset) || !readFontFaces(file, &out)) {
+    out.clear();
+    return false;
+  }
   return true;
 }

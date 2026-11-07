@@ -42,6 +42,7 @@ class TextBlock {
       renderer.drawText(fontId, x + word.x, y, word.text.c_str(), foregroundBlack, word.style);
   }
 
+  int8_t getCharacterSpacing() const { return 0; }
   uint16_t wordCount() const { return static_cast<uint16_t>(words.size()); }
   const char* wordText(uint16_t index) const { return words[index].text.c_str(); }
   uint16_t wordTextLen(uint16_t index) const { return static_cast<uint16_t>(words[index].text.size()); }

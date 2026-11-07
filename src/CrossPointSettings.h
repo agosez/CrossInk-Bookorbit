@@ -1,6 +1,7 @@
 #pragma once
 #include <ArduinoJson.h>
 #include <Epub/ReaderRenderSpec.h>
+#include <Epub/WordSpacing.h>
 #include <HalStorage.h>
 #include <PersistableStore.h>
 
@@ -37,6 +38,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     QUICK_RESUME = 9,
     MINIMAL_STATS_SLEEP = 10,
     DASHBOARD_SLEEP = 11,
+    COVER_OVERLAY = 12,
     SLEEP_SCREEN_MODE_COUNT
   };
   enum SLEEP_SCREEN_COVER_MODE { FIT = 0, CROP = 1, SLEEP_SCREEN_COVER_MODE_COUNT };
@@ -121,6 +123,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Front button layout options (legacy)
   // Default: Back, Confirm, Left, Right
   // Swapped: Left, Right, Back, Confirm
+  enum MENU_NAVIGATION : uint8_t { MENU_NAV_DIRECTIONAL = 0, MENU_NAV_CLASSIC = 1 };
+
   enum FRONT_BUTTON_LAYOUT {
     BACK_CONFIRM_LEFT_RIGHT = 0,
     LEFT_RIGHT_BACK_CONFIRM = 1,
@@ -165,6 +169,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     TWO_FINGER_SWIPE_PREVIOUS_CHAPTER,
     TWO_FINGER_SWIPE_INCREASE_FONT_SIZE,
     TWO_FINGER_SWIPE_DECREASE_FONT_SIZE,
+    TWO_FINGER_SWIPE_BACK_HOME,
+    TWO_FINGER_SWIPE_HOME_READER,
+    TWO_FINGER_SWIPE_SELECT_CHAPTER,
+    TWO_FINGER_SWIPE_TOGGLE_PAGE_TURN_GESTURES,
     TWO_FINGER_SWIPE_ACTION_COUNT,
   };
 
@@ -283,11 +291,16 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     SLEEP_ONLY = 34,
     WAKE_ONLY = 35,
     HOME_READER = 36,
+    BACK_HOME = 37,
+    SELECT_CHAPTER = 38,
+    ROTATE_FLIP = 39,
+    TOGGLE_PAGE_TURN_GESTURES = 40,
     // This fork's own action, kept last so upstream can keep appending to its own
     // range. Each time upstream takes its number it moves past the new entries, and
-    // migrateBookOrbitShortcutValues() carries saved shortcuts over: it was 33 up to
-    // v1.6.0+bookorbit.2, which CrossInk v1.6.1 persists as LIBRARY.
-    BOOKORBIT_SYNC = 37,
+    // carryBookOrbitShortcut() brings saved shortcuts over: it was 33 up to
+    // v1.6.0+bookorbit.2 (CrossInk v1.6.1's LIBRARY), then 37 up to v1.6.1+bookorbit.5
+    // (CrossInk v2.0.0's BACK_HOME).
+    BOOKORBIT_SYNC = 41,
     SHORT_PWRBTN_COUNT
   };
 
@@ -328,9 +341,14 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     CHORD_NEARBY_POSITION_SYNC = 30,
     CHORD_LIBRARY = 31,
     CHORD_HOME_READER = 32,
+    CHORD_BACK_HOME = 33,
+    CHORD_SELECT_CHAPTER = 34,
+    CHORD_ROTATE_FLIP = 35,
+    CHORD_TOGGLE_PAGE_TURN_GESTURES = 36,
     // This fork's own action, kept last like BOOKORBIT_SYNC above (31 up to
-    // v1.6.0+bookorbit.2, now CHORD_LIBRARY).
-    CHORD_BOOKORBIT_SYNC = 33,
+    // v1.6.0+bookorbit.2, now CHORD_LIBRARY; 33 up to v1.6.1+bookorbit.5, now
+    // CHORD_BACK_HOME).
+    CHORD_BOOKORBIT_SYNC = 37,
     POWER_CHORD_ACTION_COUNT
   };
 
@@ -345,7 +363,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
 
   static constexpr uint8_t QUICK_ACTION_SLOT_ACTION_COUNT = 23;
 
-  // Hide battery percentage
+  // Legacy Hide Battery % values (migration only)
   enum HIDE_BATTERY_PERCENTAGE { HIDE_NEVER = 0, HIDE_READER = 1, HIDE_ALWAYS = 2, HIDE_BATTERY_PERCENTAGE_COUNT };
 
   // Page turn button long press behavior
@@ -354,6 +372,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     CHAPTER_SKIP = 1,
     ORIENTATION_CHANGE = 2,
     FONT_SIZE_CHANGE = 3,
+    ORIENTATION_FLIP = 4,
     LONG_PRESS_BUTTON_BEHAVIOR_COUNT
   };
 
@@ -374,7 +393,6 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
 
   // Image rendering in EPUB reader
   enum IMAGE_RENDERING { IMAGES_DISPLAY = 0, IMAGES_PLACEHOLDER = 1, IMAGES_SUPPRESS = 2, IMAGE_RENDERING_COUNT };
-  enum TOUCH_READER_CONTROLS { TOUCH_READER_OFF = 0, TOUCH_READER_ON = 1, TOUCH_READER_CONTROLS_COUNT };
   enum PAGE_TURN_GESTURE {
     TAP_AND_SWIPE = 0,
     TAP_ONLY = 1,
@@ -385,6 +403,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   };
 
   enum INDEXING_METHOD { INDEXING_INCREMENTAL = 0, INDEXING_FULL_SECTION = 1, INDEXING_METHOD_COUNT };
+  static uint8_t defaultIndexingMethod();
 
   enum TILT_PAGE_TURN { TILT_OFF = 0, TILT_ON = 1, TILT_PAGE_TURN_COUNT };
   enum TILT_PAGE_TURN_DIRECTION {
@@ -423,9 +442,15 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     LONG_MENU_QUICK_ACTIONS = 22,
     LONG_MENU_QUICK_LOCK = 23,
     LONG_MENU_LIBRARY = 24,
+    LONG_MENU_HOME_READER = 25,
+    LONG_MENU_BACK_HOME = 26,
+    LONG_MENU_SELECT_CHAPTER = 27,
+    LONG_MENU_ROTATE_FLIP = 28,
+    LONG_MENU_TOGGLE_PAGE_TURN_GESTURES = 29,
     // This fork's own action, kept last like BOOKORBIT_SYNC above (24 up to
-    // v1.6.0+bookorbit.2, now LONG_MENU_LIBRARY).
-    LONG_MENU_BOOKORBIT_SYNC = 25,
+    // v1.6.0+bookorbit.2, now LONG_MENU_LIBRARY; 25 up to v1.6.1+bookorbit.5, now
+    // LONG_MENU_HOME_READER).
+    LONG_MENU_BOOKORBIT_SYNC = 30,
     LONG_PRESS_MENU_ACTION_COUNT
   };
 
@@ -468,6 +493,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t statusBarTimeLeft = TIME_LEFT_HIDE;
   uint8_t statusBarBattery = 1;
   uint8_t xtcStatusBarMode = XTC_STATUS_BAR_HIDE;
+  uint8_t displayStatusBarTextSize = 0;  // Global header status strip, independent of reader text.
+  uint8_t statusBarTextSize = 0;         // Small (Inter 8), Medium (Inter 10), Large (Inter 12).
   ReaderStatusBarConfig topReaderStatusBar{};
   ReaderStatusBarConfig bottomReaderStatusBar = [] {
     ReaderStatusBarConfig config;
@@ -513,8 +540,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t forceParagraphIndents = 0;
   uint8_t textAntiAliasing = 1;
   // Touch screen reader zones/gestures on boards with a touch controller.
-  uint8_t touchReaderControls = TOUCH_READER_ON;
-  // Page-turn gestures remain independently configurable while touch reader controls stay enabled.
+  // Shortcut-only pause; keep the saved tap/swipe choices unchanged.
+  uint8_t disablePageTurnGestures = 0;
   uint8_t pageTurnGesture = TAP_AND_SWIPE;
   uint8_t previousPageGesture = TAP_AND_SWIPE;
   uint8_t customBootscreenEnabled = 1;
@@ -560,6 +587,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t frontButtonLayout = BACK_CONFIRM_LEFT_RIGHT;
   uint8_t sideButtonLayout = PREV_NEXT;
   uint8_t frontButtonOrientationAware = FRONT_ORIENTATION_AWARE_OFF;
+  uint8_t menuNavigation = MENU_NAV_DIRECTIONAL;
   uint8_t sideButtonOrientationAware = 0;
   // Legacy shared side-button long action, retained for migration only.
   uint8_t sideButtonLongPress = SIDE_LONG_CHAPTER_SKIP;
@@ -593,9 +621,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t lineSpacing = NORMAL;  // migration only; new saves use lineHeightPercent
   uint8_t lineHeightPercent = 100;
   uint8_t wordSpacing = 0;
+  uint8_t characterSpacing = 5;  // 0..10 represents -5..+5; each step is half a pixel.
   uint8_t paragraphAlignment = JUSTIFIED;
   // Auto-sleep timeout setting (default 10 minutes). Legacy sleepTimeout enum values are migration-only.
   uint8_t sleepTimeoutMinutes = 10;
+  // Quarter-dBm ceiling; 0 preserves the driver's default transmit power.
+  uint8_t wifiTransmitPower = 0;
   // E-ink refresh frequency (default 15 pages)
   uint8_t refreshFrequency = REFRESH_15;
   uint8_t hyphenationEnabled = 0;
@@ -613,10 +644,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   char opdsDownloadFolder[64] = "";
   // Nearby file receive destination (empty = SD root).
   char nearbyReceiveFolder[64] = "";
-  // Hide battery percentage
+  // Legacy Hide Battery % choice, read only to migrate into per-bar battery styles.
   uint8_t hideBatteryPercentage = HIDE_NEVER;
   // Long-press page turn button behavior
-  uint8_t longPressButtonBehavior = OFF;
+  uint8_t longPressButtonBehavior = OFF;  // Legacy binary migration only.
+  uint8_t frontButtonLeftLong = IGNORE;
+  uint8_t frontButtonRightLong = IGNORE;
   // UI Theme
   uint8_t uiTheme = LYRA;
   uint8_t swapLibraryFileBrowser = 0;
@@ -632,8 +665,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t pwrBtnFootnoteBack = 1;
   // Use book's embedded CSS styles for EPUB rendering (1 = enabled, 0 = disabled)
   uint8_t embeddedStyle = 1;
+  uint8_t publisherFonts = 1;
   // EPUB section indexing policy. The current chapter keeps its active build.
-  uint8_t indexingMethod = INDEXING_FULL_SECTION;
+  uint8_t indexingMethod = defaultIndexingMethod();
   // Focus Reading - emphasizes the first part of words with bold
   uint8_t focusReadingEnabled = 0;
   // Guide Dots - places a middle dot between words to guide the eye
@@ -646,6 +680,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   char dictionarySdFontFamilyName[64] = "";
   // Zero follows the active reader size.
   uint8_t dictionaryFontPointSize = 0;
+  uint8_t pluginsEnabled = 0;
+  uint8_t pluginHubPromptHidden = 0;
   // Show hidden files/directories (starting with '.') in the file browser (0 = hidden, 1 = show)
   uint8_t showHiddenFiles = 0;
   // Prefer embedded EPUB titles/authors in Library; disable for filename-only scans.
@@ -674,6 +710,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t readingIdleTimeThresholdUnits = 30;
   // Image rendering mode in EPUB reader
   uint8_t imageRendering = IMAGES_DISPLAY;
+  uint8_t imageGrayscale = 1;
   // Long-press Confirm (menu button) quick action in reader (0 = off)
   uint8_t longPressMenuAction = LONG_MENU_OFF;
   // Long-press Back quick action in reader (defaults to the historical file browser shortcut)
@@ -685,6 +722,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Tilt-based page turning on devices with a supported IMU (X3 and Sticky).
   uint8_t tiltPageTurn = TILT_OFF;
   uint8_t tiltPageTurnDirection = TILT_LEFT_RIGHT;
+  uint8_t tiltNextPageOnly = 0;
   // Frontlight quick-panel state (boards with FREEINK_CAP_FRONTLIGHT, e.g. X4
   // Pro). Applied at boot, edited only from the frontlight panel; persisted as
   // category-less entries so they stay out of the Settings screen. Writes are
@@ -692,6 +730,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t frontlightBrightness = 60;
   uint8_t frontlightWarmth = 50;  // 0 = cool .. 100 = warm
   uint8_t frontlightOn = 0;
+#if FREEINK_DEVICE_PICCO
+  enum class SlideSwitchAction : uint8_t { Light, NightMode, TouchControls, TiltPageTurn };
+  uint8_t slideSwitchAction = static_cast<uint8_t>(SlideSwitchAction::Light);
+#endif
   // When enabled, restore a previously-on light after sleep. A previous off
   // state falls through to a complete schedule.
   uint8_t frontlightRestoreOnWake = 1;
@@ -702,7 +744,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint16_t frontlightScheduleStart = 0xFFFF;
   uint16_t frontlightScheduleEnd = 0xFFFF;
   // Language setting (Language enum index, default 0 = EN)
-  uint8_t language = 0;
+  char filenameFallbackFont[64] = "";  // Folder name under /.crossink/languages/fonts; empty disables fallback.
+  char languageCode[32] = "EN";        // Preferred identity survives temporary English fallback.
+  uint64_t languageCacheGeneration = 0;
   // Enabled keyboard layouts. Zero derives a default from the UI language;
   // non-zero bits follow KeyboardLayoutSet::ALL table order.
   uint16_t keyboardLayouts = 0;
@@ -730,7 +774,13 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   static constexpr uint8_t MAX_SCREEN_MARGIN = 150;
   static constexpr uint8_t SCREEN_MARGIN_SMALL_STEP = 1;
   static constexpr uint8_t SCREEN_MARGIN_LARGE_STEP = 5;
-  static constexpr uint8_t MAX_WORD_SPACING = 4;
+  static constexpr uint8_t MAX_WORD_SPACING = WordSpacing::MAX_VALUE;
+  static void formatWordSpacingSlider(int value, char* buffer, size_t length);
+  static constexpr uint8_t MAX_CHARACTER_SPACING = 10;
+  static int8_t characterSpacingLevel(uint8_t value) {
+    return static_cast<int8_t>(std::min<uint8_t>(value, MAX_CHARACTER_SPACING)) - 5;
+  }
+  static void formatCharacterSpacing(int value, char* buffer, size_t length);
   static constexpr uint16_t DEFAULT_READING_IDLE_TIME_THRESHOLD_SECONDS = 5 * 60;
   static constexpr uint16_t MIN_READING_IDLE_TIME_THRESHOLD_SECONDS = 30;
   static constexpr uint16_t MAX_READING_IDLE_TIME_THRESHOLD_SECONDS = 10 * 60;
@@ -811,6 +861,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
  public:
   float getReaderLineCompression() const;
   unsigned long getSleepTimeoutMs() const;
+  static bool isRefreshNeverAvailable();
   int getRefreshFrequency() const;
 };
 

@@ -30,6 +30,15 @@
 #include "util/LookupHistory.h"
 #include "util/TextPool.h"
 
+namespace {
+Rect dictionaryHeaderRect(const GfxRenderer& renderer, const int contentX, const int gutterWidth,
+                          const int gutterHeight) {
+  return UITheme::getHeaderRect(
+      renderer, UITheme::getInstance().getMetrics().headerHeight,
+      Rect{contentX, gutterHeight, renderer.getScreenWidth() - gutterWidth, renderer.getScreenHeight() - gutterHeight});
+}
+}  // namespace
+
 static constexpr char kBullet[] = "- ";
 static constexpr const char kEtymologyTreeMarker[] = "Etymology tree";
 static constexpr int kDictionarySwitchTouchHeight = 56;
@@ -546,19 +555,18 @@ void DictionaryDefinitionActivity::wrapText() {
   const bool isLandscapeCw = orient == GfxRenderer::Orientation::LandscapeClockwise;
   const bool isLandscapeCcw = orient == GfxRenderer::Orientation::LandscapeCounterClockwise;
   const bool isInverted = orient == GfxRenderer::Orientation::PortraitInverted;
-  hintGutterWidth = (isLandscapeCw || isLandscapeCcw) ? metrics.buttonHintsHeight : 0;
-  hintGutterHeight = isInverted ? (metrics.buttonHintsHeight + metrics.verticalSpacing) : 0;
+  hintGutterWidth = (isLandscapeCw || isLandscapeCcw) ? UITheme::getButtonHintsReserve(renderer) : 0;
+  hintGutterHeight = isInverted ? (UITheme::getButtonHintsReserve(renderer) + metrics.verticalSpacing) : 0;
   contentX = isLandscapeCw ? hintGutterWidth : 0;
-  const int bottomArea = metrics.buttonHintsHeight + metrics.verticalSpacing;
+  const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
 
   if (hasModalBackground()) {
     const int dialogMargin = metrics.optionPopupDialogSideMargin;
-    // Reserve the orientation hint gutter on both sides. The controls only
-    // occupy one side, but symmetrical gutters keep the modal centered.
-    modalX_ = hintGutterWidth + dialogMargin;
-    modalWidth_ = renderer.getScreenWidth() - modalX_ * 2;
-    modalHeight_ = renderer.getScreenHeight() - bottomArea - dialogMargin * 2;
-    modalY_ = (renderer.getScreenHeight() - modalHeight_) / 2;
+    // Keep the modal margin inside the calibrated area and rotated hint gutter.
+    modalX_ = safe.x + dialogMargin;
+    modalWidth_ = safe.width - dialogMargin * 2;
+    modalHeight_ = safe.height - metrics.verticalSpacing - dialogMargin * 2;
+    modalY_ = safe.y + (safe.height - modalHeight_) / 2;
 
     const int innerPadding = metrics.optionPopupInnerPadding;
     leftPadding = modalX_ + innerPadding;
@@ -566,14 +574,15 @@ void DictionaryDefinitionActivity::wrapText() {
     bodyStartY = modalY_ + innerPadding + renderer.getLineHeight(getDefinitionFontId()) + metrics.optionPopupTitleGap;
   } else {
     const int sidePadding = metrics.contentSidePadding + SETTINGS.screenMarginHorizontal;
-    leftPadding = contentX + sidePadding;
-    rightPadding = (isLandscapeCcw ? hintGutterWidth : 0) + sidePadding;
-    bodyStartY = hintGutterHeight + metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+    leftPadding = safe.x + sidePadding;
+    rightPadding = renderer.getScreenWidth() - safe.x - safe.width + sidePadding;
+    const Rect header = dictionaryHeaderRect(renderer, contentX, hintGutterWidth, hintGutterHeight);
+    bodyStartY = header.y + header.height + metrics.verticalSpacing;
   }
 
   const int footerHeight = dictionaryFooterHeight();
   const int bodyBottom = hasModalBackground() ? modalY_ + modalHeight_ - metrics.optionPopupInnerPadding - footerHeight
-                                              : renderer.getScreenHeight() - bottomArea;
+                                              : safe.y + safe.height - metrics.verticalSpacing;
   linesPerPage = (bodyBottom - bodyStartY) / getLineHeight();
   if (linesPerPage < 1) linesPerPage = 1;
 
@@ -759,8 +768,8 @@ void DictionaryDefinitionActivity::prepareDefinitionFontAdvances() {
 void DictionaryDefinitionActivity::sizeModalForCurrentPage() {
   const auto metrics = UITheme::getInstance().getMetrics();
   const int dialogMargin = metrics.optionPopupDialogSideMargin;
-  const int maxHeight =
-      renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing - dialogMargin * 2;
+  const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int maxHeight = safe.height - metrics.verticalSpacing - dialogMargin * 2;
   const int visibleLines = std::max(1, static_cast<int>(layoutLines.size()));
   const int titleLineHeight = renderer.getLineHeight(getDefinitionFontId());
   const int footerHeight = dictionaryFooterHeight();
@@ -774,9 +783,9 @@ void DictionaryDefinitionActivity::sizeModalForCurrentPage() {
     // that erased border from appearing as a second modal on the physical panel.
     modalCleanRefreshNeeded_ = true;
   }
-  modalSessionHeight_ = std::max(retainedHeight, desiredHeight);
+  modalSessionHeight_ = std::min(maxHeight, std::max(retainedHeight, desiredHeight));
   modalHeight_ = modalSessionHeight_;
-  modalY_ = (renderer.getScreenHeight() - modalHeight_) / 2;
+  modalY_ = safe.y + (safe.height - modalHeight_) / 2;
   bodyStartY = modalY_ + metrics.optionPopupInnerPadding + titleLineHeight + metrics.optionPopupTitleGap;
   LOG_DBG("DICT", "Modal height desired=%d retained=%d final=%d", desiredHeight, retainedHeight, modalHeight_);
 }
@@ -1503,8 +1512,7 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
 
   // Header chrome stays in the built-in UI font; the looked-up word uses the
   // active reader font and is drawn with the definition body after prewarming.
-  Rect headerRect{contentX, hintGutterHeight + metrics.topPadding, renderer.getScreenWidth() - hintGutterWidth,
-                  metrics.headerHeight};
+  Rect headerRect = dictionaryHeaderRect(renderer, contentX, hintGutterWidth, hintGutterHeight);
   if (hasModalBackground()) {
     drawModalFrame();
     const int innerPadding = metrics.optionPopupInnerPadding;

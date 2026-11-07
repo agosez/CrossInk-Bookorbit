@@ -179,7 +179,6 @@ void EpubReaderFootnoteSelectActivity::render(RenderLock&&) {
               ESP.getMaxAllocHeap());
       renderer.clearScreen(ReaderUtils::readerBackgroundColor());
       GUI.drawPopup(renderer, tr(STR_MEMORY_ERROR));
-      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
       return;
     }
   }

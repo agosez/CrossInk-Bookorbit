@@ -49,8 +49,8 @@ std::string urlEncode(const std::string& s) {
   return out;
 }
 
-HttpDownloader::HeaderList authHeaders() {
-  HttpDownloader::HeaderList headers;
+std::vector<HttpDownloader::Header> authHeaders() {
+  std::vector<HttpDownloader::Header> headers;
   headers.reserve(6);
   headers.emplace_back("Accept", "application/json");
   // We cannot decompress responses; keep proxies from picking gzip for us.
@@ -90,12 +90,11 @@ bool fetchJson(const std::string& url, const JsonDocument& filter, JsonDocument&
   // while parsing a modern certificate chain, which is what makes catalog fetches fail with
   // MBEDTLS_ERR_X509_FATAL_ERROR against servers on Let's Encrypt's four-certificate path.
   options.transport = HttpDownloader::Transport::WOLFSSL;
-  // Only meaningful on the esp_http_client path, kept for the fallback: body bytes arriving
-  // with the headers get cached via realloc in steps of this size.
-  options.clientRxBufferSize = 2048;
+  // Credentials: sent only to the request's own origin, never across a redirect.
+  const auto headers = authHeaders();
+  options.headers = &headers;
   HttpDownloader::DownloadError err = HttpDownloader::HTTP_ERROR;
   for (int attempt = 0; attempt < 2; attempt++) {
-    options.extraHeaders = authHeaders();
     err = HttpDownloader::downloadToFile(url, TMP_PATH, nullptr, nullptr, "", "", options);
     if (err == HttpDownloader::OK) break;
     LOG_ERR("BookOrbit", "Catalog fetch attempt %d failed (err=%d, http=%d)", attempt + 1, static_cast<int>(err),
@@ -472,9 +471,9 @@ HttpDownloader::DownloadError BookOrbitCatalogClient::downloadThumbnail(const in
   const std::string url =
       BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/books/" + std::to_string(bookId) + "/thumbnail";
   HttpDownloader::DownloadOptions options;
-  options.extraHeaders = authHeaders();
+  const auto headers = authHeaders();
+  options.headers = &headers;
   options.transport = HttpDownloader::Transport::WOLFSSL;
-  options.clientRxBufferSize = 2048;
   if (shouldStop != nullptr) options.shouldCancel = shouldStop;
   return HttpDownloader::downloadToFile(url, destPath, nullptr, nullptr, "", "", std::move(options));
 }
@@ -634,7 +633,8 @@ HttpDownloader::DownloadError BookOrbitCatalogClient::downloadFile(const int64_t
 
   const std::string url =
       BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/files/" + std::to_string(fileId) + "/download";
-  options.extraHeaders = authHeaders();
+  const auto headers = authHeaders();
+  options.headers = &headers;
   // Same transport and trust as the JSON endpoints: this request carries the same
   // credentials, and mbedTLS cannot complete the handshake on this hardware.
   options.transport = HttpDownloader::Transport::WOLFSSL;

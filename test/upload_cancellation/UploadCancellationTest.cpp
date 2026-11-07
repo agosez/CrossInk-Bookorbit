@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "../../lib/EpdFont/FontFileTypes.h"
+
 #define LOG_DBG(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
 #define CROSSINK_SCALABLE_FONTS 1
@@ -25,16 +27,27 @@ struct HalFile {
   std::vector<uint8_t> bytes;
   explicit operator bool() const { return opened; }
   bool isOpen() const { return opened; }
-  void close() { opened = false; }
+  bool failWrite = false;
+  bool failSync = false;
+  bool failClose = false;
+  bool close() {
+    opened = false;
+    return !failClose;
+  }
+  bool sync() const { return !failSync; }
   size_t write(const uint8_t* data, size_t size) {
     assert(opened);
+    if (failWrite) return 0;
     bytes.insert(bytes.end(), data, data + size);
     return size;
   }
 };
 struct StorageMock {
   std::vector<std::string> removed;
-  void remove(const char* path) { removed.emplace_back(path); }
+  bool remove(const char* path) {
+    removed.emplace_back(path);
+    return true;
+  }
 } Storage;
 struct FontSystem {
   void markRegistryDirtyForPath(const char*) {}
@@ -43,14 +56,21 @@ struct ImageFolderIndex {
   static void invalidateForPath(const char*) {}
 };
 unsigned cacheClears = 0;
-void clearBookCachePreservingUserState(const char*) { ++cacheClears; }
+bool cacheRefreshSucceeds = true;
+bool clearBookCachePreservingUserState(const char*, bool sourceChanged) {
+  assert(sourceChanged);
+  ++cacheClears;
+  return cacheRefreshSucceeds;
+}
 unsigned long millis() { return 100; }
 unsigned long uploadStartTime = 0;
 struct FontInstaller {
   static unsigned validations;
+  static inline bool accepted = true;
+  static bool finishUpload(const char* path, bool writesOk);
   static bool validateCpfontFile(const char*) {
     ++validations;
-    return true;
+    return accepted;
   }
 };
 unsigned FontInstaller::validations = 0;
@@ -97,7 +117,7 @@ class CrossPointWebServer {
   void* uploadCancelContext = nullptr;
   std::unique_ptr<Server> server = std::make_unique<Server>();
   bool dropUploadIfCancelled() const;
-  void abortUpload(UploadState&) const;
+  void abortUpload(UploadState&, const char* error = "Upload aborted") const;
   void abortFontUpload();
   void handleUpload(UploadState&) const;
   void handleFontUploadData();
@@ -173,6 +193,76 @@ int main() {
     send(aborted, font, UPLOAD_FILE_ABORTED);
     assert(!(font ? aborted.fontUpload.file.isOpen() : aborted.upload.file.isOpen()));
   }
+  // Mid-body, final-buffer, sync and close failures all leave a retryable path.
+  for (int failure = 0; failure < 4; ++failure) {
+    Storage.removed.clear();
+    cacheClears = 0;
+    CrossPointWebServer failed;
+    if (failure == 0) failed.upload.file.failWrite = true;
+    send(failed, false, UPLOAD_FILE_WRITE, failure == 0 ? 5000 : 80);
+    if (failure == 1) failed.upload.file.failWrite = true;
+    if (failure == 2) failed.upload.file.failSync = true;
+    if (failure == 3) failed.upload.file.failClose = true;
+    send(failed, false, UPLOAD_FILE_END);
+    assert(!failed.upload.success && !failed.upload.error.isEmpty());
+    assert(!failed.upload.file.isOpen());
+    assert(Storage.removed == std::vector<std::string>{"/books/test.epub"});
+    assert(cacheClears == 0);
+    send(failed, false, UPLOAD_FILE_END);
+    send(failed, false, UPLOAD_FILE_ABORTED);
+    assert(Storage.removed.size() == 1);
+  }
+  // A completed upload with failed cache/sync preservation reports failure,
+  // but keeps the saved file and the preserved reading data for recovery.
+  Storage.removed.clear();
+  cacheRefreshSucceeds = false;
+  CrossPointWebServer cacheFailed;
+  send(cacheFailed, false, UPLOAD_FILE_WRITE, 80);
+  send(cacheFailed, false, UPLOAD_FILE_END);
+  assert(!cacheFailed.upload.success && !cacheFailed.upload.error.isEmpty());
+  assert(!cacheFailed.upload.file.isOpen() && Storage.removed.empty());
+  cacheRefreshSucceeds = true;
+
+  // Exercise production font WRITE/END handlers, not only validation cleanup.
+  for (const char* extension : {".ttf", ".OTF", ".cpfont"}) {
+    for (int failure = 0; failure < 5; ++failure) {
+      Storage.removed.clear();
+      FontInstaller::validations = 0;
+      FontInstaller::accepted = failure != 4;
+      CrossPointWebServer failed;
+      failed.fontUpload.filePath = std::string("/fonts/Test/Regular") + extension;
+      if (failure == 0) failed.fontUpload.file.failWrite = true;
+      send(failed, true, UPLOAD_FILE_WRITE, failure == 0 ? 5000 : 80);
+      if (failure == 1) failed.fontUpload.file.failWrite = true;
+      if (failure == 2) failed.fontUpload.file.failSync = true;
+      if (failure == 3) failed.fontUpload.file.failClose = true;
+      send(failed, true, UPLOAD_FILE_END);
+      assert(!failed.fontUpload.valid && !failed.fontUpload.file.isOpen());
+      assert(!Storage.removed.empty());
+      assert(Storage.removed.front() == failed.fontUpload.filePath);
+      assert(FontInstaller::validations == (failure == 4 ? 1u : 0u));
+    }
+  }
+  FontInstaller::accepted = true;
+  for (const char* extension : {".ttf", ".OtF"}) {
+    Storage.removed.clear();
+    CrossPointWebServer oversized;
+    oversized.fontUpload.filePath = std::string("/fonts/Test/Regular") + extension;
+    oversized.fontUpload.bytesWritten = 2 * 1024 * 1024;
+    send(oversized, true, UPLOAD_FILE_WRITE, 1);
+    send(oversized, true, UPLOAD_FILE_END);
+    assert(!oversized.fontUpload.valid && !oversized.fontUpload.file.isOpen());
+    assert(Storage.removed.front() == oversized.fontUpload.filePath);
+  }
+  // A refused collision owns no file and must never delete the existing book.
+  Storage.removed.clear();
+  CrossPointWebServer collision;
+  collision.upload.file.opened = false;
+  collision.upload.error = "File already exists";
+  send(collision, false, UPLOAD_FILE_END);
+  send(collision, false, UPLOAD_FILE_ABORTED);
+  assert(Storage.removed.empty());
+
   // Touch-header/Home/back-release exit events use the same latch as held Back.
   CrossPointWebServerActivity touched;
   touched.exitEvent = true;

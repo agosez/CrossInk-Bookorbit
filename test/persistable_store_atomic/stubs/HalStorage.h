@@ -10,19 +10,28 @@
 class HalFile {
  public:
   explicit HalFile(String content = {}) : content(std::move(content)) {}
+  explicit HalFile(std::string* output) : output(output) {}
   int read(void* output, size_t length) {
     const size_t count = std::min(length, content.size() - position);
     memcpy(output, content.data() + position, count);
     position += count;
     return static_cast<int>(count);
   }
-  size_t write(const uint8_t*, size_t length) { return length; }
-  void close() {
+  size_t write(const uint8_t* bytes, size_t length) {
+    if (output) output->append(reinterpret_cast<const char*>(bytes), length);
+    return length;
+  }
+  size_t write(uint8_t byte) { return write(&byte, 1); }
+  bool sync() { return true; }
+  bool close() {
     content.clear();
     position = 0;
+    output = nullptr;
+    return true;
   }
 
  private:
+  std::string* output = nullptr;
   String content;
   size_t position = 0;
 };
@@ -76,6 +85,11 @@ class HalStorage {
   bool openFileForRead(const char*, const char* path, HalFile& file) const {
     if (!exists(path)) return false;
     file = HalFile(readFile(path));
+    return true;
+  }
+  bool openFileForWrite(const char*, const char* path, HalFile& file) {
+    if (!writeFile(path, "")) return false;
+    file = HalFile(&files[path]);
     return true;
   }
   size_t writeAttempts = 0;

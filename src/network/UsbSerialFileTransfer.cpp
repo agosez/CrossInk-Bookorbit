@@ -2,12 +2,15 @@
 
 #include <AppVersion.h>
 #include <Arduino.h>
+#include <BookKey.h>
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <LibraryBuilder.h>
 #include <Logging.h>
 #include <SdCardFontSystem.h>
 #include <esp_rom_crc.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include <algorithm>
 #include <atomic>
@@ -36,8 +39,8 @@ constexpr size_t LINE_BUFFER_SIZE = 80;
 constexpr size_t REMOVE_RECURSIVE_MAX_DEPTH = 8;
 constexpr uint32_t SHORT_TIMEOUT_MS = 1000;
 constexpr uint32_t HEADER_TIMEOUT_MS = 2000;
-constexpr uint32_t CHECKSUM_TIMEOUT_MS = 10000;
 constexpr uint32_t CHUNK_TIMEOUT_MS = 45000;
+constexpr uint32_t WRITE_TIMEOUT_MS = 1000;
 constexpr const char* TEMP_UPLOAD_PATH = "/.crosspoint/usb-upload.tmp";
 constexpr const char* INTERNAL_DIR = "/.crosspoint";
 constexpr const char* HIDDEN_ITEMS[] = {"System Volume Information", "XTCache"};
@@ -81,21 +84,36 @@ void writeRxOverflowError(const uint32_t snapshot) {
 }
 #endif
 
-void writeLine(const char* line) { logSerial.print(line); }
+bool writeRaw(const uint8_t* data, size_t length) {
+  if (length == 0) return true;
+  size_t sent = 0;
+  const unsigned long started = millis();
+  while (sent < length) {
+    const size_t written = logSerial.write(data + sent, length - sent);
+    serviceSerialTx();
+    if (written > length - sent) break;
+    sent += written;
+    if (sent == length) return true;
+    if (millis() - started >= WRITE_TIMEOUT_MS) break;
+    vTaskDelay(1);
+  }
+  LOG_ERR("USB", "Serial write incomplete: %zu/%zu bytes", sent, length);
+  return false;
+}
 
-void writeRaw(const uint8_t* data, size_t length) { logSerial.write(data, length); }
+bool writeLine(const char* line) { return writeRaw(reinterpret_cast<const uint8_t*>(line), strlen(line)); }
 
-void writeAck() { writeRaw(&ACK, 1); }
+bool writeAck() { return writeRaw(&ACK, 1); }
 
 uint32_t readLe32(const uint8_t* data) {
   return static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
          (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
 }
 
-void writeLe32(uint32_t value) {
+bool writeLe32(uint32_t value) {
   uint8_t data[4] = {static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value >> 16),
                      static_cast<uint8_t>(value >> 24)};
-  writeRaw(data, sizeof(data));
+  return writeRaw(data, sizeof(data));
 }
 
 bool readExact(uint8_t* buffer, size_t length, uint32_t timeoutMs, size_t* receivedOut = nullptr,
@@ -104,6 +122,9 @@ bool readExact(uint8_t* buffer, size_t length, uint32_t timeoutMs, size_t* recei
   const unsigned long deadline = millis() + timeoutMs;
   unsigned long nextBusyAt = millis() + 3000;
   while (received < length) {
+    // An ACK can still be queued when the host starts waiting for it. Keep
+    // native USB moving instead of relying on the next BUSY message to flush it.
+    serviceSerialTx();
     const int available = logSerial.available();
     if (available > 0) {
       const size_t wanted = std::min(length - received, static_cast<size_t>(available));
@@ -127,8 +148,8 @@ bool readExact(uint8_t* buffer, size_t length, uint32_t timeoutMs, size_t* recei
     }
 
     // USB transfers run on the Arduino loop task, which is intentionally not
-    // subscribed to the task watchdog. Yielding lets the watched idle tasks run.
-    yield();
+    // subscribed to the task watchdog. Block for a tick so priority-0 idle tasks run.
+    vTaskDelay(1);
   }
   if (receivedOut) *receivedOut = received;
   return true;
@@ -482,7 +503,11 @@ void handleWrite() {
     return written == bytesToWrite;
   };
 
-  writeLine("READY\n");
+  if (!writeLine("READY\n")) {
+    file.close();
+    Storage.remove(TEMP_UPLOAD_PATH);
+    return;
+  }
 
   uint32_t crc = 0;
   uint32_t remaining = expectedSize;
@@ -522,8 +547,10 @@ void handleWrite() {
       writeLine("ERR:write\n");
       return;
     }
-    if (remaining > 0) {
-      writeAck();
+    if (remaining > 0 && !writeAck()) {
+      file.close();
+      Storage.remove(TEMP_UPLOAD_PATH);
+      return;
     }
     yield();
   }
@@ -546,12 +573,15 @@ void handleWrite() {
 
   if (expectedSize > 0) {
     // Tell the host the file is saved and ready for its separately written CRC.
-    writeAck();
+    if (!writeAck()) {
+      Storage.remove(TEMP_UPLOAD_PATH);
+      return;
+    }
   }
 
   uint8_t crcBytes[4];
   size_t crcBytesReceived = 0;
-  if (!readExact(crcBytes, sizeof(crcBytes), CHECKSUM_TIMEOUT_MS, &crcBytesReceived)) {
+  if (!readExact(crcBytes, sizeof(crcBytes), CHUNK_TIMEOUT_MS, &crcBytesReceived, "checksum")) {
     LOG_ERR("USB", "CRC read timed out after %zu/%zu bytes", crcBytesReceived, sizeof(crcBytes));
     Storage.remove(TEMP_UPLOAD_PATH);
     writeLine("ERR:crc_missing\n");
@@ -577,7 +607,11 @@ void handleWrite() {
     return;
   }
 
-  clearCachesForPath(path);
+  if (!clearBookCachePreservingUserState(path, true)) {
+    LOG_ERR("USB", "File saved but cache refresh failed: %s", path);
+    writeLine("ERR:cache_refresh_failed\n");
+    return;
+  }
   ImageFolderIndex::invalidateForPath(path);
   sdFontSystem.markRegistryDirtyForPath(path);
   writeLine("OK\n");
@@ -632,10 +666,14 @@ void handleRename() {
     return;
   }
 
-  if (Storage.rename(src, dst)) {
+  if (bookkey::moveFile(src, dst)) {
     library::invalidateLibraryIndex();
     clearCachesForPath(src);
-    clearCachesForPath(dst);
+    if (!clearBookCachePreservingUserState(dst, true)) {
+      LOG_ERR("USB", "File moved but cache refresh failed: %s", dst);
+      writeLine("ERR:cache_refresh_failed\n");
+      return;
+    }
     ImageFolderIndex::invalidateForPath(src);
     sdFontSystem.markRegistryDirtyForPath(src);
     ImageFolderIndex::invalidateForPath(dst);
@@ -674,8 +712,10 @@ void handleRead() {
     return;
   }
 
-  writeLine("READY\n");
-  writeLe32(static_cast<uint32_t>(fileSize64));
+  if (!writeLine("READY\n") || !writeLe32(static_cast<uint32_t>(fileSize64))) {
+    file.close();
+    return;
+  }
 
   uint32_t crc = 0;
   while (file.available() > 0) {
@@ -687,7 +727,10 @@ void handleRead() {
     }
     if (read == 0) break;
 
-    writeRaw(transferBuffer, static_cast<size_t>(read));
+    if (!writeRaw(transferBuffer, static_cast<size_t>(read))) {
+      file.close();
+      return;
+    }
     crc = esp_rom_crc32_le(crc, transferBuffer, static_cast<uint32_t>(read));
     yield();
   }

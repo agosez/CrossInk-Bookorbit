@@ -2,6 +2,7 @@
 
 #include <Memory.h>
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <string>
@@ -28,6 +29,8 @@ class SdCardFont {
 
   SdCardFont() = default;
   ~SdCardFont();
+
+  static bool takeCorruptGlyphNotice() { return corruptGlyphNotice_.exchange(false); }
   // Owns raw buffers freed in dtor — no shallow-copy semantics. Make any
   // accidental pass-by-value or move a compile-time error.
   SdCardFont(const SdCardFont&) = delete;
@@ -38,7 +41,9 @@ class SdCardFont {
   // Load .cpfont file: reads header + intervals into RAM, records file layout offsets.
   // Supports v4 (multi-style) format.
   // Returns true on success.
-  bool load(const char* path);
+  // A nonzero ceiling is for optional C3 content sizes: includes this object,
+  // conservative interval/ligature residency, and one reusable 4KB bitmap.
+  bool load(const char* path, size_t residentLimit = 0);
 
   // Pre-read glyphs needed for the given UTF-8 text from SD card.
   // styleMask: bitmask of styles to prewarm (bit 0=regular, 1=bold, 2=italic, 3=bolditalic).
@@ -152,7 +157,7 @@ class SdCardFont {
     uint32_t ligatureFileOffset = 0;
     uint32_t bitmapFileOffset = 0;
 
-    // Full intervals loaded from file (kept in RAM for codepoint lookup)
+    // RAM lookup: compact sorted BMP prefix, then full-width suffix (on-disk records stay 12 bytes).
     EpdUnicodeInterval* fullIntervals = nullptr;
     EPD_PACKED_BEGIN
     struct BmpInterval16 {
@@ -163,24 +168,27 @@ class SdCardFont {
     EPD_PACKED_END
     static_assert(sizeof(BmpInterval16) == 6, "BmpInterval16 must remain compact");
     BmpInterval16* bmpIntervals = nullptr;
-    bool intervalsAreBmp16 = false;
+    uint16_t bmpIntervalCount = 0;  // At most MAX_INTERVALS (4096), keeping per-style padding unchanged.
     // True when bmpIntervals/fullIntervals above points at another style's table rather than
     // this style's own allocation. Regular/bold/italic weights of the same family almost always
     // cover the identical codepoint set, so a CJK font's multi-KB-per-style table is otherwise
     // paid for once per style. Only the owning style frees it -- see freeStyleAll().
     bool intervalsShared = false;
 
-    // Persistent kern-class + ligature tables (lazy-loaded on first prewarm).
-    // The full kern MATRIX is NOT resident — on Literata-class fonts a single
-    // style's matrix is ~36-42KB contiguous, and 4 styles' worth won't fit
-    // alongside bitmaps + framebuffer on a 380KB device. Only kernLeftClasses
-    // and kernRightClasses (small codepoint→classId tables, ~3KB each) stay
-    // resident; the matrix is reconstructed per-page as miniKernMatrix.
-    EpdKernClassEntry* kernLeftClasses = nullptr;
-    EpdKernClassEntry* kernRightClasses = nullptr;
+    // Address the split table in original file order for lookup and cross-style comparison.
+    EpdUnicodeInterval intervalAt(uint32_t index) const {
+      if (index < bmpIntervalCount) {
+        const auto& iv = bmpIntervals[index];
+        return {iv.first, iv.last, iv.offset};
+      }
+      return fullIntervals[index - bmpIntervalCount];
+    }
+
+    // Only ligatures remain resident; kerning classes stream in indexed blocks.
     EpdLigaturePair* ligaturePairs = nullptr;
-    bool kernClassesLoaded = false;
     bool ligaturesLoaded = false;
+    uint16_t* kernBlockIndex = nullptr;
+    bool kernBlockIndexReady = false;
 
     // Stub EpdFontData returned when not prewarmed
     EpdFontData stubData{};
@@ -237,6 +245,7 @@ class SdCardFont {
     uint16_t miniKernLeftCapacity = 0;
     uint16_t miniKernRightCapacity = 0;
     uint32_t miniKernMatrixCapacity = 0;
+    bool miniKernBuilt = false;  // Covers every resident glyph, including no-pair pages.
 
     // The EpdFont whose data pointer we manage
     EpdFont epdFont{&stubData};
@@ -247,6 +256,12 @@ class SdCardFont {
   PerStyle styles_[MAX_STYLES] = {};
   uint8_t styleCount_ = 0;
 
+  // Optional sizes never allocate page/advance caches or per-glyph bitmaps.
+  // 4KB covers normal content glyphs through 44pt; larger files are rejected
+  // before registration so layout falls back to a supported physical size.
+  static constexpr size_t CONTENT_BITMAP_BYTES = 4096;
+  std::unique_ptr<uint8_t[]> contentBitmap_;
+  bool leanContent_ = false;
   char filePath_[128] = {};
 
   // Overflow context: glyphMissHandler needs to know which style it's serving
@@ -295,6 +310,9 @@ class SdCardFont {
 
   Stats stats_;
   uint32_t contentHash_ = 0;
+  uint64_t fileSize_ = 0;
+  mutable uint8_t corruptGlyphsLogged_ = 0;
+  static inline std::atomic<bool> corruptGlyphNotice_{false};
   bool loaded_ = false;
   bool lastPrewarmFailed_ = false;
 
@@ -303,13 +321,14 @@ class SdCardFont {
   bool ensureBitmapCapacity(PerStyle& s, uint32_t needed);
   void resetStyleMiniData(PerStyle& s);
   void freeStyleAll(PerStyle& s);
-  void freeStyleKernLigatureData(PerStyle& s);
+  void freeStyleLigatures(PerStyle& s);
   void freeStyleMiniKern(PerStyle& s);
-  bool loadStyleKernLigatureData(PerStyle& s, bool includeKerning);
+  bool loadStyleLigatures(PerStyle& s);
   bool buildMiniKernMatrix(PerStyle& s, const uint32_t* codepoints, uint32_t cpCount);
   void applyKernLigaturePointers(PerStyle& s, EpdFontData& data, bool includeKerning) const;
   void applyGlyphMissCallback(uint8_t styleIdx);
   int32_t findGlobalGlyphIndex(const PerStyle& s, uint32_t codepoint) const;
+  bool glyphEntryValid(const PerStyle& s, const EpdGlyph& glyph, uint32_t codepoint) const;
   int fetchAdvancesForCodepoints(uint32_t* codepoints, uint32_t cpCount, uint8_t styleMask);
   int failPrewarm(int missed);
   template <typename Iter>

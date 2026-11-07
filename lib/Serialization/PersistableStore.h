@@ -53,6 +53,8 @@ class PersistableStoreBase {
   // that per-TU duplication is exactly what this class exists to prevent.
 
   // Serializes doc and writes it to path (ensures /.crosspoint exists). Logs on failure.
+  static bool recoverAtomicFile(const char* path);
+  static bool writeDocToFileAtomic(const char* path, const JsonDocument& doc);
   static bool writeDocToFile(const char* path, const JsonDocument& doc);
 
   // Writes through path.tmp and keeps path.bak until replacement succeeds. readDocFromFile()

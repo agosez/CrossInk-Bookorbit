@@ -4,6 +4,7 @@
 #include <InputManager.h>
 
 #include "AppCapabilities.h"
+#include "ButtonInputBuffer.h"
 
 // Display SPI pins (custom pins for XteinkX4, not hardware SPI defaults)
 #define EPD_SCLK 8   // SPI Clock
@@ -22,6 +23,7 @@
 class HalGPIO {
 #if CROSSPOINT_EMULATED == 0
   InputManager inputMgr;
+  ButtonInputBuffer::Frame buttonFrame;
 #endif
 
   bool lastUsbConnected = false;
@@ -90,6 +92,15 @@ class HalGPIO {
 
   // Button input methods
   void update();
+  void startButtonCapture();
+  void stopButtonCapture();
+  bool prepareForDeepSleep();
+  bool hasToggleSwitch() const;
+  bool isToggleSwitchOn() const;
+  uint32_t buttonSampleTime() const;
+  bool hasPendingButtonInput() const;
+  // Returns early on a hardware input edge; retains timed polling as fallback.
+  bool waitForInput(uint32_t timeoutMs);
   bool isPressed(uint8_t buttonIndex) const;
   bool wasPressed(uint8_t buttonIndex) const;
   bool wasAnyPressed() const;

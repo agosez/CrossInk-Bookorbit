@@ -51,7 +51,7 @@ struct LiveLightSwipeState {
 #endif
 
 enum class RequestUpdateResult { Rendered, Rejected };
-enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, OPDS_BROWSER, BOOKORBIT_BROWSER, FILE_TRANSFER, SETTINGS_MENU };
+enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, BOOKORBIT_BROWSER, FILE_TRANSFER, SETTINGS_MENU, PLUGINS };
 
 /**
  * ActivityManager
@@ -86,9 +86,17 @@ class ActivityManager {
   std::unique_ptr<Activity> pendingActivity;
   enum class PendingAction { None, Push, Pop, Replace };
   PendingAction pendingAction = PendingAction::None;
+  // Set once What's New has entered this boot, so a dismissal whose save failed doesn't re-show it.
+  bool releaseNotesShown = false;
   // Set when an overlay is closed specifically to hand control back to the
   // reader's menu. It must wait until the reader is current again.
   int16_t pendingReaderMenuAction = -1;
+  // Launched by replaceAfterReturn() after the requesting activity has popped.
+  std::unique_ptr<Activity> afterReturnActivity;
+  // Compared only while the owner is still alive; once it is destroyed the
+  // flag below decides, so a reused address can never stand in for it.
+  const Activity* afterReturnOwner = nullptr;
+  bool afterReturnOwnerExited = false;
   // Target reader retained underneath nested screens while Home/Reader cancels
   // each child through the ordinary activity-result path.
   Activity* pendingHomeReaderTarget = nullptr;
@@ -100,6 +108,11 @@ class ActivityManager {
 
   // Task to render and display the activity
   TaskHandle_t renderTaskHandle = nullptr;
+  // Guarded by RenderLock. Entry may explicitly render a ready loading screen
+  // with requestUpdateAndWait(), but stale/asynchronous notifications must wait.
+  bool enteringActivity = false;
+  bool entryRenderRequested = false;
+  void enterCurrentActivity();
   static void renderTaskTrampoline(void* param);
   [[noreturn]] virtual void renderTaskLoop();
 
@@ -124,7 +137,6 @@ class ActivityManager {
   bool handleHomeReaderShortcut();
   bool continueHomeReaderUnwind();
   bool handleGlobalHomeGesture();
-  bool restoreBackdropBehindCurrentOverlay();
 
  public:
   explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -150,10 +162,13 @@ class ActivityManager {
   void goToNearbyStatsSync();
   bool goToNearbyBookSend(std::string path, bool returnToReader);
   void goToNearbyBookReceive();
-  void goToSettings(bool dismissOnUpSwipe = false);
+  void goToSettings(bool dismissOnUpSwipe = false, bool openLanguageDownloads = false,
+                    bool touchscreenRecovery = false);
+  void markReleaseNotesShown() { releaseNotesShown = true; }
   void goToFileBrowser(std::string path = {});
   void goToLibrary();
   void goToBrowser();
+  void goToPlugins();
   bool goToOpdsServer(uint32_t serverIndex, bool networkBootReady = false);
   // networkBootReady: called from the catalog's own minimal network boot; otherwise the
   // X3 and X4 restart into one first. resumeDownload: the BOOKORBIT_DOWNLOAD boot, running
@@ -165,8 +180,9 @@ class ActivityManager {
   bool goToBookOrbitCatalog(BookOrbitCatalogLink link);
   void goToBookOrbitAuth();
   void goToReader(std::string path, bool suppressBackRelease = false, bool allowFastInitialRefresh = false,
-                  bool cleanImageBaseOnEntry = false);
+                  bool cleanImageBaseOnEntry = false, bool keepWakeFrame = false);
   void goToReaderAndRunMenuAction(std::string path, uint8_t action);
+  void preparePluginSleep();
   // recordForRedraw: the BookOrbit sleep sync follows and draws the sleep screen again
   // (see SleepScreenPass).
   void goToSleep(bool fromTimeout = false, bool recordForRedraw = false);
@@ -178,6 +194,14 @@ class ActivityManager {
 
   // This will move current activity to stack instead of deleting it
   void pushActivity(std::unique_ptr<Activity>&& activity);
+
+  // Replace the whole stack with `activity` once the current activity has
+  // finished and its parent's result handler has run. Lets a nested screen
+  // start a full-stack flow without skipping the parent's own cleanup.
+  void replaceAfterReturn(std::unique_ptr<Activity>&& activity);
+  // A parent's result handler can skip reopening its own UI when the whole
+  // stack is about to be replaced anyway.
+  bool hasDeferredReplace() const { return afterReturnActivity != nullptr; }
 
   // Remove the currentActivity, returning the last one on stack
   // Note: if popActivity() on last activity on the stack, we will goHome()
@@ -199,6 +223,7 @@ class ActivityManager {
   bool isCurrentActivityNamed(const char* activityName) const;
   Activity* simulatorCurrentActivity() const { return currentActivity.get(); }
 #endif
+  bool isCurrentActivity(const Activity* activity) const { return currentActivity.get() == activity; }
   bool canSnapshotForSleepOverlay() const;
   bool requestManualReaderRefresh();
   bool handleShortcutAction(CrossPointSettings::SHORT_PWRBTN action);
@@ -216,6 +241,10 @@ class ActivityManager {
   // If immediate is true, the update will be triggered immediately.
   // Otherwise, it will be deferred until the end of the current loop iteration.
   void requestUpdate(bool immediate = false);
+
+  // Main-loop only, without RenderLock: restore the reader pixels covered by
+  // a dismissed popup inside a partial-screen overlay.
+  bool restoreBackdropBehindCurrentOverlay();
 
   // Trigger a render and block until it completes.
   // Returns Rejected when a synchronous render would be unsafe, such as from the render task,

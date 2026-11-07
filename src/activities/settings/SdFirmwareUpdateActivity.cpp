@@ -215,7 +215,7 @@ void SdFirmwareUpdateActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
   const char* headerText = recoveryMode ? tr(STR_RECOVERY_MODE) : tr(STR_SD_FIRMWARE_UPDATE);
-  const Rect header{0, metrics.topPadding, pageWidth, TouchHeaderBackButton::height(metrics, mappedInput)};
+  const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
   if (state == State::FAILED && mappedInput.hasTouchHardware()) {
     TouchHeaderBackButton::draw(renderer, header, headerText, false);
   } else {

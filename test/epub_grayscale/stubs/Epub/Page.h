@@ -15,8 +15,9 @@ class Page {
     ++imageVisits;
     for (auto& item : images) item.image->render(renderer, x + item.x, y + item.y, true);
   }
-  void render(GfxRenderer& renderer, int font, int x, int y, bool) const {
-    ++allVisits;
+  void renderText(GfxRenderer&, int, int, int, bool) const { ++allVisits; }
+  void render(GfxRenderer& renderer, int font, int x, int y, bool black) const {
+    renderText(renderer, font, x, y, black);
     renderImages(renderer, font, x, y);
   }
 };

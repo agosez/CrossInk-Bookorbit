@@ -1,6 +1,10 @@
 #pragma once
 #include <Arduino.h>
 #include <EInkDisplay.h>
+#ifndef SIMULATOR
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#endif
 
 class HalDisplay {
  public:
@@ -29,6 +33,12 @@ class HalDisplay {
   // counter; otherwise the first two paints get promoted to FULL
   // (~770ms each on X3).
   void begin(bool seamless = false);
+  // Starts hardware initialization on SDMMC S3 boards; begin() joins it before
+  // applying wake policy. SPI boards keep their existing synchronous path.
+  void startBegin();
+
+  // Selected SDK driver identity; nullptr before display initialization.
+  const char* getControllerName() const;
 
   // Display dimensions
   static constexpr uint16_t DISPLAY_WIDTH = EInkDisplay::DISPLAY_WIDTH;
@@ -48,7 +58,7 @@ class HalDisplay {
   // normal logical colors.
   void setInverted(bool inverted);
   // Restore the controller's old-image plane from the saved Quick Resume frame.
-  // Only supported panels may use a gentle differential first paint.
+  // Returns false when the SDK or panel cannot support a differential first paint.
   bool restoreVisibleFrame();
   // Non-blocking refresh (shadow-free): starts the panel waveform and returns
   // while the panel refreshes on its own. The framebuffer must stay untouched
@@ -58,12 +68,17 @@ class HalDisplay {
   void displayBufferAsync(RefreshMode mode = RefreshMode::FAST_REFRESH);
   // Block until a pending deferred refresh completes (no-op when none is).
   void waitRefreshComplete();
+#if FREEINK_DEVICE_PICCO
+  void powerOffBetweenFrames();
+#endif
   // True when displayBufferAsync() genuinely overlaps (panel driver defers);
   // false where it falls back to a blocking refresh.
   bool supportsAsyncRefresh() const;
   // True when the normal async refresh is equivalent to the panel's grayscale
   // base pass. X3 has a dedicated grayscale waveform and must stay blocking.
   bool supportsAsyncGrayscaleBase() const;
+  bool supportsDeferredGrayscaleBase() const;
+  bool displayGrayscaleBaseAsync(RefreshMode fallback);
   void refreshDisplay(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
   bool isInverted() const;
 
@@ -118,6 +133,12 @@ class HalDisplay {
   uint32_t getBufferSize() const;
 
  private:
+  void beginHardware();
+  bool hardwareReady = false;
+#ifndef SIMULATOR
+  StaticSemaphore_t beginDoneStorage{};
+  SemaphoreHandle_t beginDone = nullptr;
+#endif
   EInkDisplay einkDisplay;
 };
 

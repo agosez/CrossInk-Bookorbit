@@ -1,5 +1,7 @@
 #include "ActivityManager.h"
 
+#include "activities/plugins/PluginCatalogActivity.h"
+
 #if CROSSINK_SCALABLE_FONTS
 #include <HalScalableFont.h>
 #endif
@@ -11,6 +13,9 @@
 #include <FsHelpers.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
+#if defined(CROSSINK_LANGUAGE_BENCHMARK)
+#include <LanguageBenchmark.h>
+#endif
 #include <Logging.h>
 #include <Memory.h>
 #include <Xtc.h>
@@ -20,8 +25,11 @@
 #include "BookOrbitCredentialStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "FilenameFontSystem.h"
+#include "GlobalActions.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "ReleaseNotes.h"
 #include "SilentRestart.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
@@ -46,6 +54,7 @@
 #include "reader/ReaderActivity.h"
 #include "settings/BookOrbitAuthActivity.h"
 #include "settings/OpdsServerListActivity.h"
+#include "settings/ReleaseNotesActivity.h"
 #include "settings/SettingsActivity.h"
 #include "util/FrontlightPanelActivity.h"
 #include "util/FullScreenMessageActivity.h"
@@ -144,14 +153,14 @@ FrontlightPanelContext buildFrontlightPanelContext(Activity& activity, GfxRender
     statsTitle = tr(STR_READING_STATS);
     if (!context.activeReaderBook) context.bookTitle = statsTitle;
   }
-  if (GlobalReadingStats::hasSyncedStats()) {
-    context.readingStatsActivity =
-        makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, statsTitle, cachePath, bookStats, progress, false,
-                                             0, global, GlobalReadingStats::loadAggregated(global));
-  } else {
-    context.readingStatsActivity = makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, statsTitle, cachePath,
-                                                                        bookStats, progress, false, 0, global);
-  }
+  auto stats =
+      GlobalReadingStats::hasSyncedStats()
+          ? makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, statsTitle, cachePath, bookStats, progress,
+                                                 false, 0, global, GlobalReadingStats::loadAggregated(global))
+          : makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, statsTitle, cachePath, bookStats, progress,
+                                                 false, 0, global);
+  if (stats && !cachePath.empty()) stats->setSyncBookPath(context.bookPath);
+  context.readingStatsActivity = std::move(stats);
   return context;
 }
 
@@ -206,6 +215,13 @@ bool applyConfiguredSwipeAction(Activity& activity, ActivityManager& activityMan
         activityManager.persistGlobalSettings();
       return true;
     }
+    case CrossPointSettings::TWO_FINGER_SWIPE_BACK_HOME:
+      return activityManager.handleShortcutAction(CrossPointSettings::BACK_HOME);
+    case CrossPointSettings::TWO_FINGER_SWIPE_HOME_READER:
+      return activityManager.handleShortcutAction(CrossPointSettings::HOME_READER);
+    case CrossPointSettings::TWO_FINGER_SWIPE_TOGGLE_PAGE_TURN_GESTURES:
+      return handleGlobalPowerButtonAction(CrossPointSettings::TOGGLE_PAGE_TURN_GESTURES);
+    case CrossPointSettings::TWO_FINGER_SWIPE_SELECT_CHAPTER:
     case CrossPointSettings::TWO_FINGER_SWIPE_NEXT_CHAPTER:
     case CrossPointSettings::TWO_FINGER_SWIPE_PREVIOUS_CHAPTER:
     case CrossPointSettings::TWO_FINGER_SWIPE_INCREASE_FONT_SIZE:
@@ -483,6 +499,11 @@ void ActivityManager::renderTaskLoop() {
     // Acquire the lock before reading currentActivity to avoid a TOCTOU race
     // where the main task deletes the activity between the null-check and render().
     RenderLock lock;
+    if (enteringActivity && !entryRenderRequested) {
+      requestedUpdate = true;
+      continue;
+    }
+    entryRenderRequested = false;
     TouchRegistry::getInstance().setEnabled(mappedInput.hasTouch());
     TouchRegistry::getInstance().beginFrame();
     if (currentActivity) {
@@ -490,7 +511,14 @@ void ActivityManager::renderTaskLoop() {
       // Apply Night Mode to each activity's normal-polarity frame. SleepActivity
       // preserves it only for Quick Resume and clears it for other sleep screens.
       display.setInverted(SETTINGS.screenInverted != 0);
+#if defined(CROSSINK_LANGUAGE_BENCHMARK)
+      language_benchmark::beginFrame(currentActivity->name.c_str());
+#endif
+      mappedInput.setMenuMode(currentActivity->usesMenuButtonOrientation());
       currentActivity->render(std::move(lock));
+#if defined(CROSSINK_LANGUAGE_BENCHMARK)
+      language_benchmark::endFrame();
+#endif
       restoredActivityNeedsRender = false;
     }
     TouchRegistry::getInstance().publish();
@@ -527,6 +555,10 @@ void ActivityManager::loop() {
 #endif
 
   if (currentActivity) {
+    if (mappedInput.isMenuMode() != currentActivity->usesMenuButtonOrientation()) {
+      RenderLock lock;
+      mappedInput.setMenuMode(currentActivity->usesMenuButtonOrientation());
+    }
     mappedInput.setPowerAsConfirmInReaderMode(currentActivity->allowPowerAsConfirmInReaderMode());
 
     if (currentActivity->blocksGlobalInput()) {
@@ -563,7 +595,7 @@ void ActivityManager::loop() {
       }
 #endif
 
-      // Frontlight quick panel: top-edge down-swipe on home-key boards, except
+      // Frontlight quick panel: top-edge down-swipe on drawer-layout boards, except
       // that the open EPUB reader exposes the same action across the whole page.
       // Pushed, so it returns to whatever was underneath — including mid-book.
       const bool lightPanelGesture = currentActivity->usesFullScreenReaderVerticalSwipes()
@@ -585,7 +617,15 @@ void ActivityManager::loop() {
     mappedInput.setPowerAsConfirmInReaderMode(false);
   }
 
-  while (pendingAction != PendingAction::None) {
+  // A deferred full-stack replace waits until its requester has popped and every
+  // result handler has settled, then runs as an ordinary Replace.
+  while (pendingAction != PendingAction::None || (afterReturnActivity && afterReturnOwnerExited)) {
+    if (pendingAction == PendingAction::None) {
+      afterReturnOwnerExited = false;
+      TouchRegistry::getInstance().clear();
+      pendingActivity = std::move(afterReturnActivity);
+      pendingAction = PendingAction::Replace;
+    }
     if (pendingAction == PendingAction::Pop) {
       RenderLock lock;
 
@@ -598,6 +638,10 @@ void ActivityManager::loop() {
 
       const bool closedFrontlightPanel = currentActivity->name == "FrontlightPanel";
       ActivityResult pendingResult = std::move(currentActivity->result);
+      if (afterReturnActivity && currentActivity.get() == afterReturnOwner) {
+        afterReturnOwnerExited = true;
+        afterReturnOwner = nullptr;
+      }
 
       // Destroy the current activity
       exitActivity(lock);
@@ -611,7 +655,12 @@ void ActivityManager::loop() {
       } else {
         currentActivity = std::move(stackActivities.back());
         stackActivities.pop_back();
+        mappedInput.setMenuMode(currentActivity->usesMenuButtonOrientation());
         restoredActivityNeedsRender = true;
+
+        // A file-transfer child may have released UI fonts. Restore them for
+        // any parent (including Settings) before its first measurement/redraw.
+        filenameFontSystem.ensureLoaded(renderer);
 
         if (closedFrontlightPanel) currentActivity->onFrontlightPanelClosed();
 
@@ -659,6 +708,16 @@ void ActivityManager::loop() {
 
       if (pendingAction == PendingAction::Replace) {
         pendingHomeReaderTarget = nullptr;
+        // A full-stack navigation while the requester is still open (Home
+        // gesture, sleep) cancels the deferred one. After the requester has
+        // exited (e.g. its pop fell back to Home) the deferred one still runs.
+        if (afterReturnActivity && !afterReturnOwnerExited) {
+          LOG_INF("ACT", "Dropping deferred %s for %s", afterReturnActivity->name.c_str(),
+                  pendingActivity->name.c_str());
+          afterReturnActivity.reset();
+          afterReturnOwner = nullptr;
+          afterReturnOwnerExited = false;
+        }
         // Destroy the current activity
         exitActivity(lock);
         // Clear the stack
@@ -672,9 +731,10 @@ void ActivityManager::loop() {
       }
       pendingAction = PendingAction::None;
       currentActivity = std::move(pendingActivity);
+      enteringActivity = true;
 
-      lock.unlock();  // onEnter may acquire its own lock
-      currentActivity->onEnter();
+      lock.unlock();  // onEnter may acquire its own lock or synchronously render a loading screen.
+      enterCurrentActivity();
 
       if (pendingAction == PendingAction::None && pendingReaderMenuAction >= 0 &&
           currentActivity->isEpubReaderActivity()) {
@@ -727,6 +787,24 @@ void ActivityManager::loop() {
     pushActivity(std::make_unique<AlertActivity>(renderer, mappedInput));
   }
 
+  // One-time What's New, only over Home so a wake into a book or a silent reboot into a network screen
+  // never shows it. The flag is set when the screen actually enters, so a push that Home's own navigation
+  // replaces before it applies is retried on the next visit to Home.
+  if (!releaseNotesShown && APP_STATE.releaseNotesSeen < RELEASE_NOTES_REVISION &&
+      pendingAction == PendingAction::None && currentActivity && currentActivity->isHomeActivity()) {
+    if (auto notes =
+            makeUniqueNoThrow<ReleaseNotesActivity>(renderer, mappedInput, ReleaseNotesActivity::Mode::FirstRun)) {
+      pushActivity(std::move(notes));
+    } else {
+      releaseNotesShown = true;  // Don't retry every loop; it shows again next boot.
+      LOG_ERR("ACT", "OOM: What's New activity; showing it next boot");
+    }
+  }
+
+  if (currentActivity && mappedInput.isMenuMode() != currentActivity->usesMenuButtonOrientation()) {
+    RenderLock lock;
+    mappedInput.setMenuMode(currentActivity->usesMenuButtonOrientation());
+  }
   if (requestedUpdate.exchange(false)) {
     // Using direct notification to signal the render task to update
     // Increment counter so multiple rapid calls won't be lost
@@ -766,6 +844,15 @@ bool ActivityManager::handleGlobalHomeGesture() {
   if (!currentActivity || pendingAction != PendingAction::None || currentActivity->isHomeActivity() ||
       !currentActivity->allowGlobalHomeGesture() || (!mappedInput.hasTouch() && !mappedInput.hasHomeKey())) {
     return false;
+  }
+
+  // Outside the open book, the bottom edge remains a Home shortcut even on
+  // boards with a Home key. Keep swipe intent separate from the key's Back
+  // behavior, and let drawers/dialogs retain their own dismissal handling.
+  if (!currentActivity->isBookReaderActivity() && currentActivity->allowGlobalHomeSwipeGesture() &&
+      mappedInput.wasBottomEdgeUpSwipe()) {
+    if (!currentActivity->handleHomeGesture()) goHome();
+    return true;
   }
 
   const bool homeGesture = currentActivity->usesFullScreenReaderVerticalSwipes()
@@ -839,6 +926,18 @@ void ActivityManager::exitActivity(const RenderLock& lock) {
   }
 }
 
+void ActivityManager::enterCurrentActivity() {
+  {
+    RenderLock lock;
+    mappedInput.setMenuMode(currentActivity->usesMenuButtonOrientation());
+  }
+  currentActivity->onEnter();
+  RenderLock lock;
+  mappedInput.setMenuMode(currentActivity->usesMenuButtonOrientation());
+  enteringActivity = false;
+  entryRenderRequested = false;
+}
+
 void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
   // Note: no lock here, this is usually called by loop() and we may run into deadlock
   if (currentActivity) {
@@ -850,8 +949,12 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
   } else {
     // No current activity, safe to launch immediately
     TouchRegistry::getInstance().clear();
-    currentActivity = std::move(newActivity);
-    currentActivity->onEnter();
+    {
+      RenderLock lock;
+      currentActivity = std::move(newActivity);
+      enteringActivity = true;
+    }
+    enterCurrentActivity();
   }
 }
 
@@ -940,7 +1043,8 @@ void ActivityManager::goToNearbyStatsSync() {
   replaceActivity(std::make_unique<NearbyStatsSyncActivity>(renderer, mappedInput));
 }
 
-void ActivityManager::goToSettings(const bool dismissOnUpSwipe) {
+void ActivityManager::goToSettings(const bool dismissOnUpSwipe, const bool openLanguageDownloads,
+                                   const bool touchscreenRecovery) {
   preferredHomeBookPath.clear();
   returningHomeThroughSettings = false;
   if (currentActivity && currentActivity->isHomeActivity()) {
@@ -950,7 +1054,10 @@ void ActivityManager::goToSettings(const bool dismissOnUpSwipe) {
     preferredHomeBookPath = stackActivities.back()->getCurrentBookPath();
     returningHomeThroughSettings = true;
   }
-  replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput, dismissOnUpSwipe));
+  auto settings = std::make_unique<SettingsActivity>(renderer, mappedInput, dismissOnUpSwipe);
+  if (openLanguageDownloads) settings->openLanguageDownloadsOnEnter();
+  if (touchscreenRecovery) settings->enableTouchscreenRecovery();
+  replaceActivity(std::move(settings));
 }
 
 void ActivityManager::goToFileBrowser(std::string path) {
@@ -964,6 +1071,15 @@ void ActivityManager::goToLibrary() {
     return;
   }
   replaceActivity(std::move(library));
+}
+
+void ActivityManager::goToPlugins() {
+  auto plugins = makeUniqueNoThrow<PluginCatalogActivity>(renderer, mappedInput, true);
+  if (!plugins) {
+    LOG_ERR("ACT", "Cannot allocate Plugins activity");
+    return;
+  }
+  replaceActivity(std::move(plugins));
 }
 
 void ActivityManager::goToBrowser() {
@@ -1061,12 +1177,12 @@ bool ActivityManager::goToOpdsServer(const uint32_t serverIndex, const bool netw
 }
 
 void ActivityManager::goToReader(std::string path, const bool suppressBackRelease, const bool allowFastInitialRefresh,
-                                 const bool cleanImageBaseOnEntry) {
+                                 const bool cleanImageBaseOnEntry, const bool keepWakeFrame) {
   // OPDS credentials are unrelated to local reading and may contain several
   // heap-backed strings. Home reloads them lazily when it becomes active.
   OPDS_STORE.release();
   replaceActivity(std::make_unique<ReaderActivity>(renderer, mappedInput, std::move(path), suppressBackRelease,
-                                                   allowFastInitialRefresh, cleanImageBaseOnEntry));
+                                                   allowFastInitialRefresh, cleanImageBaseOnEntry, keepWakeFrame));
 }
 
 void ActivityManager::goToReaderAndRunMenuAction(std::string path, const uint8_t action) {
@@ -1123,10 +1239,12 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, const HalDisplay::Ref
     const auto& activityName = currentActivity->name;
     if (activityName == "FileBrowser") {
       initialMenuItem = HomeMenuItem::FILE_BROWSER;
+    } else if (activityName == "PluginCatalog") {
+      initialMenuItem = HomeMenuItem::PLUGINS;
     } else if (activityName == "Library") {
       initialMenuItem = HomeMenuItem::LIBRARY;
     } else if (activityName == "OpdsBookBrowser") {
-      initialMenuItem = HomeMenuItem::OPDS_BROWSER;
+      initialMenuItem = HomeMenuItem::FILE_TRANSFER;
     } else if (activityName == "BookOrbitCatalogBrowser") {
       initialMenuItem = HomeMenuItem::BOOKORBIT_BROWSER;
     } else if (activityName == "CrossPointWebServer") {
@@ -1151,6 +1269,13 @@ void ActivityManager::pushActivity(std::unique_ptr<Activity>&& activity) {
   TouchRegistry::getInstance().clear();
   pendingActivity = std::move(activity);
   pendingAction = PendingAction::Push;
+}
+
+void ActivityManager::replaceAfterReturn(std::unique_ptr<Activity>&& activity) {
+  // Main-loop only, like replaceActivity(): no lock.
+  afterReturnActivity = std::move(activity);
+  afterReturnOwner = currentActivity.get();
+  afterReturnOwnerExited = false;
 }
 
 void ActivityManager::popActivity() {
@@ -1189,8 +1314,9 @@ bool ActivityManager::openReaderSettingsForTouchscreenEscapeHatch() {
   }
 
   if (!currentActivity->openReaderSettingsMenu()) {
-    // TXT has no reader menu, so keep a reliable global Settings fallback.
-    goToSettings();
+    // TXT has no reader menu. Keep its Settings fallback usable while touch
+    // is locked without changing the persisted touchscreen preference.
+    goToSettings(false, false, true);
   }
   return true;
 }
@@ -1277,6 +1403,10 @@ bool ActivityManager::continueHomeReaderUnwind() {
 }
 
 bool ActivityManager::handleShortcutAction(const CrossPointSettings::SHORT_PWRBTN action) {
+  if (action == CrossPointSettings::SHORT_PWRBTN::BACK_HOME) {
+    handleHomeButtonBackOrHome();
+    return true;
+  }
   if (action == CrossPointSettings::SHORT_PWRBTN::HOME_READER) return handleHomeReaderShortcut();
   return currentActivity && (currentActivity->isReaderActivity() || currentActivity->isHomeActivity()) &&
          currentActivity->handleShortcutAction(action);
@@ -1400,6 +1530,11 @@ RequestUpdateResult ActivityManager::requestUpdateAndWait() {
     return RequestUpdateResult::Rejected;
   }
 
+  {
+    RenderLock lock;
+    // onEnter explicitly promises that its state is ready for this one render.
+    entryRenderRequested = enteringActivity;
+  }
   xTaskNotify(renderTaskHandle, 1, eIncrement);
   ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   return RequestUpdateResult::Rendered;
@@ -1414,15 +1549,16 @@ RenderLock::RenderLock(const Mode mode) {
 
 RenderLock::RenderLock([[maybe_unused]] Activity&, const Mode mode) : RenderLock(mode) {}
 
-RenderLock::~RenderLock() {
-  if (isLocked) {
-    xSemaphoreGive(activityManager.renderingMutex);
-    isLocked = false;
-  }
-}
+RenderLock::~RenderLock() { unlock(); }
 
 void RenderLock::unlock() {
   if (isLocked) {
+#if FREEINK_DEVICE_PICCO
+    // A drawing transaction includes all async/grayscale passes. Shut down
+    // only when its owner releases the lock, including direct toast, screenshot
+    // and Quick Lock updates that bypass the activity render task.
+    display.powerOffBetweenFrames();
+#endif
     xSemaphoreGive(activityManager.renderingMutex);
     isLocked = false;
   }
@@ -1436,3 +1572,13 @@ void RenderLock::unlock() {
  * @note Must not be called from ISR context — xSemaphoreGetMutexHolder is not ISR-safe.
  */
 bool RenderLock::peek() { return xSemaphoreGetMutexHolder(activityManager.renderingMutex) != nullptr; }
+
+bool RenderLock::heldByCurrentTask() {
+  return xSemaphoreGetMutexHolder(activityManager.renderingMutex) == xTaskGetCurrentTaskHandle();
+}
+
+void ActivityManager::preparePluginSleep() {
+  RenderLock lock;
+  for (auto& activity : stackActivities) activity->prepareForSleep();
+  if (currentActivity) currentActivity->prepareForSleep();
+}

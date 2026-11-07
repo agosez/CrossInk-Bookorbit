@@ -230,7 +230,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
 
   // Pre-compute orientation and render-mode state once per callback invocation
   DirectPixelWriter pw;
-  pw.init(renderer);
+  pw.init(renderer, ctx->config->useGrayscale);
 
   // The cache streams to disk one MCU-row band at a time. Flushing rows below
   // this block (raster order guarantees they are final) repositions the band;
@@ -456,7 +456,9 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   // Keep exactly one close after every attempted open, including malformed
   // JPEGs where JPEGDEC returns from JPEGInit without closing its file handle.
   const auto closeJpeg = ScopedCleanup{[&jpeg] { jpeg->close(); }};
-  int rc = jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDrawCallback);
+  int rc = config.sourceData ? jpeg->openRAM(const_cast<uint8_t*>(config.sourceData),
+                                             static_cast<int>(config.sourceSize), jpegDrawCallback)
+                             : jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDrawCallback);
   if (rc != 1) {
     LOG_ERR("JPG", "Failed to open JPEG (err=%d): %s", jpeg->getLastError(), imagePath.c_str());
     return false;

@@ -5,6 +5,28 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v2.0.0.
+
+### Added
+
+- Releases now include a firmware for the BOOX Picco. It installs over USB into the reader's application slot and leaves the factory recovery software untouched; see [Installation](docs/installation.md#boox-picco). As on upstream CrossInk, Picco has no Wi-Fi or SD card firmware update.
+
+### Changed
+
+- Interface languages other than English are no longer built into the firmware: CrossInk v2.0.0 moved them out to make room. This fork publishes its own language packs, so **Settings > System > Device > Download Languages** installs them over Wi-Fi, and after the update What's New offers to download the language you were using. Upstream's packs cannot be used here: they lack this fork's screens. Each release also carries `crossink-languages-<version>.zip` for installing them from the SD card instead.
+- The BookOrbit screens, sync messages and Home theme are now translated into all 27 languages besides English, not only the 8 this fork covered before.
+- The OPDS browser moves from Home to File Transfer, as in CrossInk v2.0.0, to make room for Plugins. The BookOrbit catalog stays on Home; on the Cover Grid home screen its tab now sits next to Plugins.
+- A book download from the BookOrbit catalog now reserves room for the largest piece of secure data the way CrossInk v2.0.0 does for OPDS books: once the request is sent, while memory is still in one piece. A server that agrees to small pieces, as most nginx and Apache setups do, no longer costs that reservation at all ([#96](https://github.com/agosez/CrossInk-Bookorbit/issues/96)).
+
+- KOReader Sync, which CrossInk v2.0.0 renames Sync Server and extends to reading stats and clippings, stays out of this fork, and so do its new Sync Book, Sync Folder and Sync Books actions. A KOReader account saved before this fork removed it keeps them.
+
+### Fixed
+
+- Shortcuts set to BookOrbit Sync keep working after this update. CrossInk v2.0.0 gives the numbers they were saved under to Back Home and Home/Reader, so they are carried over the first time the device starts, on every button that offers BookOrbit Sync, the Home key and Quick Actions included.
+- BookOrbit Sync no longer sends a guessed position when the device cannot place the page within the book's structure: the sync stops with an error instead. A guessed position could send another reader to the wrong place, or to the start of the book.
+
 ## [v1.6.1+bookorbit.5] - 2026-11-06
 
 Based on CrossInk v1.6.1.

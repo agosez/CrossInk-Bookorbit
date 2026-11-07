@@ -23,38 +23,39 @@ CoverGridHomeUi::CoverGridHomeUi(GfxRenderer& renderer)
     : UiAppHost(renderer), coverCache(renderer), renderer(renderer) {}
 
 namespace {
-bool showsTab(const CoverGridHomeUi::Tab tab, const bool hasOpds, const bool hasBookOrbit) {
-  return (tab != CoverGridHomeUi::Tab::Opds || hasOpds) && (tab != CoverGridHomeUi::Tab::BookOrbit || hasBookOrbit);
+bool showsTab(const CoverGridHomeUi::Tab tab, const bool hasPlugins, const bool hasBookOrbit) {
+  return (tab != CoverGridHomeUi::Tab::Plugins || hasPlugins) &&
+         (tab != CoverGridHomeUi::Tab::BookOrbit || hasBookOrbit);
 }
 }  // namespace
 
-int CoverGridHomeUi::tabCount(const bool hasOpds, const bool hasBookOrbit) {
-  return MAX_TABS - (hasOpds ? 0 : 1) - (hasBookOrbit ? 0 : 1);
+int CoverGridHomeUi::tabCount(const bool hasPlugins, const bool hasBookOrbit) {
+  return MAX_TABS - (hasPlugins ? 0 : 1) - (hasBookOrbit ? 0 : 1);
 }
 
-CoverGridHomeUi::Tab CoverGridHomeUi::tabAt(int position, const bool hasOpds, const bool hasBookOrbit) {
+CoverGridHomeUi::Tab CoverGridHomeUi::tabAt(int position, const bool hasPlugins, const bool hasBookOrbit) {
   if (position < 0) return Tab::Count;
   for (int i = 0; i < MAX_TABS; ++i) {
     const Tab tab = static_cast<Tab>(i);
-    if (!showsTab(tab, hasOpds, hasBookOrbit)) continue;
+    if (!showsTab(tab, hasPlugins, hasBookOrbit)) continue;
     if (position-- == 0) return tab;
   }
   return Tab::Count;
 }
 
-int CoverGridHomeUi::tabPosition(const Tab tab, const bool hasOpds, const bool hasBookOrbit) {
-  if (tab == Tab::Count || !showsTab(tab, hasOpds, hasBookOrbit)) return -1;
+int CoverGridHomeUi::tabPosition(const Tab tab, const bool hasPlugins, const bool hasBookOrbit) {
+  if (tab == Tab::Count || !showsTab(tab, hasPlugins, hasBookOrbit)) return -1;
   int position = 0;
   for (int i = 0; i < static_cast<int>(tab); ++i) {
-    if (showsTab(static_cast<Tab>(i), hasOpds, hasBookOrbit)) ++position;
+    if (showsTab(static_cast<Tab>(i), hasPlugins, hasBookOrbit)) ++position;
   }
   return position;
 }
 
-void CoverGridHomeUi::begin(const std::vector<RecentBook>& recent, bool opds, bool bookOrbit, bool continuing,
+void CoverGridHomeUi::begin(const std::vector<RecentBook>& recent, bool plugins, bool bookOrbit, bool continuing,
                             float featuredProgress) {
   books = &recent;
-  hasOpds = opds;
+  hasPlugins = plugins;
   hasBookOrbit = bookOrbit;
   if (!recent.empty()) coverCache.begin();
   reset();
@@ -156,7 +157,7 @@ void CoverGridHomeUi::draw(UiScreen& screen) {
 
 void CoverGridHomeUi::drawHeaderBand() {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.homeTopPadding}, nullptr);
+  GUI.drawHeader(renderer, UITheme::getHeaderRect(renderer, metrics.homeTopPadding), nullptr);
 }
 
 void CoverGridHomeUi::drawEmpty(UiScreen& screen) {
@@ -215,7 +216,10 @@ void CoverGridHomeUi::drawCurrent(UiScreen& screen, fui::Rect rect, const int co
   card.coverPainter = [](fui::DrawTarget& target, fui::Rect cover, const fui::BookCardProps&, void* user) {
     return static_cast<CoverGridHomeUi*>(user)->paintFramedCover(target, cover, 0);
   };
-  fui::bookCard(screen.frame(), rect, card);
+  {
+    FilenameUiFontScope fonts(target, renderer);
+    fui::bookCard(screen.frame(), rect, card);
+  }
 
   if (selected == 0 && !BoardConfig::hasTouch()) {
     const int16_t barHeight = card.coverSize.height;
@@ -261,9 +265,9 @@ void CoverGridHomeUi::drawGrid(UiScreen& screen) {
 void CoverGridHomeUi::drawTabs(UiScreen& screen, fui::Rect rect) {
   // Indexed by Tab.
   static constexpr const freeink::Icon* ICONS[MAX_TABS] = {&icon_folder_32,        &icon_landmark_32,
-                                                           &icon_lyra_library_32,  &icon_bookorbit_32,
+                                                           &icon_puzzle_32,        &icon_bookorbit_32,
                                                            &icon_lyra_transfer_32, &icon_lyra_settings_32};
-  const int count = tabCount(hasOpds, hasBookOrbit);
+  const int count = tabCount(hasPlugins, hasBookOrbit);
   for (int i = 0; i < count; ++i) {
     auto& tab = tabItems[i];
     tab.value = books->size() + i;
@@ -280,7 +284,7 @@ void CoverGridHomeUi::drawTabs(UiScreen& screen, fui::Rect rect) {
   tabs.iconPainter = [](fui::DrawTarget&, fui::Rect iconRect, const fui::TabItem& tab, uint8_t, void* user) {
     const auto& self = *static_cast<CoverGridHomeUi*>(user);
     const int position = tab.value - static_cast<int>(self.books->size());
-    const Tab shown = tabAt(position, self.hasOpds, self.hasBookOrbit);
+    const Tab shown = tabAt(position, self.hasPlugins, self.hasBookOrbit);
     if (shown == Tab::Count) return false;
     drawLucideIcon(self.renderer, *ICONS[static_cast<int>(shown)], iconRect.x, iconRect.y);
     return true;

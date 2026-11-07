@@ -1596,6 +1596,20 @@ size_t BookOrbitSyncActivity::uploadQueuedStats() {
 }
 
 void BookOrbitSyncActivity::performUpload() {
+  // Since CrossInk v2.0.0 an unresolvable position comes back invalid instead of as a
+  // guessed /body/p[N] path, which could send other readers to the start of the book.
+  if (!localProgress.valid || localProgress.xpath.empty()) {
+    LOG_ERR("BookOrbit", "Local position has no structural xpointer; not uploading it");
+    syncSession.reset();
+    SavedWifiConnect::disconnect();
+    {
+      RenderLock lock(*this);
+      state = SYNC_FAILED;
+      statusMessage = tr(STR_SYNC_FAILED_MSG);
+    }
+    requestUpdate(true);
+    return;
+  }
   {
     RenderLock lock(*this);
     state = UPLOADING;
@@ -1815,7 +1829,7 @@ void BookOrbitSyncActivity::render(RenderLock&&) {
     const ProgressCard cards[] = {
         {tr(STR_SYNC_REMOTE_TITLE), remoteProgress.device.c_str(), remotePageStr, remoteChapter.c_str(),
          remoteLocalPercent, remoteTenths > localTenths},
-        {tr(STR_SYNC_LOCAL_TITLE), nullptr, localPageStr, localChapter.c_str(), localProgress.percentage,
+        {tr(STR_STATS_THIS_DEVICE_SCREEN), nullptr, localPageStr, localChapter.c_str(), localProgress.percentage,
          localTenths > remoteTenths},
     };
 

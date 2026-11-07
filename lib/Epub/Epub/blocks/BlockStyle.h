@@ -22,6 +22,8 @@ struct BlockStyle {
   uint16_t lineHeight = 0;
 
   CssTextAlign alignment = CssTextAlign::Justify;
+  // Layout-only source alignment, kept separately from the reader prose override.
+  CssTextAlign publisherAlignment = CssTextAlign::None;
 
   // Spacing (in pixels)
   int16_t marginTop = 0;
@@ -95,6 +97,9 @@ struct BlockStyle {
         result.textIndent = textIndent;
         result.textIndentDefined = true;
       }
+      if (child.publisherAlignment == CssTextAlign::None) {
+        result.publisherAlignment = publisherAlignment;
+      }
       if (!child.textAlignDefined && textAlignDefined) {
         result.alignment = alignment;
         result.textAlignDefined = true;
@@ -142,6 +147,7 @@ struct BlockStyle {
       blockStyle.textIndentDefined = true;
     }
     blockStyle.textAlignDefined = cssStyle.hasTextAlign();
+    if (blockStyle.textAlignDefined) blockStyle.publisherAlignment = cssStyle.textAlign;
     // User setting overrides CSS, unless "Book's Style" alignment setting is selected
     if (paragraphAlignment == CssTextAlign::None) {
       blockStyle.alignment = blockStyle.textAlignDefined ? cssStyle.textAlign : CssTextAlign::Justify;

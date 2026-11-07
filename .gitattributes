@@ -1,1 +1,4 @@
 .github/workflows/*.lock.yml linguist-generated=true
+
+# Preserve the original dictionary sources, including upstream whitespace.
+assets/hyphenation/patterns/*.tex -text -whitespace

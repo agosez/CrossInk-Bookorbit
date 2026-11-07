@@ -1088,9 +1088,34 @@ std::string Dictionary::resolveAltForm(const std::string& word, const char* cach
 // ---------------------------------------------------------------------------
 
 std::vector<std::string> Dictionary::getStemVariants(const std::string& word) {
-  // These are deliberately English morphology rules. Applying them to UTF-8
-  // text can manufacture meaningless variants from another language, so
-  // non-ASCII words use exact and StarDict synonym lookup only.
+  // Try common French elisions before English stemming, including UTF-8
+  // apostrophes. Exact headwords have already been tried by the caller.
+  // Keep the remainder intact: French accents and endings are not English stems.
+  size_t prefixLength = 0;
+  if (word.size() >= 3) {
+    const int first = std::tolower(static_cast<unsigned char>(word[0]));
+    if (first == 'q' && std::tolower(static_cast<unsigned char>(word[1])) == 'u') {
+      prefixLength = 2;
+    } else if (first != 0 && strchr("cdjlmnst", first)) {
+      prefixLength = 1;
+    }
+  }
+  if (prefixLength != 0) {
+    size_t apostropheLength = 0;
+    if (word[prefixLength] == '\'') {
+      apostropheLength = 1;
+    } else if (word.compare(prefixLength, 3, "’") == 0) {
+      apostropheLength = 3;
+    } else if (word.compare(prefixLength, 2, "ʼ") == 0) {
+      apostropheLength = 2;
+    }
+    if (apostropheLength != 0 && prefixLength + apostropheLength < word.size()) {
+      return {word.substr(prefixLength + apostropheLength)};
+    }
+  }
+
+  // The remaining rules are deliberately English-only. Applying them to UTF-8
+  // text can manufacture meaningless variants from another language.
   if (std::any_of(word.begin(), word.end(), [](const unsigned char c) { return c >= 0x80; })) return {};
 
   std::string normalized = word;

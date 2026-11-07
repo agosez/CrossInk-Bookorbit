@@ -212,7 +212,8 @@ void drawStatsOverlay(const GfxRenderer& renderer, const GlobalReadingStats& glo
                        readerRegionBottom, inverted);
 
   const int streakRegionTop = progressLabelBottomY(renderer, coverRect, progressPercent);
-  const int streakRegionBottom = renderer.getScreenHeight();
+  const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int streakRegionBottom = safe.y + safe.height;
   drawCenteredStatsRow(renderer, StreakIcon, kStatsFooterStreakIconSize, streakBuf, streakRegionTop, streakRegionBottom,
                        inverted);
 }
@@ -330,33 +331,37 @@ void drawMissingBookCover(const GfxRenderer& renderer, const Rect& coverRect, co
   constexpr int titleAuthorGap = 28;
   const int textW = placeholderRect.width - textPadding * 2;
   const std::string& titleText = book.title.empty() ? book.path : book.title;
-  const int titleLineHeight = renderer.getLineHeight(UI_12_FONT_ID);
-  const int authorLineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const int titleLineHeight = renderer.getLineHeight(renderer.filenameFontId(UI_12_FONT_ID));
+  const int authorLineHeight = renderer.getLineHeight(renderer.filenameFontId(UI_10_FONT_ID));
   const bool hasAuthor = !book.author.empty();
-  auto authorLines =
-      hasAuthor ? renderer.wrappedText(UI_10_FONT_ID, book.author.c_str(), textW, 2) : std::vector<std::string>{};
+  auto authorLines = hasAuthor
+                         ? renderer.wrappedText(renderer.filenameFontId(UI_10_FONT_ID), book.author.c_str(), textW, 2)
+                         : std::vector<std::string>{};
   const int lowerAreaHeight = placeholderRect.y + placeholderRect.height - dividerY;
   const int authorBlockHeight = authorLineHeight * static_cast<int>(authorLines.size());
   const int authorGap = authorLines.empty() ? 0 : titleAuthorGap;
   const int availableTitleHeight = lowerAreaHeight - textVerticalPadding * 2 - authorBlockHeight - authorGap;
   const int maxTitleLines = std::clamp(availableTitleHeight / titleLineHeight, 1, 4);
-  auto titleLines = renderer.wrappedText(UI_12_FONT_ID, titleText.c_str(), textW, maxTitleLines);
+  auto titleLines =
+      renderer.wrappedText(renderer.filenameFontId(UI_12_FONT_ID), titleText.c_str(), textW, maxTitleLines);
 
   const int titleBlockHeight = titleLineHeight * static_cast<int>(titleLines.size());
   const int totalTextHeight = titleBlockHeight + authorBlockHeight + authorGap;
   int textY = dividerY + std::max(textVerticalPadding, (lowerAreaHeight - totalTextHeight) / 2);
 
   for (const auto& line : titleLines) {
-    const int lineW = renderer.getTextWidth(UI_12_FONT_ID, line.c_str());
-    renderer.drawText(UI_12_FONT_ID, placeholderRect.x + (placeholderRect.width - lineW) / 2, textY, line.c_str());
+    const int lineW = renderer.getTextWidth(renderer.filenameFontId(UI_12_FONT_ID), line.c_str());
+    renderer.drawText(renderer.filenameFontId(UI_12_FONT_ID), placeholderRect.x + (placeholderRect.width - lineW) / 2,
+                      textY, line.c_str());
     textY += titleLineHeight;
   }
 
   if (!authorLines.empty()) {
     textY += titleAuthorGap;
     for (const auto& line : authorLines) {
-      const int lineW = renderer.getTextWidth(UI_10_FONT_ID, line.c_str());
-      renderer.drawText(UI_10_FONT_ID, placeholderRect.x + (placeholderRect.width - lineW) / 2, textY, line.c_str());
+      const int lineW = renderer.getTextWidth(renderer.filenameFontId(UI_10_FONT_ID), line.c_str());
+      renderer.drawText(renderer.filenameFontId(UI_10_FONT_ID), placeholderRect.x + (placeholderRect.width - lineW) / 2,
+                        textY, line.c_str());
       textY += authorLineHeight;
     }
   }
@@ -397,19 +402,21 @@ void drawBookCover(const GfxRenderer& renderer, const Rect& coverRect, const Rec
 }  // namespace
 
 void MinimalTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle,
-                              const bool readerContext, const bool showStatus) const {
+                              const bool readerContext, const bool showStatus, const bool filenameTitle) const {
   (void)subtitle;
   (void)readerContext;
 
   renderer.fillRect(rect.x, rect.y, rect.width, rect.height, false);
 
   if (title) {
+    const int titleFontId = filenameTitle ? renderer.filenameFontId(UI_12_FONT_ID) : UI_12_FONT_ID;
     constexpr int titleInsetX = 12;
     const int titleRight = rect.x + rect.width - 12;
     const int maxTitleWidth = titleRight - rect.x - titleInsetX - MinimalMetrics::values.contentSidePadding;
-    auto truncatedTitle = renderer.truncatedText(UI_12_FONT_ID, title, maxTitleWidth, EpdFontFamily::BOLD);
-    renderer.drawText(UI_12_FONT_ID, rect.x + titleInsetX, rect.y + MinimalMetrics::values.batteryBarHeight + 3,
-                      truncatedTitle.c_str(), true, EpdFontFamily::BOLD);
+    auto truncatedTitle = renderer.truncatedText(titleFontId, title, maxTitleWidth, EpdFontFamily::BOLD);
+    renderer.drawText(titleFontId, rect.x + titleInsetX,
+                      rect.y + UITheme::getInstance().getMetrics().batteryBarHeight + 3, truncatedTitle.c_str(), true,
+                      EpdFontFamily::BOLD);
     renderer.drawLine(rect.x, rect.y + rect.height - 3, rect.x + rect.width - 1, rect.y + rect.height - 3, 3, true);
   }
 
@@ -608,10 +615,13 @@ Rect MinimalTheme::buttonMenuPanelRect(const GfxRenderer& renderer, const int bu
     return Rect{0, 0, 0, 0};
   }
 
-  const int panelW = std::min(kMenuPanelWidth, renderer.getScreenWidth() - 80);
-  const int panelH = buttonCount * kMenuRowHeight + 2;
-  const int panelX = (renderer.getScreenWidth() - panelW) / 2;
-  return Rect{panelX, kMenuPanelTop, panelW, panelH};
+  const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int panelW = std::min(kMenuPanelWidth, safe.width - 80);
+  const int pageItems = std::max(1, std::min(buttonCount, (safe.height - 2) / kMenuRowHeight));
+  const int panelH = pageItems * kMenuRowHeight + 2;
+  const int panelX = safe.x + (safe.width - panelW) / 2;
+  const int panelY = std::clamp(kMenuPanelTop, safe.y, std::max(safe.y, safe.y + safe.height - panelH));
+  return Rect{panelX, panelY, panelW, panelH};
 }
 
 void MinimalTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
@@ -630,7 +640,7 @@ void MinimalTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, cons
   constexpr int buttonWidth = 80;
   constexpr int smallButtonHeight = 15;
   constexpr int buttonHeight = MinimalMetrics::values.buttonHintsHeight;
-  constexpr int buttonY = MinimalMetrics::values.buttonHintsHeight;
+  const int buttonY = MinimalMetrics::values.buttonHintsHeight + UITheme::getButtonHintsBottomInset(renderer);
   constexpr int textYOffset = 7;
   constexpr int x4ButtonPositions[] = {58, 146, 254, 342};
   constexpr int x3ButtonPositions[] = {65, 157, 291, 383};
@@ -640,7 +650,7 @@ void MinimalTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, cons
   homeButtonHintSelection = -1;
 
   for (int i = 0; i < 4; i++) {
-    const int x = buttonPositions[i];
+    const int x = UITheme::getHintSafeX(renderer, buttonPositions[i], buttonWidth);
     const bool hasLabel = labels[i] != nullptr && labels[i][0] != '\0';
     if (hasLabel) {
       TouchRegistry::getInstance().add(Rect{x, pageHeight - buttonY, buttonWidth, buttonHeight}, i,
@@ -652,7 +662,7 @@ void MinimalTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, cons
     } else if (labels[i] != nullptr) {
       // Clear the previous full-sized hint before drawing the inactive marker.
       renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, false);
-      const int smallButtonY = pageHeight - smallButtonHeight;
+      const int smallButtonY = pageHeight - smallButtonHeight - UITheme::getButtonHintsBottomInset(renderer);
       renderer.fillRoundedRect(x, smallButtonY, buttonWidth, smallButtonHeight, kButtonCornerRadius, Color::White);
       renderer.drawRoundedRect(x, smallButtonY, buttonWidth, smallButtonHeight, 1, kButtonCornerRadius, true, true,
                                false, false, true);
@@ -660,13 +670,14 @@ void MinimalTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, cons
   }
 
   renderer.setOrientation(invertText ? GfxRenderer::Orientation::PortraitInverted : GfxRenderer::Orientation::Portrait);
-  const int textY = invertText ? textYOffset : pageHeight - buttonY + textYOffset;
+  const int textY =
+      invertText ? UITheme::getButtonHintsBottomInset(renderer) + textYOffset : pageHeight - buttonY + textYOffset;
 
   for (int i = 0; i < 4; i++) {
     if (labels[i] != nullptr && labels[i][0] != '\0') {
       const int x = buttonPositions[invertText ? 3 - i : i];
       const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, labels[i]);
-      const int textX = x + (buttonWidth - 1 - textWidth) / 2;
+      const int textX = UITheme::getHintSafeX(renderer, x + (buttonWidth - 1 - textWidth) / 2, textWidth);
       renderer.drawText(SMALL_FONT_ID, textX, textY, labels[i]);
     }
   }
@@ -762,8 +773,10 @@ void MinimalTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCo
   labelText.maxLines = 1;
   renderer.drawRoundedRect(panelX, panelY, panelW, panelH, 1, kMenuPanelRadius, true);
 
-  for (int i = 0; i < buttonCount; ++i) {
-    const int rowY = panelY + 1 + i * kMenuRowHeight;
+  const int pageItems = std::max(1, (panelH - 2) / kMenuRowHeight);
+  const int first = std::max(0, selectedIndex) / pageItems * pageItems;
+  for (int i = first; i < std::min(buttonCount, first + pageItems); ++i) {
+    const int rowY = panelY + 1 + (i - first) * kMenuRowHeight;
     TouchRegistry::getInstance().add(Rect{panelX, rowY, panelW, kMenuRowHeight}, i, TouchRegistry::Item);
     if (i == selectedIndex) {
       const int triangleX = panelX + kMenuSelectionTriangleInset;

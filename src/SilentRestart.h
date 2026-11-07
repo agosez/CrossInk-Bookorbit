@@ -14,20 +14,24 @@ enum class NetworkBootTarget : uint32_t {
   KOREADER_AUTH = 5,
   FILE_TRANSFER = 6,
   MANAGE_FONTS = 7,
-  BOOKORBIT_SYNC = 8,
+  DOWNLOAD_ASSETS = 8,
+  // This fork's targets start at 32 so that upstream's next targets (9, 10, ...)
+  // never take their numbers. A target only lives in RTC memory across one
+  // restart, never on the SD card, so the numbers can move between versions.
+  BOOKORBIT_SYNC = 32,
   // The BookOrbit sync that runs behind the sleep screen before deep sleep (see
   // enterDeepSleep()). Its payload holds the BOOKORBIT_SLEEP_SYNC_PAYLOAD_* bits.
-  BOOKORBIT_SLEEP_SYNC = 9,
+  BOOKORBIT_SLEEP_SYNC = 33,
   // A BookOrbit catalog download, restarted into so its TLS session gets a heap that
   // browsing has not fragmented. What to fetch, and the listing to return to, wait
   // on the SD card (BookOrbitCatalogListCache::saveDownloadResume()).
-  BOOKORBIT_DOWNLOAD = 10,
+  BOOKORBIT_DOWNLOAD = 34,
   // The BookOrbit catalog itself on the X3 and X4, as OPDS has its own boot: every
   // listing it loads is a TLS session that needs a 16 KB record buffer in one block,
   // which the rest of the app's heap no longer has after a few pages (issue #96).
-  BOOKORBIT_CATALOG = 11,
+  BOOKORBIT_CATALOG = 35,
   // The BookOrbit Home's own sync: replaces its snapshot, then restarts to Home.
-  BOOKORBIT_HOME_REFRESH = 12,
+  BOOKORBIT_HOME_REFRESH = 36,
 };
 
 // BOOKORBIT_SYNC payload: bit 16 set means bits 0-15 carry the paragraph index of the
@@ -61,6 +65,7 @@ constexpr bool isNetworkBootTargetValue(const uint32_t value) {
     case NetworkBootTarget::KOREADER_AUTH:
     case NetworkBootTarget::FILE_TRANSFER:
     case NetworkBootTarget::MANAGE_FONTS:
+    case NetworkBootTarget::DOWNLOAD_ASSETS:
     case NetworkBootTarget::BOOKORBIT_SYNC:
     case NetworkBootTarget::BOOKORBIT_SLEEP_SYNC:
     case NetworkBootTarget::BOOKORBIT_DOWNLOAD:
@@ -77,6 +82,7 @@ static_assert(isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::KOREADER_AUTH)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::FILE_TRANSFER)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::MANAGE_FONTS)) &&
+                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::DOWNLOAD_ASSETS)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SYNC)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SLEEP_SYNC)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_DOWNLOAD)) &&

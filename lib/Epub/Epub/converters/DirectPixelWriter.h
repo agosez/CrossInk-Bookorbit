@@ -4,10 +4,12 @@
 #include <HalDisplay.h>
 #include <stdint.h>
 
+#include "DitherUtils.h"
+
 // Direct framebuffer writer that eliminates per-pixel overhead from the image
 // rendering hot path.  Pre-computes orientation transform as linear coefficients
-// and caches render-mode state so the inner loop is: one multiply, one add,
-// one shift, and one AND per pixel — no branches, no method calls.
+// and caches render-mode state so pixel writes avoid renderer method calls.
+// Monochrome output also maps the four cached shades to a Bayer pattern.
 //
 // Caller is responsible for ensuring (outX, outY) are within screen bounds.
 // ImageBlock::render() already validates this before entering the pixel loop,
@@ -15,6 +17,8 @@
 struct DirectPixelWriter {
   uint8_t* fb;
   GfxRenderer::RenderMode mode;
+  bool grayscale;
+  int logicalRow;
   uint16_t displayWidthBytes;  // Runtime framebuffer stride (X4: 100, X3: 99)
   // Active write target: for tiled grayscale, fb is the band scratch, originY is
   // the band's top physical row, and clipRows is the band height. Off-band
@@ -33,11 +37,14 @@ struct DirectPixelWriter {
   // Row-precomputed: the Y-dependent portion of the physical coords
   int rowPhyXBase, rowPhyYBase;
 
-  void init(GfxRenderer& renderer) {
+  void init(GfxRenderer& renderer, const bool imageGrayscale = true) {
     fb = renderer.getWriteTarget();
     originY = renderer.getWriteOriginY();
     clipRows = renderer.getWriteRows();
     mode = renderer.getRenderMode();
+    // Night Mode suppresses grayscale overlays, so its BW image must retain
+    // midtones through dithering instead of leaving an unfinished silhouette.
+    grayscale = imageGrayscale && !renderer.isDisplayInverted();
     displayWidthBytes = renderer.getDisplayWidthBytes();
 
     const int phyW = renderer.getDisplayWidth();
@@ -95,6 +102,7 @@ struct DirectPixelWriter {
   // Call once per row before the column loop.
   // Pre-computes the Y-dependent portion so writePixel() only needs the X part.
   inline void beginRow(int logicalY) {
+    logicalRow = logicalY;
     rowPhyXBase = phyXBase + logicalY * phyXStepY;
     rowPhyYBase = phyYBase + logicalY * phyYStepY;
   }
@@ -108,8 +116,18 @@ struct DirectPixelWriter {
     bool state;
     switch (mode) {
       case GfxRenderer::BW:
-        draw = (pixelValue < 3);
-        state = true;
+        // The grayscale base is a dark silhouette. When it is the final
+        // image, dither the same cached four levels to black/white instead.
+        // Vary the pattern phase by tile so it cannot reinforce the Bayer
+        // pattern already baked into the four-level cache.
+        draw = grayscale
+                   ? pixelValue < 3
+                   : pixelValue * 85 <
+                         bayer4x4[(logicalRow + (logicalX >> 2)) & 3][(logicalX + (logicalRow >> 2)) & 3] * 16 + 8;
+        // Replace white pixels too: a redraw can start from an image whose
+        // polarity was already preserved, rather than a cleared background.
+        state = draw;
+        draw = true;
         break;
       case GfxRenderer::GRAYSCALE_MSB:
         draw = (pixelValue == 1 || pixelValue == 2);

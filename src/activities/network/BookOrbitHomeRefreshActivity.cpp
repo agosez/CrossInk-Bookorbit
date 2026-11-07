@@ -80,7 +80,7 @@ void BookOrbitHomeRefreshActivity::loop() {
 }
 
 void BookOrbitHomeRefreshActivity::render(RenderLock&&) {
-  const char* message = tr(STR_LOADING_POPUP);
+  const char* message = tr(STR_LOADING);
   switch (state) {
     case State::Connecting:
       break;

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <iterator>
 
 // Matches order of PARAGRAPH_ALIGNMENT in CrossPointSettings
 enum class CssTextAlign : uint8_t { Justify = 0, Left = 1, Center = 2, Right = 3, None = 4 };
@@ -78,6 +80,13 @@ enum class CssVerticalAlign : uint8_t { Baseline = 0, Super = 1, Sub = 2 };
 // List markers supported by the EPUB renderer.
 enum class CssListStyleType : uint8_t { Disc = 0, None = 1 };
 
+enum class CssBorderStyle : uint8_t { None, Solid, Double, Dotted, Dashed };
+struct CssBorderSide {
+  uint8_t width = 3;
+  CssBorderStyle style = CssBorderStyle::None;
+  bool visible() const { return width && style != CssBorderStyle::None; }
+};
+
 // Bitmask for tracking which properties have been explicitly set
 struct CssPropertyFlags {
   uint32_t textAlign : 1;
@@ -104,6 +113,12 @@ struct CssPropertyFlags {
   uint32_t fontVariantCaps : 1;
   uint32_t listStyleType : 1;
   uint32_t fontSize : 1;
+  uint32_t border : 1;
+  uint32_t whiteSpace : 1;
+  uint32_t shaded : 1;
+  uint32_t floatLeft : 1;
+  uint32_t initialLetter : 1;
+  uint32_t fontFamily : 1;
 
   CssPropertyFlags()
       : textAlign(0),
@@ -129,13 +144,20 @@ struct CssPropertyFlags {
         pageBreakAfter(0),
         fontVariantCaps(0),
         listStyleType(0),
-        fontSize(0) {}
+        fontSize(0),
+        border(0),
+        whiteSpace(0),
+        shaded(0),
+        floatLeft(0),
+        initialLetter(0),
+        fontFamily(0) {}
 
   [[nodiscard]] bool anySet() const {
-    return fontSize || textAlign || fontStyle || fontWeight || textDecoration || textIndent || marginTop ||
-           marginBottom || marginLeft || marginRight || paddingTop || paddingBottom || paddingLeft || paddingRight ||
-           imageHeight || imageWidth || display || backgroundBlack || verticalAlign || direction || pageBreakBefore ||
-           pageBreakAfter || fontVariantCaps || listStyleType;
+    return fontFamily || shaded || floatLeft || initialLetter || whiteSpace || border || fontSize || textAlign ||
+           fontStyle || fontWeight || textDecoration || textIndent || marginTop || marginBottom || marginLeft ||
+           marginRight || paddingTop || paddingBottom || paddingLeft || paddingRight || imageHeight || imageWidth ||
+           display || backgroundBlack || verticalAlign || direction || pageBreakBefore || pageBreakAfter ||
+           fontVariantCaps || listStyleType;
   }
 
   void clearAll() {
@@ -143,7 +165,8 @@ struct CssPropertyFlags {
     marginTop = marginBottom = marginLeft = marginRight = 0;
     paddingTop = paddingBottom = paddingLeft = paddingRight = 0;
     imageHeight = imageWidth = display = backgroundBlack = verticalAlign = direction = 0;
-    pageBreakBefore = pageBreakAfter = fontVariantCaps = listStyleType = fontSize = 0;
+    pageBreakBefore = pageBreakAfter = fontVariantCaps = listStyleType = fontSize = border = whiteSpace = shaded =
+        floatLeft = initialLetter = fontFamily = 0;
   }
 };
 
@@ -154,6 +177,7 @@ static_assert(sizeof(CssPropertyFlags) <= sizeof(uint32_t),
 // Only stores properties relevant to e-ink text rendering
 // Length values are stored as CssLength (value + unit) for deferred resolution
 struct CssStyle {
+  uint32_t fontFamily = 0;
   CssTextAlign textAlign = CssTextAlign::Left;
   CssFontStyle fontStyle = CssFontStyle::Normal;
   CssFontWeight fontWeight = CssFontWeight::Normal;
@@ -174,17 +198,68 @@ struct CssStyle {
   CssLength imageHeight;    // Height for img (e.g. 2em) – width derived from aspect ratio when only height set
   CssLength imageWidth;     // Width for img when both or only width set
   CssDisplay display = CssDisplay::Block;
+  CssBorderSide borders[4];  // top, right, bottom, left; shares the existing defined edge masks
+  bool shaded = false;
+  bool floatLeft = false;
+  uint8_t initialLetter = 0;
+  bool hasVisibleBorder() const {
+    return std::any_of(std::begin(borders), std::end(borders),
+                       [](const CssBorderSide& side) { return side.visible(); });
+  }
+  bool preserveWhitespace = false;
   bool backgroundBlack = false;                                 // Simple black inline/block background support
   CssVerticalAlign verticalAlign = CssVerticalAlign::Baseline;  // vertical-align (super/sub positioning)
   bool pageBreakBefore = false;
   bool pageBreakAfter = false;
   CssListStyleType listStyleType = CssListStyleType::Disc;
 
+  // Four edge bits (top/right/bottom/left). Track style and width separately so
+  // later declarations can restore one without losing suppression by the other.
+  uint8_t borderStyleSuppressed = 0;
+  uint8_t borderWidthSuppressed = 0;
+  uint8_t borderStyleDefined = 0;
+  uint8_t borderWidthDefined = 0;
+
+  [[nodiscard]] bool suppressesHorizontalRule() const {
+    return (borderStyleSuppressed | borderWidthSuppressed) == 0x0F;
+  }
+
   CssPropertyFlags defined;  // Tracks which properties were explicitly set
 
   // Apply properties from another style, only overwriting if the other style
   // has that property explicitly defined
   void applyOver(const CssStyle& base) {
+    if (base.defined.fontFamily) {
+      fontFamily = base.fontFamily;
+      defined.fontFamily = 1;
+    }
+    if (base.defined.shaded) {
+      shaded = base.shaded;
+      defined.shaded = 1;
+    }
+    if (base.defined.floatLeft) {
+      floatLeft = base.floatLeft;
+      defined.floatLeft = 1;
+    }
+    if (base.defined.initialLetter) {
+      initialLetter = base.initialLetter;
+      defined.initialLetter = 1;
+    }
+    if (base.hasWhiteSpace()) {
+      preserveWhitespace = base.preserveWhitespace;
+      defined.whiteSpace = 1;
+    }
+    if (base.defined.border) {
+      for (size_t edge = 0; edge < 4; ++edge) {
+        if (base.borderStyleDefined & (1u << edge)) borders[edge].style = base.borders[edge].style;
+        if (base.borderWidthDefined & (1u << edge)) borders[edge].width = base.borders[edge].width;
+      }
+      borderStyleSuppressed = (borderStyleSuppressed & ~base.borderStyleDefined) | base.borderStyleSuppressed;
+      borderWidthSuppressed = (borderWidthSuppressed & ~base.borderWidthDefined) | base.borderWidthSuppressed;
+      borderStyleDefined |= base.borderStyleDefined;
+      borderWidthDefined |= base.borderWidthDefined;
+      defined.border = 1;
+    }
     if (base.hasFontSize()) {
       fontSize = base.fontSize;
       defined.fontSize = 1;
@@ -283,6 +358,7 @@ struct CssStyle {
     }
   }
 
+  [[nodiscard]] bool hasWhiteSpace() const { return defined.whiteSpace; }
   [[nodiscard]] bool hasFontSize() const { return defined.fontSize; }
   [[nodiscard]] bool hasTextAlign() const { return defined.textAlign; }
   [[nodiscard]] bool hasFontStyle() const { return defined.fontStyle; }
@@ -308,23 +384,5 @@ struct CssStyle {
   [[nodiscard]] bool hasFontVariantCaps() const { return defined.fontVariantCaps; }
   [[nodiscard]] bool hasListStyleType() const { return defined.listStyleType; }
 
-  void reset() {
-    textAlign = CssTextAlign::Left;
-    fontStyle = CssFontStyle::Normal;
-    fontWeight = CssFontWeight::Normal;
-    textDecoration = CssTextDecoration::None;
-    direction = CssTextDirection::Ltr;
-    fontVariantCaps = CssFontVariantCaps::Normal;
-    textIndent = CssLength{};
-    marginTop = marginBottom = marginLeft = marginRight = CssLength{};
-    paddingTop = paddingBottom = paddingLeft = paddingRight = CssLength{};
-    imageHeight = imageWidth = CssLength{};
-    display = CssDisplay::Block;
-    backgroundBlack = false;
-    verticalAlign = CssVerticalAlign::Baseline;
-    pageBreakBefore = false;
-    pageBreakAfter = false;
-    listStyleType = CssListStyleType::Disc;
-    defined.clearAll();
-  }
+  void reset() { *this = CssStyle{}; }
 };

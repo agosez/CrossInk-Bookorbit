@@ -1,11 +1,14 @@
 #include "SettingsList.h"
 
+#include "sync/DocumentMatching.h"
+#include "util/ImageDisplayMode.h"
+
 const std::vector<SettingInfo>& getBaseSettingsList() {
   static const std::vector<SettingInfo> baseList = [] {
     std::vector<SettingInfo> v;
     // Reserve the maximum final size. Growing this process-lifetime vector
     // would otherwise leave it holding roughly twice the memory it needs.
-    v.reserve(BASE_SETTINGS_CAPACITY);
+    v.reserve(getBaseSettingsCapacity());
     auto add = [&v](SettingInfo setting) { v.push_back(std::move(setting)); };
 
     // --- Display ---
@@ -17,9 +20,6 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
                           "sleepScreenCoverFilter", StrId::STR_CAT_DISPLAY));
     add(SettingInfo::Toggle(StrId::STR_QUICK_RESUME_TIMEOUT, &CrossPointSettings::quickResumeSleepScreen,
                             "quickResumeSleepScreen", StrId::STR_CAT_DISPLAY));
-    add(SettingInfo::Enum(StrId::STR_HIDE_BATTERY, &CrossPointSettings::hideBatteryPercentage,
-                          {StrId::STR_NEVER, StrId::STR_IN_READER, StrId::STR_ALWAYS}, "hideBatteryPercentage",
-                          StrId::STR_CAT_DISPLAY));
     add(SettingInfo::Enum(StrId::STR_HIDE_CLOCK, &CrossPointSettings::hideClock,
                           {StrId::STR_NEVER, StrId::STR_IN_READER, StrId::STR_ALWAYS}, "hideClock",
                           StrId::STR_CAT_DISPLAY)
@@ -32,7 +32,7 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
             .withEnumRawValues({CrossPointSettings::REFRESH_1, CrossPointSettings::REFRESH_5,
                                 CrossPointSettings::REFRESH_10, CrossPointSettings::REFRESH_15,
                                 CrossPointSettings::REFRESH_30, CrossPointSettings::REFRESH_NEVER}));
-    add(SettingInfo::Toggle(StrId::STR_NIGHT_MODE, &CrossPointSettings::screenInverted, "screenInverted",
+    add(SettingInfo::Toggle(StrId::STR_READER_DARK_MODE, &CrossPointSettings::screenInverted, "screenInverted",
                             StrId::STR_CAT_DISPLAY));
     add(SettingInfo::Enum(StrId::STR_UI_THEME, &CrossPointSettings::uiTheme,
                           {StrId::STR_THEME_CLASSIC, StrId::STR_THEME_MINIMAL, StrId::STR_THEME_DASHBOARD,
@@ -84,6 +84,9 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
                            "lineHeightPercent", StrId::STR_CAT_READER));
     add(SettingInfo::Value(StrId::STR_WORD_SPACING, &CrossPointSettings::wordSpacing,
                            {0, CrossPointSettings::MAX_WORD_SPACING, 1}, "wordSpacing", StrId::STR_CAT_READER));
+    add(SettingInfo::Value(StrId::STR_CHARACTER_SPACING, &CrossPointSettings::characterSpacing,
+                           {0, CrossPointSettings::MAX_CHARACTER_SPACING, 1}, "characterSpacing",
+                           StrId::STR_CAT_READER));
     add(SettingInfo::Enum(
             StrId::STR_ORIENTATION, &CrossPointSettings::orientation,
             {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_LANDSCAPE_CCW, StrId::STR_ORIENTATION_INVERTED},
@@ -103,19 +106,26 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
                             "publisherPageNumbers", StrId::STR_CAT_READER));
     add(SettingInfo::Enum(
         StrId::STR_PARA_ALIGNMENT, &CrossPointSettings::paragraphAlignment,
-        {StrId::STR_JUSTIFY, StrId::STR_ALIGN_LEFT, StrId::STR_CENTER, StrId::STR_ALIGN_RIGHT, StrId::STR_BOOK_S_STYLE},
+        {StrId::STR_JUSTIFY, StrId::STR_DIR_LEFT, StrId::STR_CENTER, StrId::STR_DIR_RIGHT, StrId::STR_BOOK_S_STYLE},
         "paragraphAlignment", StrId::STR_CAT_READER));
+#if CROSSINK_SCALABLE_FONTS
+    add(SettingInfo::Enum(StrId::STR_PUBLISHER_FONTS, &CrossPointSettings::publisherFonts,
+                          {StrId::STR_OFF, StrId::STR_PUBLISHER_FONTS_ACCENTS, StrId::STR_PUBLISHER_FONTS_ALL},
+                          "publisherFonts", StrId::STR_CAT_READER));
+#endif
     add(SettingInfo::Toggle(StrId::STR_EMBEDDED_STYLE, &CrossPointSettings::embeddedStyle, "embeddedStyle",
                             StrId::STR_CAT_READER));
     add(SettingInfo::Toggle(StrId::STR_HYPHENATION, &CrossPointSettings::hyphenationEnabled, "hyphenationEnabled",
                             StrId::STR_CAT_READER));
     add(SettingInfo::Toggle(StrId::STR_TEXT_AA, &CrossPointSettings::textAntiAliasing, "textAntiAliasing",
                             StrId::STR_CAT_READER));
-    add(SettingInfo::Enum(StrId::STR_IMAGES, &CrossPointSettings::imageRendering,
-                          {StrId::STR_IMAGES_DISPLAY, StrId::STR_IMAGES_PLACEHOLDER, StrId::STR_IMAGES_SUPPRESS},
-                          "imageRendering", StrId::STR_CAT_READER));
-    add(SettingInfo::Toggle(StrId::STR_TOUCH_READER_CONTROLS, &CrossPointSettings::touchReaderControls,
-                            "touchReaderControls", StrId::STR_CAT_READER));
+    add(SettingInfo::DynamicEnum(
+        StrId::STR_IMAGES,
+        {StrId::STR_IMAGES_DISPLAY, StrId::STR_IMAGES_DISPLAY_BW, StrId::STR_IMAGES_PLACEHOLDER,
+         StrId::STR_IMAGES_SUPPRESS},
+        [] { return ImageDisplayMode::selected(SETTINGS.imageRendering, SETTINGS.imageGrayscale); },
+        [](const uint8_t mode) { ImageDisplayMode::apply(mode, SETTINGS.imageRendering, SETTINGS.imageGrayscale); },
+        "imageRendering", StrId::STR_CAT_READER));
     add(SettingInfo::Toggle(StrId::STR_DISABLE_TOUCHSCREEN, &CrossPointSettings::disableReaderTouchscreen,
                             "disableReaderTouchscreen", StrId::STR_CAT_READER));
     add(SettingInfo::Toggle(StrId::STR_EXTRA_SPACING, &CrossPointSettings::extraParagraphSpacing,
@@ -140,9 +150,19 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
     add(SettingInfo::Toggle(StrId::STR_TWO_FINGER_ROTATION, &CrossPointSettings::twoFingerRotationEnabled,
                             "twoFingerRotationEnabled", StrId::STR_CAT_CONTROLS));
     const std::vector<StrId> twoFingerSwipeActions = {
-        StrId::STR_NOT_SET,          StrId::STR_INCREASE_BRIGHTNESS, StrId::STR_DECREASE_BRIGHTNESS,
-        StrId::STR_INCREASE_WARMTH,  StrId::STR_DECREASE_WARMTH,     StrId::STR_NEXT_CHAPTER,
-        StrId::STR_PREVIOUS_CHAPTER, StrId::STR_INCREASE_FONT_SIZE,  StrId::STR_DECREASE_FONT_SIZE,
+        StrId::STR_NOT_SET,
+        StrId::STR_INCREASE_BRIGHTNESS,
+        StrId::STR_DECREASE_BRIGHTNESS,
+        StrId::STR_INCREASE_WARMTH,
+        StrId::STR_DECREASE_WARMTH,
+        StrId::STR_NEXT_CHAPTER,
+        StrId::STR_PREVIOUS_CHAPTER,
+        StrId::STR_INCREASE_FONT_SIZE,
+        StrId::STR_DECREASE_FONT_SIZE,
+        StrId::STR_BACK_HOME,
+        StrId::STR_HOME_READER,
+        StrId::STR_SELECT_CHAPTER,
+        StrId::STR_DISABLE_PAGE_TURN_GESTURES,
     };
     const std::vector<uint8_t> twoFingerSwipeActionValues = {
         CrossPointSettings::TWO_FINGER_SWIPE_NOT_SET,
@@ -154,6 +174,10 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
         CrossPointSettings::TWO_FINGER_SWIPE_PREVIOUS_CHAPTER,
         CrossPointSettings::TWO_FINGER_SWIPE_INCREASE_FONT_SIZE,
         CrossPointSettings::TWO_FINGER_SWIPE_DECREASE_FONT_SIZE,
+        CrossPointSettings::TWO_FINGER_SWIPE_BACK_HOME,
+        CrossPointSettings::TWO_FINGER_SWIPE_HOME_READER,
+        CrossPointSettings::TWO_FINGER_SWIPE_SELECT_CHAPTER,
+        CrossPointSettings::TWO_FINGER_SWIPE_TOGGLE_PAGE_TURN_GESTURES,
     };
     add(SettingInfo::Enum(StrId::STR_TWO_FINGER_SWIPE_UP, &CrossPointSettings::twoFingerSwipeUp, twoFingerSwipeActions,
                           "twoFingerSwipeUp", StrId::STR_CAT_CONTROLS)
@@ -193,12 +217,7 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
     add(SettingInfo::Enum(StrId::STR_ORIENTATION_AWARE, &CrossPointSettings::frontButtonOrientationAware,
                           {StrId::STR_NO, StrId::STR_NAV_BUTTONS, StrId::STR_ALL_BUTTONS},
                           "frontButtonOrientationAware", StrId::STR_CAT_CONTROLS));
-    add(SettingInfo::Enum(StrId::STR_LONG_PRESS_ACTION, &CrossPointSettings::longPressButtonBehavior,
-                          {StrId::STR_LONG_PRESS_BEHAVIOR_OFF, StrId::STR_LONG_PRESS_BEHAVIOR_SKIP,
-                           StrId::STR_CHANGE_FONT_SIZE, StrId::STR_LONG_PRESS_BEHAVIOR_ORIENTATION},
-                          "longPressButtonBehavior", StrId::STR_CAT_CONTROLS)
-            .withEnumRawValues({CrossPointSettings::OFF, CrossPointSettings::CHAPTER_SKIP,
-                                CrossPointSettings::FONT_SIZE_CHANGE, CrossPointSettings::ORIENTATION_CHANGE}));
+
     add(buildShortcutSetting(StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn, "shortPwrBtn",
                              ShortcutOptionCatalog::PowerButton));
     add(buildShortcutSetting(StrId::STR_LONG_PRESS_ACTION, &CrossPointSettings::longPwrBtn, "longPwrBtn",
@@ -217,10 +236,14 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
                                      "homeButtonDoubleTapAction"));
     add(buildHomeButtonActionSetting(StrId::STR_LONG_PRESS_ACTION, &CrossPointSettings::homeButtonLongPressAction,
                                      "homeButtonLongPressAction"));
-    add(buildShortcutSetting(StrId::STR_LONG_PRESS_MENU_ACTION, &CrossPointSettings::longPressMenuAction,
-                             "longPressMenuAction", ShortcutOptionCatalog::LongPress));
+    add(buildSideButtonActionSetting(StrId::STR_LONG_PRESS_LEFT_ACTION, &CrossPointSettings::frontButtonLeftLong,
+                                     "frontButtonLeftLong"));
+    add(buildSideButtonActionSetting(StrId::STR_LONG_PRESS_RIGHT_ACTION, &CrossPointSettings::frontButtonRightLong,
+                                     "frontButtonRightLong"));
     add(buildShortcutSetting(StrId::STR_LONG_PRESS_BACK_ACTION, &CrossPointSettings::longPressBackAction,
                              "longPressBackAction", ShortcutOptionCatalog::LongPress));
+    add(buildShortcutSetting(StrId::STR_LONG_PRESS_MENU_ACTION, &CrossPointSettings::longPressMenuAction,
+                             "longPressMenuAction", ShortcutOptionCatalog::LongPress));
     add(SettingInfo::Toggle(StrId::STR_PWR_BTN_FOOTNOTE_BACK, &CrossPointSettings::pwrBtnFootnoteBack,
                             "pwrBtnFootnoteBack", StrId::STR_CAT_CONTROLS));
     add(SettingInfo::Enum(StrId::STR_NEXT_PAGE, &CrossPointSettings::pageTurnGesture,
@@ -234,7 +257,24 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
     add(SettingInfo::Toggle(StrId::STR_TAP_HIDE_STATUS_BAR, &CrossPointSettings::tapToHideStatusBar,
                             "tapToHideStatusBar", StrId::STR_CAT_CONTROLS));
 
+    add(SettingInfo::Enum(StrId::STR_MENU_NAVIGATION, &CrossPointSettings::menuNavigation,
+                          {StrId::STR_MENU_DIRECTIONAL, StrId::STR_MENU_CLASSIC}, "menuNavigation",
+                          StrId::STR_CAT_CONTROLS));
+
+#if FREEINK_DEVICE_PICCO
+    add(SettingInfo::Enum(
+        StrId::STR_SLIDE_SWITCH, &CrossPointSettings::slideSwitchAction,
+        {StrId::STR_FRONTLIGHT, StrId::STR_READER_DARK_MODE, StrId::STR_TOGGLE_TOUCHSCREEN, StrId::STR_TILT_PAGE_TURN},
+        "slideSwitchAction", StrId::STR_CAT_CONTROLS));
+#endif
+
     // --- System ---
+    add(SettingInfo::Enum(StrId::STR_WIFI_TRANSMIT_POWER, &CrossPointSettings::wifiTransmitPower,
+                          {StrId::STR_DEFAULT_VALUE, StrId::STR_WIFI_TX_POWER_15, StrId::STR_WIFI_TX_POWER_8_5,
+                           StrId::STR_WIFI_TX_POWER_5, StrId::STR_WIFI_TX_POWER_2},
+                          "wifiTransmitPower", StrId::STR_CAT_SYSTEM)
+            .withEnumRawValues(std::vector<uint8_t>(std::begin(WifiTransmitPower::TRANSMIT_POWER_LEVELS),
+                                                    std::end(WifiTransmitPower::TRANSMIT_POWER_LEVELS))));
     add(SettingInfo::String(StrId::STR_DEVICE_NAME, SETTINGS.deviceName, sizeof(SETTINGS.deviceName), "deviceName",
                             StrId::STR_CAT_SYSTEM));
     add(SettingInfo::Value(
@@ -258,7 +298,7 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
                             StrId::STR_CAT_SYSTEM));
     // Persisted and available to the web settings API, but category-less because
     // the on-device editor lives under System > OPDS Servers.
-    add(SettingInfo::String(StrId::STR_OPDS_DOWNLOAD_FOLDER, SETTINGS.opdsDownloadFolder,
+    add(SettingInfo::String(StrId::STR_OPDS_DEFAULT_FOLDER, SETTINGS.opdsDownloadFolder,
                             sizeof(SETTINGS.opdsDownloadFolder), "opdsDownloadFolder"));
     // Persisted here, but edited from the nearby receive screen's folder picker.
     add(SettingInfo::String(StrId::STR_NEARBY_RECEIVE_FOLDER, SETTINGS.nearbyReceiveFolder,
@@ -280,48 +320,72 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
     add(SettingInfo::Toggle(StrId::STR_FRONTLIGHT, &CrossPointSettings::frontlightOn, "frontlightOn"));
 
     // --- KOReader Sync (web-only, uses KOReaderCredentialStore) ---
-    // Credentials only: koMatchMethod below stays in every build because
+    // Account and server only: koMatchMethod below stays in every build because
     // Nearby Position Sync reads it to choose its coordinate space.
 #if CROSSINK_APP_CAP_KOREADER_SYNC
+    add(SettingInfo::DynamicEnum(
+        StrId::STR_SERVER_TYPE, {StrId::STR_CROSSPOINT, StrId::STR_KOSYNC_SERVER, StrId::STR_OTHER},
+        [] { return static_cast<uint8_t>(KOREADER_STORE.getServerType()); },
+        [](uint8_t value) {
+          KOREADER_STORE.setServerType(static_cast<KOReaderServerType>(value));
+          KOREADER_STORE.saveToFile();
+        },
+        "koServerType", StrId::STR_SYNC_SERVER));
+    add(SettingInfo::DynamicString(
+        StrId::STR_CUSTOM_HEADER_1, [] { return formatHttpHeaderLine(KOREADER_STORE.getCustomHeaders()[0], true); },
+        [](const std::string& value) {
+          if (value == formatHttpHeaderLine(KOREADER_STORE.getCustomHeaders()[0], true)) return;
+          HttpHeader header;
+          if (parseHttpHeaderLine(value, header) && KOREADER_STORE.setCustomHeader(0, header.name, header.value))
+            KOREADER_STORE.saveToFile();
+        },
+        "koCustomHeader1", StrId::STR_SYNC_SERVER));
+    add(SettingInfo::DynamicString(
+        StrId::STR_CUSTOM_HEADER_2, [] { return formatHttpHeaderLine(KOREADER_STORE.getCustomHeaders()[1], true); },
+        [](const std::string& value) {
+          if (value == formatHttpHeaderLine(KOREADER_STORE.getCustomHeaders()[1], true)) return;
+          HttpHeader header;
+          if (parseHttpHeaderLine(value, header) && KOREADER_STORE.setCustomHeader(1, header.name, header.value))
+            KOREADER_STORE.saveToFile();
+        },
+        "koCustomHeader2", StrId::STR_SYNC_SERVER));
     add(SettingInfo::DynamicString(
         StrId::STR_KOREADER_USERNAME, [] { return KOREADER_STORE.getUsername(); },
         [](const std::string& v) {
           KOREADER_STORE.setCredentials(v, KOREADER_STORE.getPassword());
           KOREADER_STORE.saveToFile();
         },
-        "koUsername", StrId::STR_KOREADER_SYNC));
+        "koUsername", StrId::STR_SYNC_SERVER));
     add(SettingInfo::DynamicString(
         StrId::STR_KOREADER_PASSWORD, [] { return KOREADER_STORE.getPassword(); },
         [](const std::string& v) {
           KOREADER_STORE.setCredentials(KOREADER_STORE.getUsername(), v);
           KOREADER_STORE.saveToFile();
         },
-        "koPassword", StrId::STR_KOREADER_SYNC));
+        "koPassword", StrId::STR_SYNC_SERVER));
     add(SettingInfo::DynamicString(
         StrId::STR_SYNC_SERVER_URL, [] { return KOREADER_STORE.getServerUrl(); },
         [](const std::string& v) {
           KOREADER_STORE.setServerUrl(v);
           KOREADER_STORE.saveToFile();
         },
-        "koServerUrl", StrId::STR_KOREADER_SYNC));
+        "koServerUrl", StrId::STR_SYNC_SERVER));
 #endif
     add(SettingInfo::DynamicEnum(
         StrId::STR_DOCUMENT_MATCHING, {StrId::STR_FILENAME, StrId::STR_BINARY},
         [] { return static_cast<uint8_t>(KOREADER_STORE.getMatchMethod()); },
-        [](uint8_t v) {
-          KOREADER_STORE.setMatchMethod(static_cast<DocumentMatchMethod>(v));
-          KOREADER_STORE.saveToFile();
-        },
-        "koMatchMethod", StrId::STR_KOREADER_SYNC));
+        // The web settings page warns before saving a change.
+        [](uint8_t v) { DocumentMatching::set(static_cast<DocumentMatchMethod>(v)); }, "koMatchMethod",
+        StrId::STR_SYNC_SERVER));
 #if CROSSINK_APP_CAP_KOREADER_SYNC
     add(SettingInfo::DynamicEnum(
-        StrId::STR_SEND_METADATA, {StrId::STR_STATE_OFF, StrId::STR_STATE_ON},
+        StrId::STR_SEND_METADATA, {StrId::STR_OFF, StrId::STR_ON},
         [] { return static_cast<uint8_t>(KOREADER_STORE.getSendMetadata()); },
         [](uint8_t v) {
           KOREADER_STORE.setSendMetadata(v != 0);
           KOREADER_STORE.saveToFile();
         },
-        "koSendMetadata", StrId::STR_KOREADER_SYNC));
+        "koSendMetadata", StrId::STR_SYNC_SERVER));
 
     add(SettingInfo::DynamicEnum(
         StrId::STR_SYNC_BEHAVIOR, {StrId::STR_ASK_EVERY_TIME, StrId::STR_SMART_SYNC},
@@ -330,7 +394,7 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
           KOREADER_STORE.setSyncBehavior(static_cast<KOReaderSyncBehavior>(v));
           KOREADER_STORE.saveToFile();
         },
-        "koSyncBehavior", StrId::STR_KOREADER_SYNC));
+        "koSyncBehavior", StrId::STR_SYNC_SERVER));
 #endif
 
     // --- BookOrbit Sync (web-only, uses BookOrbitCredentialStore) ---
@@ -380,7 +444,7 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
         },
         "boSyncBehavior", StrId::STR_BOOKORBIT_SYNC));
     add(SettingInfo::DynamicEnum(
-        StrId::STR_BOOKORBIT_SYNC_ON_SLEEP, {StrId::STR_STATE_OFF, StrId::STR_STATE_ON},
+        StrId::STR_BOOKORBIT_SYNC_ON_SLEEP, {StrId::STR_OFF, StrId::STR_ON},
         [] { return static_cast<uint8_t>(BOOKORBIT_STORE.getSyncOnSleep()); },
         [](uint8_t v) {
           BOOKORBIT_STORE.setSyncOnSleep(v != 0);
@@ -421,6 +485,12 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
     add(SettingInfo::Enum(StrId::STR_XTC_STATUS_BAR, &CrossPointSettings::xtcStatusBarMode,
                           {StrId::STR_HIDE, StrId::STR_BOTTOM, StrId::STR_TOP, StrId::STR_STATUS_BAR_BOTH},
                           "xtcStatusBarMode", StrId::STR_STATUS_BARS));
+    add(SettingInfo::Enum(StrId::STR_STATUS_BAR_TEXT_SIZE, &CrossPointSettings::statusBarTextSize,
+                          {StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE}, "statusBarTextSize",
+                          StrId::STR_STATUS_BARS));
+    add(SettingInfo::Enum(StrId::STR_STATUS_BAR_TEXT_SIZE, &CrossPointSettings::displayStatusBarTextSize,
+                          {StrId::STR_SMALL, StrId::STR_MEDIUM, StrId::STR_LARGE}, "displayStatusBarTextSize",
+                          StrId::STR_CAT_DISPLAY));
     // Clock detail entries live under System > Device in the device UI.
     // Range 0..104 = quarter-hour steps from UTC-12:00 to UTC+14:00, biased by 48.
     add(SettingInfo::Value(StrId::STR_CLOCK_UTC_OFFSET, &CrossPointSettings::clockUtcOffsetQ, {0, 104, 1},
@@ -445,15 +515,15 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
     // on next WiFi connect, which is useful when crossing time zones.
     add(SettingInfo::Toggle(StrId::STR_CLOCK_SYNCED, &CrossPointSettings::clockHasBeenSynced, "clockHasBeenSynced",
                             StrId::STR_CAT_SYSTEM));
-    // Only show tilt page turn settings when the active device has a supported IMU.
-    if (QuickActions::supportsTiltPageTurn()) {
+    // Keep persisted preferences even when the IMU fails its startup probe.
+    {
       auto shortPowerButtonIt = std::find_if(
           v.begin(), v.end(), [](const SettingInfo& setting) { return settingKeyIs(setting, "shortPwrBtn"); });
       if (shortPowerButtonIt != v.end()) {
         auto insertPos = v.insert(shortPowerButtonIt + 1,
                                   SettingInfo::Toggle(StrId::STR_TILT_PAGE_TURN, &CrossPointSettings::tiltPageTurn,
                                                       "tiltPageTurn", StrId::STR_CAT_CONTROLS));
-        v.insert(
+        insertPos = v.insert(
             insertPos + 1,
             SettingInfo::Enum(StrId::STR_TILT_PAGE_TURN_DIRECTION, &CrossPointSettings::tiltPageTurnDirection,
 #if CROSSINK_APP_DEVICE_X4CLASSIC || defined(SIMULATOR_DEVICE_X4_CLASSIC)
@@ -466,15 +536,9 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
                                StrId::STR_TILT_DIRECTION_FORWARD_BACK, StrId::STR_TILT_DIRECTION_FORWARD_BACK_INVERTED},
 #endif
                               "tiltPageTurnDirection", StrId::STR_CAT_CONTROLS));
-      }
-    } else {
-      for (auto& setting : v) {
-        if (settingKeyIs(setting, "shortPwrBtn") || settingKeyIs(setting, "longPwrBtn")) {
-          removeEnumRawValue(setting, static_cast<uint8_t>(CrossPointSettings::TOGGLE_TILT_PAGE_TURN));
-        } else if (setting.nameId == StrId::STR_LONG_PRESS_MENU_ACTION ||
-                   setting.nameId == StrId::STR_LONG_PRESS_BACK_ACTION) {
-          removeEnumRawValue(setting, static_cast<uint8_t>(CrossPointSettings::LONG_MENU_TOGGLE_TILT_PAGE_TURN));
-        }
+        v.insert(insertPos + 1,
+                 SettingInfo::Toggle(StrId::STR_TILT_NEXT_PAGE_ONLY, &CrossPointSettings::tiltNextPageOnly,
+                                     "tiltNextPageOnly", StrId::STR_CAT_CONTROLS));
       }
     }
 

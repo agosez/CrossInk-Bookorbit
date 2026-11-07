@@ -2,56 +2,67 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 
 #include "HyphenationCommon.h"
-#include "generated/hyph-de.trie.h"
 #include "generated/hyph-en.trie.h"
-#include "generated/hyph-es.trie.h"
-#include "generated/hyph-fr.trie.h"
-#include "generated/hyph-it.trie.h"
-#include "generated/hyph-pl.trie.h"
-#include "generated/hyph-pt.trie.h"
-#include "generated/hyph-ru.trie.h"
-#include "generated/hyph-sv.trie.h"
-#include "generated/hyph-uk.trie.h"
 
 namespace {
 
 // English hyphenation patterns (3/3 minimum prefix/suffix length)
 LanguageHyphenator englishHyphenator(en_patterns, isLatinLetter, toLowerLatin, 3, 3);
-LanguageHyphenator frenchHyphenator(fr_patterns, isLatinLetter, toLowerLatin);
-LanguageHyphenator germanHyphenator(de_patterns, isLatinLetter, toLowerLatin);
-LanguageHyphenator russianHyphenator(ru_patterns, isCyrillicLetter, toLowerCyrillic);
-LanguageHyphenator spanishHyphenator(es_patterns, isLatinLetter, toLowerLatin);
-LanguageHyphenator italianHyphenator(it_patterns, isLatinLetter, toLowerLatin);
-LanguageHyphenator swedishHyphenator(sv_patterns, isLatinLetter, toLowerLatin);
-LanguageHyphenator ukrainianHyphenator(uk_patterns, isCyrillicLetter, toLowerCyrillic);
-LanguageHyphenator polishHyphenator(pl_patterns, isLatinLetter, toLowerLatin);
-LanguageHyphenator portugueseHyphenator(pt_patterns, isLatinLetter, toLowerLatin);
 
 using EntryArray = std::array<LanguageEntry, 10>;
 
 const EntryArray& entries() {
   static const EntryArray kEntries = {{{"english", "en", &englishHyphenator},
-                                       {"french", "fr", &frenchHyphenator},
-                                       {"german", "de", &germanHyphenator},
-                                       {"russian", "ru", &russianHyphenator},
-                                       {"spanish", "es", &spanishHyphenator},
-                                       {"italian", "it", &italianHyphenator},
-                                       {"polish", "pl", &polishHyphenator},
-                                       {"portuguese", "pt", &portugueseHyphenator},
-                                       {"swedish", "sv", &swedishHyphenator},
-                                       {"ukrainian", "uk", &ukrainianHyphenator}}};
+                                       {"french", "fr", nullptr},
+                                       {"german", "de", nullptr},
+                                       {"russian", "ru", nullptr},
+                                       {"spanish", "es", nullptr},
+                                       {"italian", "it", nullptr},
+                                       {"polish", "pl", nullptr},
+                                       {"portuguese", "pt", nullptr},
+                                       {"swedish", "sv", nullptr},
+                                       {"ukrainian", "uk", nullptr}}};
   return kEntries;
 }
 
+ExternalHyphenationLookup externalLookup = nullptr;
+SerializedHyphenationPatterns externalPatterns{0, nullptr, 0};
+LanguageHyphenator externalHyphenator(externalPatterns, isLatinLetter, toLowerLatin);
+
 }  // namespace
 
+// Adapted from CrossPoint Reader PR #3706 (MIT): external pattern provider.
+void setExternalHyphenationLookup(ExternalHyphenationLookup lookup) { externalLookup = lookup; }
+
+const LanguageEntry* findLanguageEntry(const char* primaryTag) {
+  if (!primaryTag) return nullptr;
+  for (const auto& entry : entries())
+    if (!std::strcmp(primaryTag, entry.primaryTag)) return &entry;
+  return nullptr;
+}
+
 const LanguageHyphenator* getLanguageHyphenatorForPrimaryTag(const std::string& primaryTag) {
-  const auto& allEntries = entries();
-  const auto it = std::find_if(allEntries.begin(), allEntries.end(),
-                               [&primaryTag](const LanguageEntry& entry) { return primaryTag == entry.primaryTag; });
-  return (it != allEntries.end()) ? it->hyphenator : nullptr;
+  const auto* entry = findLanguageEntry(primaryTag.c_str());
+  if (!entry) return nullptr;
+  if (entry->hyphenator) return entry->hyphenator;
+  ExternalHyphenationPatterns found{};
+  if (!externalLookup || !externalLookup(entry->primaryTag, found)) return nullptr;
+  externalPatterns = found.patterns;
+  const bool cyrillic = primaryTag == "ru" || primaryTag == "uk";
+  externalHyphenator.configure(cyrillic ? isCyrillicLetter : isLatinLetter, cyrillic ? toLowerCyrillic : toLowerLatin);
+  return &externalHyphenator;
+}
+
+uint32_t getLanguagePatternIdentity(const char* primaryTag) {
+  const auto* entry = findLanguageEntry(primaryTag);
+  if (!entry) return 0;
+  // Built-in pattern changes already require the section format version bump.
+  if (entry->hyphenator) return 1;
+  ExternalHyphenationPatterns found{};
+  return externalLookup && externalLookup(entry->primaryTag, found) ? found.identity : 0;
 }
 
 LanguageEntryView getLanguageEntries() {

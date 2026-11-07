@@ -2,7 +2,7 @@
 
 Everything else — fonts, themes, reader features, reading stats, controls, the web server — comes from CrossInk unchanged, with one exception: KOReader Sync is removed to make room (see below). See the [upstream README](https://github.com/uxjulia/CrossInk#readme) for those, and the [docs](./docs/) folder in this repository for the detailed guides.
 
-**Note**: this fork publishes releases for the Xteink X3, X4, X4 Pro and X4 Classic, and the Seeed reTerminal Sticky.
+**Note**: this fork publishes releases for the Xteink X3, X4, X4 Pro and X4 Classic, the Seeed reTerminal Sticky and the BOOX Picco.
 
 ---
 
@@ -15,7 +15,7 @@ Everything else — fonts, themes, reader features, reading stats, controls, the
 - **Offline shortcuts to your own books** — "On device" and "In progress" categories that open a book directly, without touching the network.
 - **Reading statistics pushed to BookOrbit** — your reading time, streaks and pace on the server's dashboard, fed by the pages you turn on the device.
 - **A working clock on the X4** — the status-bar clock, which upstream can only show on hardware that has a clock chip, plus an opt-in mode that keeps the time running through sleep.
-- **KOReader Sync is removed** — its screens, settings and shortcut are gone. The X3/X4 firmware gets a 6.5 MB partition, and this fork's BookOrbit layer plus CrossInk's own growth stopped fitting in it; dropping the second sync provider is what buys the room. Credentials already saved on the SD card are left alone, simply unread.
+- **KOReader Sync is removed** — CrossInk v2.0.0 renamed it Sync Server and added reading-stats and clippings sync to it; its screens, settings, shortcut and sync actions (Sync Book, Sync Folder, Sync Books) are gone. The X3/X4 firmware gets a 6.5 MB partition, and this fork's BookOrbit layer plus CrossInk's own growth stopped fitting in it; dropping the second sync provider is what buys the room. Credentials already saved on the SD card are left alone: an account set up before the removal keeps the sync actions, but cannot be changed on the device.
 
 BookOrbit exposes a KOReader-compatible sync API, so this fork talks to it the same way the official BookOrbit KOReader plugin does. Your BookOrbit server must be recent enough to serve the KOReader plugin endpoints under `{server}/api/v1/koreader` — including `plugin/catalog/*` for the catalog browser and `plugin/annotations/*` / `plugin/bookmarks/*` for highlight and bookmark sync (servers without those are detected, and the missing steps are simply skipped).
 
@@ -279,7 +279,11 @@ It also decides how faithful your uploaded reading-session timestamps are — se
 
 Download the `firmware-*.bin` for your device from **this repository's** [releases page](https://github.com/agosez/CrossInk-Bookorbit/releases) — not upstream's, which does not include BookOrbit support. CrossInk's own web installer only offers upstream builds, so flash the file as a custom firmware with the [CrossPoint flash tools](https://crosspointreader.com/#flash-tools), from the command line, or from the SD card — [Installation](./docs/installation.md) walks through each path, including USB-locked devices and reverting to upstream CrossInk.
 
-Once this firmware is installed, **Settings → System → Check for Updates** resolves against this fork's releases, so later versions arrive over the air. Devices running upstream CrossInk will not see these releases: the first install has to be done by USB or SD card.
+Once this firmware is installed, **Settings → System → Check for Updates** resolves against this fork's releases, so later versions arrive over the air. Devices running upstream CrossInk will not see these releases: the first install has to be done by USB or SD card. Picco is the exception: it has no over-the-air or SD card update, so every version goes through the USB steps in [Installation](./docs/installation.md#boox-picco), which keep its factory recovery software.
+
+### Languages
+
+Since CrossInk v2.0.0 only English is built into the firmware. This fork publishes its own language packs, translated in full including the BookOrbit screens: choose **Settings → System → Device → Download Languages**, connect to Wi-Fi and pick a language, and the reader installs it and restarts to Home. After updating from an earlier version, What's New offers to download the language you were using. Without Wi-Fi, take `crossink-languages-<version>.zip` from the same release as the firmware, copy its `.crossink` folder to the root of the SD card, then pick the language in **Settings → System → Device → Language**. Upstream's packs do not fit this fork: they lack its screens.
 
 ## Development
 

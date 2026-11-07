@@ -12,6 +12,12 @@
 #include "esp_private/esp_system_attr.h"
 #include "esp_private/panic_internal.h"
 
+#if defined(BOARD_HAS_PSRAM) && CONFIG_SPIRAM_BOOT_INIT && !defined(SIMULATOR)
+#include "esp32-hal-psram.h"
+#include "esp_heap_caps.h"
+#include "esp_psram.h"
+#endif
+
 #if CONFIG_IDF_TARGET_ARCH_XTENSA
 #include "esp_cpu_utils.h"
 #include "esp_memory_utils.h"
@@ -235,6 +241,20 @@ void IRAM_ATTR __wrap_panic_print_backtrace(const void* frame, int core) {
 namespace HalSystem {
 
 void begin() {
+#if defined(BOARD_HAS_PSRAM) && CONFIG_SPIRAM_BOOT_INIT && !defined(SIMULATOR)
+  // SD firmware updates replace the app but retain the installed bootloader.
+  // Older bootloaders do not initialize PSRAM as this Arduino SDK expects.
+  if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) {
+    const esp_err_t initResult = esp_psram_is_initialized() ? ESP_OK : esp_psram_init();
+    if (initResult != ESP_OK) {
+      LOG_ERR("HAL", "PSRAM initialization failed: %d", int(initResult));
+    } else if (!psramInit() || !psramAddToHeap()) {
+      LOG_ERR("HAL", "Could not add PSRAM to heap");
+    } else {
+      LOG_INF("HAL", "Initialized PSRAM for app-only firmware update");
+    }
+  }
+#endif
   // On a panic reboot, preserve diagnostics until checkPanic() has tried to write them to the SD card.
   // Ordinary boots clear any stale retained diagnostics.
   if (!isRebootFromPanic()) {
@@ -258,6 +278,10 @@ void begin() {
 void checkPanic() {
   if (isRebootFromPanic()) {
     auto panicInfo = getPanicInfo(true);
+    // The report now owns the old text; capture logs from this boot again even
+    // if the SD card cannot save the report.
+    clearLastLogs();
+    pauseLogRetention(false);
     auto file = Storage.open("/crash_report.txt", O_WRITE | O_CREAT | O_TRUNC);
     if (file) {
       const size_t written = file.write(panicInfo.c_str(), panicInfo.size());
@@ -291,6 +315,7 @@ void clearPanic() {
   panicCoreCaptureCount = 0;
 #endif
   clearLastLogs();
+  pauseLogRetention(false);
 }
 
 std::string getPanicInfo(bool full) {

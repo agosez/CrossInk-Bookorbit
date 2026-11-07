@@ -23,19 +23,21 @@ void HalTiltSensor::begin() {
   return;
 #endif
 
-  _available = _sdkImu.begin();
-  if (_available) {
-    _initMs = millis();
-    _lastPollMs = millis();
-    // begin() leaves the sensors sampling; stand them by until tilt page turn
-    // actually wakes them, so a disabled IMU doesn't drain the battery.
-    if (!_sdkImu.sleep()) {
-      LOG_ERR("GYR", "IMU standby failed");
-    }
-    LOG_INF("GYR", "SDK IMU initialized");
+  _available = false;
+  if (!_sdkImu.begin()) {
+    LOG_ERR("GYR", "SDK IMU not found");
     return;
   }
-  LOG_ERR("GYR", "SDK IMU not found");
+  // Stand by even accelerometer-only parts; they cannot drive gyro page turns.
+  if (!_sdkImu.sleep()) LOG_ERR("GYR", "IMU standby failed");
+  _available = _sdkImu.hasGyroscope();
+  if (!_available) {
+    LOG_INF("GYR", "IMU has no gyroscope");
+    return;
+  }
+  _initMs = millis();
+  _lastPollMs = millis();
+  LOG_INF("GYR", "SDK IMU initialized");
 }
 
 bool HalTiltSensor::wake() {

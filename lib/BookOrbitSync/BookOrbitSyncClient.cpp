@@ -11,6 +11,9 @@
 #include <Memory.h>
 #include <esp_mac.h>
 #ifdef SIMULATOR
+// With the SDK HTTP stack (CROSSPOINT_SIM_USE_SDK_HTTP), WiFi.h no longer brings
+// WiFiClient; the SecureHttpClient shim does, as in KOReaderSyncClient.
+#include <SecureHttpClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #else

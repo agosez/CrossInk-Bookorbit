@@ -47,11 +47,22 @@ fui::Rect keyboardRect(const GfxRenderer& renderer) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int gap = metrics.keyboardKeySpacing;
   const int height = kKeyboardRows * metrics.keyboardKeyHeight + (kKeyboardRows - 1) * gap;
-  const int width = renderer.getScreenWidth() * metrics.keyboardWidthPercent / 100;
-  const int x = (renderer.getScreenWidth() - width) / 2;
-  const int y = renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing - height +
-                metrics.keyboardVerticalOffset;
-  return {static_cast<int16_t>(x), static_cast<int16_t>(y), static_cast<int16_t>(width), static_cast<int16_t>(height)};
+  int width = renderer.getScreenWidth() * metrics.keyboardWidthPercent / 100;
+  int x = (renderer.getScreenWidth() - width) / 2;
+  int y = renderer.getScreenHeight() - UITheme::getButtonHintsReserve(renderer) - metrics.verticalSpacing - height +
+          metrics.keyboardVerticalOffset;
+  int visibleHeight;
+  {
+    const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+    const int right = std::min(x + width, safe.x + safe.width);
+    x = std::max(x, safe.x);
+    width = std::max(0, right - x);
+    const int bottom = std::min(y + height, safe.y + safe.height);
+    y = std::max(safe.y, bottom - height);
+    visibleHeight = std::max(0, bottom - y);
+  }
+  return {static_cast<int16_t>(x), static_cast<int16_t>(y), static_cast<int16_t>(width),
+          static_cast<int16_t>(visibleHeight)};
 }
 
 PickerLayout getPickerLayout(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
@@ -59,7 +70,8 @@ PickerLayout getPickerLayout(const GfxRenderer& renderer, const MappedInputManag
   const int backspaceWidth = mappedInput.hasTouch() ? kFieldGap + kFieldHeight : 0;
   const int fieldsWidth = kHourWidth + kFieldGap + kColonGap + colonWidth + kColonGap + kMinuteWidth + kFieldGap +
                           kPeriodWidth + backspaceWidth;
-  const int startX = (renderer.getScreenWidth() - fieldsWidth) / 2;
+  const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int startX = safe.x + (safe.width - fieldsWidth) / 2;
   int fieldY = renderer.getScreenHeight() / 2 - kFieldHeight / 2;
   if (mappedInput.hasTouch()) {
     const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);

@@ -226,7 +226,7 @@ void BookOrbitSettingsActivity::buildListScreen(UiApp::ScreenType& screen) {
       values[i] = BOOKORBIT_STORE.getSyncBehavior() == BookOrbitSyncBehavior::SMART ? tr(STR_SMART_SYNC)
                                                                                     : tr(STR_ASK_EVERY_TIME);
     } else if (i == 7) {
-      values[i] = BOOKORBIT_STORE.getSyncOnSleep() ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+      values[i] = BOOKORBIT_STORE.getSyncOnSleep() ? tr(STR_ON) : tr(STR_OFF);
     } else {
       // Authenticate and Browse Catalog both need credentials to do anything.
       values[i] = hasCredentials ? "" : std::string("[") + tr(STR_SET_CREDENTIALS_FIRST) + "]";

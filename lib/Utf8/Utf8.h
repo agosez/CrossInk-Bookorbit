@@ -123,6 +123,26 @@ inline bool utf8IsCjkWordCharacter(const uint32_t cp) {
          || (cp >= 0x30000 && cp <= 0x323AF);  // CJK Extensions G-H
 }
 
+// Writes cp as UTF-8 (1-4 bytes, no terminator) and returns the position after it.
+inline char* utf8AppendCodepoint(char* output, const uint32_t codepoint) {
+  if (codepoint < 0x80) {
+    *output++ = static_cast<char>(codepoint);
+  } else if (codepoint < 0x800) {
+    *output++ = static_cast<char>(0xC0 | (codepoint >> 6));
+    *output++ = static_cast<char>(0x80 | (codepoint & 0x3F));
+  } else if (codepoint < 0x10000) {
+    *output++ = static_cast<char>(0xE0 | (codepoint >> 12));
+    *output++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+    *output++ = static_cast<char>(0x80 | (codepoint & 0x3F));
+  } else {
+    *output++ = static_cast<char>(0xF0 | (codepoint >> 18));
+    *output++ = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
+    *output++ = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+    *output++ = static_cast<char>(0x80 | (codepoint & 0x3F));
+  }
+  return output;
+}
+
 // Returns true for Unicode combining diacritical marks that should not advance the cursor.
 inline bool utf8IsCombiningMark(const uint32_t cp) {
   return (cp >= 0x0300 && cp <= 0x036F)      // Combining Diacritical Marks

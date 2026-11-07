@@ -7,6 +7,7 @@
 #include <EpdFontFamily.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
+#include <HalStorage.h>
 #include <Logging.h>
 #include <SdCardFont.h>
 #include <SdCardFontRegistry.h>
@@ -37,17 +38,16 @@ int SdCardFontManager::loadFile(const SdCardFontFileInfo& file, const char* fami
   return loadFilePath(file.path.c_str(), familyName, file.pointSize, renderer);
 }
 
-int SdCardFontManager::loadFilePath(const char* path, const char* familyName, uint8_t pointSize,
-                                    GfxRenderer& renderer) {
-  auto* font = new (std::nothrow) SdCardFont();
+int SdCardFontManager::loadFilePath(const char* path, const char* familyName, uint8_t pointSize, GfxRenderer& renderer,
+                                    const size_t residentLimit) {
+  auto font = makeUniqueNoThrow<SdCardFont>();
   if (!font) {
     LOG_ERR("SDMGR", "Failed to allocate SdCardFont for %s", path);
     return 0;
   }
 
-  if (!font->load(path)) {
+  if (!font->load(path, residentLimit)) {
     LOG_ERR("SDMGR", "Failed to load %s", path);
-    delete font;
     return 0;
   }
 
@@ -56,16 +56,20 @@ int SdCardFontManager::loadFilePath(const char* path, const char* familyName, ui
   // with FNV-1a hashes, but provides a safety net)
   if (renderer.getFontMap().count(fontId) != 0) {
     LOG_ERR("SDMGR", "Font ID %d collides with existing font, skipping %s", fontId, path);
-    delete font;
     return 0;
   }
-  renderer.registerSdCardFont(fontId, font);
-  loaded_.push_back({font, fontId, pointSize});
+  renderer.registerSdCardFont(fontId, font.get());
+  loaded_.push_back({font.get(), fontId, pointSize});
 
   LOG_DBG("SDMGR", "Loaded %s size=%u id=%d styles=%u", path, pointSize, fontId, font->styleCount());
 
   EpdFontFamily fontFamily(font->getEpdFont(0), font->getEpdFont(1), font->getEpdFont(2), font->getEpdFont(3));
+  // Dictionary-only extra sizes must not change the reader's available set
+  // behind its cache identity; only body and budgeted content sizes participate.
+  if (loaded_.size() == 1 || residentLimit) fontFamily = fontFamily.withSize(loaded_.front().fontId, pointSize);
   renderer.insertFont(fontId, fontFamily);
+  // Transfer to the manager's existing LoadedFont owner list; unloadAll/dtor free it.
+  font.release();
   return fontId;
 }
 
@@ -88,13 +92,73 @@ bool SdCardFontManager::loadFamilyClosest(const SdCardFontFamilyInfo& family, Gf
     return false;
   }
 
+  // Body plus two optional sizes; allocate this tiny owner list once at load.
+  loaded_.reserve(3);
   if (loadFile(*selected, family.name.c_str(), renderer) == 0) {
     return false;
   }
 
   loadedFamilyName_ = family.name;
   loadedPointSize_ = selected->pointSize;
+  loadContentSizes(family, renderer);
   return true;
+}
+
+std::array<uint8_t, 2> SdCardFontManager::contentSizeTargets(const uint8_t bodySize) {
+  return {static_cast<uint8_t>(std::min<unsigned>(44, unsigned(bodySize) * 2)),
+          static_cast<uint8_t>(std::max<unsigned>(8, unsigned(bodySize) * 3 / 4))};
+}
+
+void SdCardFontManager::loadContentSizes(const SdCardFontFamilyInfo& family, GfxRenderer& renderer) {
+  if (loadedPointSize_ < 8 || loadedPointSize_ > 44) return;
+  // At most 24KB for two complete optional font objects, tables and reusable
+  // glyph scratch. Body font ownership/caches keep their existing policy.
+  constexpr size_t SIZE_BUDGET = 12U * 1024U;
+  constexpr size_t FREE_RESERVE = 96U * 1024U;
+  constexpr size_t BLOCK_RESERVE = 48U * 1024U;
+  for (const uint8_t target : contentSizeTargets(loadedPointSize_)) {
+    const auto* file = family.findClosestFile(target);
+    if (!file || file->pointSize < 8 || file->pointSize > 44) continue;
+    bool present = false;
+    for (const auto& loaded : loaded_) present |= loaded.size == file->pointSize;
+    if (present) continue;
+    if (ESP.getFreeHeap() < FREE_RESERVE + SIZE_BUDGET || ESP.getMaxAllocHeap() < BLOCK_RESERVE + SIZE_BUDGET) {
+      LOG_DBG("SDMGR", "Skipping optional size %u: preserving heap reserve", file->pointSize);
+      continue;
+    }
+    loadFilePath(file->path.c_str(), family.name.c_str(), file->pointSize, renderer, SIZE_BUDGET);
+  }
+  if (loaded_.size() < 2) return;
+
+  // Cache identity includes the sizes actually loaded and their content. A
+  // reboot under memory pressure must rebuild pages instead of drawing cached
+  // large text with body metrics. Changed extra-size files invalidate too.
+  uint32_t hash = static_cast<uint32_t>(loaded_.front().fontId);
+  for (size_t i = 1; i < loaded_.size(); ++i) hash = (hash * 16777619U) ^ uint32_t(loaded_[i].fontId);
+  const int oldId = loaded_.front().fontId;
+  const int newId = computeFontId(hash, family.name.c_str(), loadedPointSize_);
+  if (newId != oldId && renderer.getFontMap().count(newId)) {
+    LOG_ERR("SDMGR", "Content font identity collision; keeping body size");
+    while (loaded_.size() > 1) {
+      auto& extra = loaded_.back();
+      renderer.removeFont(extra.fontId);
+      delete extra.font;
+      loaded_.pop_back();
+    }
+    return;
+  }
+  renderer.removeFont(oldId);
+  loaded_.front().fontId = newId;
+  for (const auto& loaded : loaded_) {
+    auto* font = loaded.font;
+    // insertFont rejects duplicate IDs; replace the old family registration
+    // before publishing the final body identity shared by all content sizes.
+    renderer.removeFont(loaded.fontId);
+    renderer.registerSdCardFont(loaded.fontId, font);
+    renderer.insertFont(
+        loaded.fontId, EpdFontFamily(font->getEpdFont(0), font->getEpdFont(1), font->getEpdFont(2), font->getEpdFont(3))
+                           .withSize(newId, loaded.size));
+  }
 }
 
 #if CROSSINK_SCALABLE_FONTS
@@ -145,8 +209,6 @@ int SdCardFontManager::loadFamilyExtraFile(const char* path, const char* familyN
 }
 
 void SdCardFontManager::unloadAll(GfxRenderer& renderer) {
-  // Drop UI CJK fallbacks before the SD fonts they point at are freed.
-  renderer.clearFallbackFonts();
   renderer.clearSdCardFonts();
   for (auto& lf : loaded_) {
     renderer.removeFont(lf.fontId);
@@ -211,7 +273,6 @@ bool SdCardFontManager::setScalableRenderOptions(GfxRenderer& renderer,
                                                  const freeink::font::FtFont::RenderOptions& renderOptions) {
   if (!scalable_[0] || loadedFamilyName_.empty() || loadedPointSize_ == 0) return false;
 
-  renderer.clearFallbackFonts();
   renderer.clearSdCardFonts();
   for (auto& loaded : loaded_) renderer.removeFont(loaded.fontId);
   loaded_.clear();

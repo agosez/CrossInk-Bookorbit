@@ -6,6 +6,7 @@
 #include <HalClock.h>
 #include <Logging.h>
 #include <SDCardManager.h>
+#include <esp_heap_caps.h>
 #if FREEINK_CAP_USB_MSC
 #include <UsbMassStorage.h>
 #endif
@@ -244,6 +245,27 @@ bool HalStorage::readFileToStream(const char* path, Print& out, size_t chunkSize
 
 size_t HalStorage::readFileToBuffer(const char* path, char* buffer, size_t bufferSize, size_t maxBytes) {
   HAL_STORAGE_WRAPPED_CALL(readFileToBuffer, path, buffer, bufferSize, maxBytes);
+}
+
+bool HalStorage::readFileToString(const char* moduleName, const std::string& path, size_t cap, std::string& out) {
+  out.clear();
+  HalFile file;
+  if (!openFileForRead(moduleName, path, file)) return false;
+  const size_t size = file.fileSize();
+  if (file.isDirectory() || size > cap || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < size + 512) {
+    LOG_ERR(moduleName, "File too large or unreadable: %s", path.c_str());
+    file.close();
+    return false;
+  }
+  out.resize(size);
+  const bool readOk = size == 0 || file.read(out.data(), size) == static_cast<int>(size);
+  const bool closeOk = file.close();
+  if (!readOk || !closeOk) {
+    LOG_ERR(moduleName, "Could not read file: %s", path.c_str());
+    out.clear();
+    return false;
+  }
+  return true;
 }
 
 bool HalStorage::writeFile(const char* path, const String& content) {

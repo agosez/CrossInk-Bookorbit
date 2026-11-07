@@ -174,10 +174,12 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Install SDL2 and OpenSSL
+      - name: Install SDL2, OpenSSL and wolfSSL
+        # Since CrossInk v2.0.0 the simulator links wolfSSL and OpenSSL through
+        # pkg-config (simulator-base in platformio.ini).
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev libssl-dev
+          sudo apt-get install -y libsdl2-dev libssl-dev libwolfssl-dev pkg-config
 
       - name: Apply the simulator cold-build overrides
         # The fetched simulator package needs an include-path fix (see the

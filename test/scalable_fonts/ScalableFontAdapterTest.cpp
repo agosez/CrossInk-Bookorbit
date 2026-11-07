@@ -4,12 +4,21 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <vector>
 
 using FileMode = HalScalableFont::FileMode;
+
+static size_t tableCount(const char* path) {
+  std::ifstream file(path, std::ios::binary);
+  uint8_t header[6];
+  file.read(reinterpret_cast<char*>(header), sizeof(header));
+  assert(file.gcount() == sizeof(header));
+  return (size_t(header[4]) << 8) | header[5];
+}
 
 int main(int argc, char** argv) {
   assert(argc >= 2);
@@ -53,7 +62,8 @@ int main(int argc, char** argv) {
     const auto openedBytes = storageReadBytes;
     if (mode == FileMode::Temporary) {
       size_t totalFileBytes = 0;
-      for (int i = 2; i < argc; ++i) totalFileBytes += family[i - 2].fileBytes();
+      // Opening now includes a bounded static-outline table-directory preflight.
+      for (int i = 2; i < argc; ++i) totalFileBytes += family[i - 2].fileBytes() + 12 + 16 * tableCount(argv[i]);
       if (argc > 2) assert(openedBytes <= totalFileBytes);
     }
     const auto renderGlyph = [&](int i, unsigned cp, unsigned size) {
@@ -165,7 +175,7 @@ int main(int argc, char** argv) {
   size_t fileBytes = 0;
   assert(HalScalableFont::fileSize(path.c_str(), fileBytes));
   const auto failures = injectedReadFailures;
-  failStorageRead = storageReadCalls + (fileBytes + 4095) / 4096 + 1;
+  failStorageRead = storageReadCalls + 1 + tableCount(path.c_str()) + (fileBytes + 4095) / 4096 + 1;
   {
     HalScalableFont streamed;
     assert(streamed.openFile(path.c_str(), HalScalableFont::MaxFileBytes, options, FileMode::Stream));
@@ -191,4 +201,39 @@ int main(int argc, char** argv) {
   }
   assert(openStorageFiles == 0);
   testHeap = {SIZE_MAX, SIZE_MAX, SIZE_MAX};
+  // Large filename faces must stream without lifting the reader's 2 MiB cap.
+  const auto largePath = std::filesystem::temp_directory_path() /
+                         ("crossink-filename-font-" +
+                          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".ttf");
+  {
+    std::ofstream large(largePath, std::ios::binary);
+    large.write(reinterpret_cast<const char*>(bytes[0].data()), bytes[0].size());
+    large.seekp(3 * 1024 * 1024 - 1);
+    large.put('\0');
+    assert(large.good());
+  }
+  size_t largeBytes = 0;
+  assert(!HalScalableFont::fileSize(largePath.c_str(), largeBytes));
+  assert(HalScalableFont::fileSize(largePath.c_str(), largeBytes, HalScalableFont::MaxFilenameFileBytes));
+  assert(largeBytes == 3 * 1024 * 1024);
+  HalScalableFont::Info info;
+  assert(!HalScalableFont::inspectFile(largePath.c_str(), info));
+  assert(HalScalableFont::inspectFile(largePath.c_str(), info, nullptr, HalScalableFont::MaxFilenameFileBytes));
+  {
+    HalScalableFont reader;
+    assert(!reader.openFile(largePath.c_str()));
+    assert(openStorageFiles == 0);
+    HalScalableFont filename;
+    assert(filename.openFile(largePath.c_str(), HalScalableFont::MaxFilenameFileBytes, options, FileMode::Filename));
+    assert(openStorageFiles == 1);
+    assert(filename.probeGlyph('T', 8));
+    assert(filename.probeGlyph('T', 10));
+    assert(filename.probeGlyph('T', 12));
+    const auto* streamedData = filename.atSize(12)->data;
+    const auto* residentData = builtin[0].atSize(12)->data;
+    assert(streamedData->dynamicGlyphHandler(streamedData->glyphMissCtx, 'T')->width ==
+           residentData->dynamicGlyphHandler(residentData->glyphMissCtx, 'T')->width);
+  }
+  assert(openStorageFiles == 0);
+  std::filesystem::remove(largePath);
 }

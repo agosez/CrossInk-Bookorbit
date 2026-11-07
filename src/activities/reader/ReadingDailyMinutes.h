@@ -27,6 +27,12 @@ constexpr size_t DAYS = 371;  // 53 weeks: the Home heatmap's 52 and a little ma
 // pending time. Without a known start, the span is taken to have just ended.
 void record(const ReadingStatsDateTime* localStart, uint32_t seconds);
 
+// Adds a committed reading session, taken to have just ended, with the threshold
+// commitReadingSession() applies to reading time. Call it next to the reader's real commit
+// only: saveReadingSessionCheckpoint() commits previews of the same session, which would
+// count it again at every checkpoint.
+void recordSession(uint32_t seconds);
+
 // Forgets every recorded day. Returns false when the file could not be removed.
 bool reset();
 

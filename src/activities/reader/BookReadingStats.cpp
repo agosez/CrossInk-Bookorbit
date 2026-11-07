@@ -4,9 +4,11 @@
 #include <I18n.h>
 #include <Logging.h>
 
+#include <algorithm>
 #include <cstring>
+#include <optional>
 
-#include "util/FileContentEquals.h"
+#include "TwoSlotFile.h"
 
 namespace {
 // Binary layout v1 (11 bytes):
@@ -52,7 +54,9 @@ namespace {
 // Binary layout v5 (73 bytes):
 //   [0-68]   v4 fields
 //   [69-72]  estimatedTimeLeftSeconds  uint32_t LE, 0 means unavailable
-static constexpr uint8_t STATS_FILE_VERSION = 5;
+// Binary layout v6 (75 bytes): v5 fields plus paceFractionMillis at [73-74].
+static constexpr uint8_t STATS_FILE_VERSION = 6;
+static constexpr uint8_t STATS_FILE_VERSION_V5 = 5;
 static constexpr uint8_t STATS_FILE_VERSION_V2 = 2;
 static constexpr uint8_t STATS_FILE_VERSION_V1 = 1;
 static constexpr uint8_t STATS_FILE_VERSION_V3 = 3;
@@ -61,11 +65,12 @@ static constexpr int STATS_FILE_SIZE_V1 = 11;
 static constexpr int STATS_FILE_SIZE_V2 = 12;
 static constexpr int STATS_FILE_SIZE_V3 = 16;
 static constexpr int STATS_FILE_SIZE_V4 = 69;
-static constexpr int STATS_FILE_SIZE = 73;
+static constexpr int STATS_FILE_SIZE_V5 = 73;
+static constexpr int STATS_FILE_SIZE = 75;
 static constexpr uint16_t MAX_PACE_SAMPLE_COUNT = 1000;
 static constexpr uint8_t FLAG_START_DATE_MANUAL = 1u << 0;
 static constexpr uint8_t FLAG_FINISHED_DATE_MANUAL = 1u << 1;
-static constexpr uint8_t PREVIOUS_VERSIONED_STATS_FILE_VERSION = STATS_FILE_VERSION - 1;
+static constexpr uint8_t OLDEST_VERSIONED_STATS_FILE_VERSION = 4;
 static constexpr const char* LEGACY_STATS_FILE_NAME = "stats.bin";
 
 std::string statsFileNameForVersion(const uint8_t version) {
@@ -74,15 +79,31 @@ std::string statsFileNameForVersion(const uint8_t version) {
   return std::string(buf);
 }
 
-bool openRecoverableStatsFile(const std::string& path, FsFile& f) {
-  if (Storage.openFileForRead("STATS", path, f)) return true;
+constexpr int statsSizeForVersion(const uint8_t version) {
+  return version == STATS_FILE_VERSION      ? STATS_FILE_SIZE
+         : version == STATS_FILE_VERSION_V5 ? STATS_FILE_SIZE_V5
+                                            : STATS_FILE_SIZE_V4;
+}
+
+uint16_t readLe16(const uint8_t* data, const int offset) {
+  return static_cast<uint16_t>(data[offset]) | (static_cast<uint16_t>(data[offset + 1]) << 8);
+}
+
+bool validPaceFraction(const uint8_t* data) {
+  const uint16_t fraction = readLe16(data, 73);
+  return fraction < 1000 && (readLe16(data, 12) != UINT16_MAX || fraction == 0);
+}
+
+bool openRecoverableStatsFile(const std::string& path, FsFile& f, const uint8_t version = STATS_FILE_VERSION) {
+  const std::string selected = two_slot::preferredPath("STATS", path, statsSizeForVersion(version), true);
+  if (Storage.openFileForRead("STATS", selected, f)) return true;
 
   for (const char* suffix : {".tmp", ".bak"}) {
     const std::string recoveryPath = path + suffix;
     if (!Storage.exists(recoveryPath.c_str())) continue;
 
     // A temp file is newer than the backup, but it is safe to prefer only
-    // after the complete v5 payload reached storage. A partial temp falls
+    // after the complete current payload reached storage. A partial temp falls
     // through to the older, known-good backup.
     if (strcmp(suffix, ".tmp") == 0) {
       FsFile candidate;
@@ -91,12 +112,15 @@ bool openRecoverableStatsFile(const std::string& path, FsFile& f) {
       const size_t fileSize = candidate.fileSize();
       const int n = candidate.read(data, STATS_FILE_SIZE);
       candidate.close();
-      if (fileSize != STATS_FILE_SIZE || n != STATS_FILE_SIZE || data[0] != STATS_FILE_VERSION) continue;
+      if (fileSize != static_cast<size_t>(statsSizeForVersion(version)) || n != statsSizeForVersion(version) ||
+          data[0] != version || (version == STATS_FILE_VERSION && !validPaceFraction(data)))
+        continue;
     }
 
     if (Storage.rename(recoveryPath.c_str(), path.c_str())) {
       LOG_INF("STATS", "Recovered interrupted stats save: %s", path.c_str());
-      if (Storage.openFileForRead("STATS", path, f)) return true;
+      const std::string restoredPath = two_slot::preferredPath("STATS", path, statsSizeForVersion(version), true);
+      if (Storage.openFileForRead("STATS", restoredPath, f)) return true;
     }
 
     if (Storage.openFileForRead("STATS", recoveryPath, f)) {
@@ -113,13 +137,13 @@ bool openStatsFileForRead(const std::string& cachePath, FsFile& f) {
     return true;
   }
 
-  // When bumping STATS_FILE_VERSION, this automatically tries the previous
-  // versioned filename (e.g. v6 falls back to stats_v5.bin) before the original
-  // unversioned stats.bin migration source.
-  const std::string previousName = statsFileNameForVersion(PREVIOUS_VERSIONED_STATS_FILE_VERSION);
-  if (Storage.openFileForRead("STATS", cachePath + "/" + previousName, f)) {
-    LOG_DBG("STATS", "Migrating %s to %s", previousName.c_str(), currentName.c_str());
-    return true;
+  // Keep all supported versioned migration sources, including v4 after the v6 bump.
+  for (uint8_t version = STATS_FILE_VERSION - 1; version >= OLDEST_VERSIONED_STATS_FILE_VERSION; --version) {
+    const std::string previousName = statsFileNameForVersion(version);
+    if (openRecoverableStatsFile(cachePath + "/" + previousName, f, version)) {
+      LOG_DBG("STATS", "Migrating %s to %s", previousName.c_str(), currentName.c_str());
+      return true;
+    }
   }
 
   if (Storage.openFileForRead("STATS", cachePath + "/" + LEGACY_STATS_FILE_NAME, f)) {
@@ -128,10 +152,6 @@ bool openStatsFileForRead(const std::string& cachePath, FsFile& f) {
   }
 
   return false;
-}
-
-uint16_t readLe16(const uint8_t* data, const int offset) {
-  return static_cast<uint16_t>(data[offset]) | (static_cast<uint16_t>(data[offset + 1]) << 8);
 }
 
 uint32_t readLe32(const uint8_t* data, const int offset) {
@@ -170,25 +190,66 @@ ReadingStatsDate readDate(const uint8_t* data, const int offset) {
 
 }  // namespace
 
+bool BookReadingStats::peekCompleted(const std::string& cachePath) {
+  // Inspect in place, including recovery snapshots from older firmware.
+  const auto inspect = [](const std::string& path, const uint8_t version, const bool temp) -> std::optional<bool> {
+    if (!Storage.exists(path.c_str())) return std::nullopt;
+    FsFile f;
+    if (!Storage.openFileForRead("STATS", path, f)) return false;
+    uint8_t data[STATS_FILE_SIZE] = {};
+    const size_t fileSize = two_slot::payloadLength(f, statsSizeForVersion(version));
+    const int n = f.read(data, STATS_FILE_SIZE);
+    f.close();
+    const bool complete = n >= 0 && static_cast<size_t>(n) == fileSize;
+    const bool known = complete && ((n == STATS_FILE_SIZE_V2 && data[0] == STATS_FILE_VERSION_V2) ||
+                                    (n == STATS_FILE_SIZE_V3 && data[0] == STATS_FILE_VERSION_V3) ||
+                                    (n == STATS_FILE_SIZE_V4 && data[0] == STATS_FILE_VERSION_V4) ||
+                                    (n == STATS_FILE_SIZE_V5 && data[0] == STATS_FILE_VERSION_V5) ||
+                                    (n == STATS_FILE_SIZE && data[0] == STATS_FILE_VERSION && validPaceFraction(data)));
+    if (temp && !(known && n == statsSizeForVersion(version) && data[0] == version)) return std::nullopt;
+    return known && data[11] != 0;
+  };
+  for (uint8_t version = STATS_FILE_VERSION; version >= OLDEST_VERSIONED_STATS_FILE_VERSION; --version) {
+    const std::string path = cachePath + "/" + statsFileNameForVersion(version);
+    const std::string selected = two_slot::preferredPath("STATS", path, statsSizeForVersion(version), true);
+    for (const char* suffix : {"", ".tmp", ".bak"}) {
+      const auto completed = inspect(suffix[0] == 0 ? selected : path + suffix, version, strcmp(suffix, ".tmp") == 0);
+      if (completed.has_value()) return *completed;
+    }
+  }
+  return inspect(cachePath + "/" + LEGACY_STATS_FILE_NAME, 0, false).value_or(false);
+}
+
 BookReadingStats BookReadingStats::load(const std::string& cachePath) {
   BookReadingStats stats;
+  loadForUpload(cachePath, stats);
+  return stats;
+}
+
+bool BookReadingStats::loadForUpload(const std::string& cachePath, BookReadingStats& stats) {
+  stats = {};
   FsFile f;
   if (!openStatsFileForRead(cachePath, f)) {
-    return stats;
+    return false;
   }
   uint8_t data[STATS_FILE_SIZE] = {};
+  const size_t fileSize = two_slot::payloadLength(f, STATS_FILE_SIZE);
   const int n = f.read(data, STATS_FILE_SIZE);
   f.close();
+  if (n < 0 || static_cast<size_t>(n) != fileSize) {
+    LOG_ERR("STATS", "Incomplete or oversized stats snapshot");
+    return false;
+  }
 
   if (n == STATS_FILE_SIZE_V1 && data[0] == STATS_FILE_VERSION_V1) {
     readCommonStats(data, stats);
-    return stats;
+    return true;
   }
 
   if (n == STATS_FILE_SIZE_V2 && data[0] == STATS_FILE_VERSION_V2) {
     readCommonStats(data, stats);
     stats.isCompleted = data[11] != 0;
-    return stats;
+    return true;
   }
 
   if (n == STATS_FILE_SIZE_V3 && data[0] == STATS_FILE_VERSION_V3) {
@@ -196,20 +257,24 @@ BookReadingStats BookReadingStats::load(const std::string& cachePath) {
     stats.isCompleted = data[11] != 0;
     stats.avgSecondsPerForwardPage = readLe16(data, 12);
     stats.paceSampleCount = readLe16(data, 14);
-    return stats;
+    return true;
   }
 
-  if (n != STATS_FILE_SIZE && n != STATS_FILE_SIZE_V4) {
+  if (n != STATS_FILE_SIZE && n != STATS_FILE_SIZE_V5 && n != STATS_FILE_SIZE_V4) {
     LOG_DBG("STATS", "Stats missing or version mismatch, starting fresh");
-    return stats;
+    return false;
   }
   if (n == STATS_FILE_SIZE_V4 && data[0] != STATS_FILE_VERSION_V4) {
     LOG_DBG("STATS", "Stats missing or version mismatch, starting fresh");
-    return stats;
+    return false;
+  }
+  if (n == STATS_FILE_SIZE_V5 && data[0] != STATS_FILE_VERSION_V5) {
+    LOG_DBG("STATS", "Stats missing or version mismatch, starting fresh");
+    return false;
   }
   if (n == STATS_FILE_SIZE && data[0] != STATS_FILE_VERSION) {
     LOG_DBG("STATS", "Stats missing or version mismatch, starting fresh");
-    return stats;
+    return false;
   }
   readCommonStats(data, stats);
   stats.isCompleted = data[11] != 0;
@@ -226,10 +291,29 @@ BookReadingStats BookReadingStats::load(const std::string& cachePath) {
   for (size_t i = 0; i < stats.dayOfWeekSeconds.size(); ++i) {
     stats.dayOfWeekSeconds[i] = readLe32(data, 41 + static_cast<int>(i) * 4);
   }
-  if (n == STATS_FILE_SIZE) {
+  if (n >= STATS_FILE_SIZE_V5) {
     stats.estimatedTimeLeftSeconds = readLe32(data, 69);
   }
-  return stats;
+  if (n == STATS_FILE_SIZE) {
+    const uint16_t fraction = readLe16(data, 73);
+    if (!validPaceFraction(data)) {
+      LOG_ERR("STATS", "Invalid fractional reading pace");
+      stats = {};
+      return false;
+    }
+    stats.paceFractionMillis = fraction;
+  }
+  return true;
+}
+
+uint32_t BookReadingStats::averageForwardPageMillis() const {
+  return static_cast<uint32_t>(avgSecondsPerForwardPage) * 1000U + paceFractionMillis;
+}
+
+void BookReadingStats::setAverageForwardPageMillis(const uint32_t millis) {
+  const uint32_t bounded = std::min<uint32_t>(millis, static_cast<uint32_t>(UINT16_MAX) * 1000U);
+  avgSecondsPerForwardPage = bounded / 1000U;
+  paceFractionMillis = bounded % 1000U;
 }
 
 void BookReadingStats::recordForwardPageRead(uint32_t seconds) {
@@ -240,20 +324,18 @@ void BookReadingStats::recordForwardPageRead(uint32_t seconds) {
     seconds = UINT16_MAX;
   }
 
-  const uint16_t sample = static_cast<uint16_t>(seconds);
-  if (paceSampleCount == 0 || avgSecondsPerForwardPage == 0) {
-    avgSecondsPerForwardPage = sample;
+  const uint32_t sampleMillis = seconds * 1000U;
+  if (paceSampleCount == 0 || averageForwardPageMillis() == 0) {
+    setAverageForwardPageMillis(sampleMillis);
     paceSampleCount = 1;
     return;
   }
 
-  const uint16_t weight = paceSampleCount < MAX_PACE_SAMPLE_COUNT ? paceSampleCount : MAX_PACE_SAMPLE_COUNT;
-  const uint32_t nextAverage =
-      (static_cast<uint32_t>(avgSecondsPerForwardPage) * weight + sample) / (static_cast<uint32_t>(weight) + 1U);
-  avgSecondsPerForwardPage = static_cast<uint16_t>(nextAverage);
-  if (paceSampleCount < MAX_PACE_SAMPLE_COUNT) {
-    paceSampleCount++;
-  }
+  const uint16_t weight = std::min(paceSampleCount, MAX_PACE_SAMPLE_COUNT);
+  // Keep the fractional part across updates and reopen; round only at millisecond precision.
+  const uint64_t total = static_cast<uint64_t>(averageForwardPageMillis()) * weight + sampleMillis;
+  setAverageForwardPageMillis(static_cast<uint32_t>((total + (weight + 1U) / 2U) / (weight + 1U)));
+  if (paceSampleCount < MAX_PACE_SAMPLE_COUNT) ++paceSampleCount;
 }
 
 void BookReadingStats::recordReadingSpan(const ReadingStatsDateTime& localStart, const uint32_t seconds) {
@@ -299,7 +381,6 @@ void BookReadingStats::formatDuration(uint32_t seconds, char* buf, size_t len) {
 bool BookReadingStats::save(const std::string& cachePath) const {
   const std::string statsFileName = statsFileNameForVersion(STATS_FILE_VERSION);
   const std::string statsPath = cachePath + "/" + statsFileName;
-  const std::string tmpPath = statsPath + ".tmp";
   const std::string backupPath = statsPath + ".bak";
 
   uint8_t data[STATS_FILE_SIZE];
@@ -325,83 +406,17 @@ bool BookReadingStats::save(const std::string& cachePath) const {
     writeLe32(data, 41 + static_cast<int>(i) * 4, dayOfWeekSeconds[i]);
   }
   writeLe32(data, 69, estimatedTimeLeftSeconds);
+  writeLe16(data, 73, paceFractionMillis);
 
-  // Reader exit saves unconditionally; a quick open-and-close changes nothing.
-  const bool unchanged = fileContentEquals("STATS", statsPath.c_str(), data, sizeof(data));
-  if (unchanged) return true;
-
-  // Write to a temp file and rename into place so a save interrupted mid-write
-  // (silent restart, SD contention, power loss) can never leave stats_v5.bin
-  // truncated; load() treats any short read as "no stats" and would otherwise
-  // silently wipe the book's history.
-  if (Storage.exists(tmpPath.c_str()) && !Storage.remove(tmpPath.c_str())) {
-    LOG_ERR("STATS", "Could not remove stale stats temp file: %s", tmpPath.c_str());
-    return false;
-  }
-
-  FsFile f;
-  if (!Storage.openFileForWrite("STATS", tmpPath, f)) {
-    LOG_ERR("STATS", "Could not write %s", tmpPath.c_str());
-    return false;
-  }
-
-  const size_t written = f.write(data, STATS_FILE_SIZE);
-  if (written != STATS_FILE_SIZE) {
-    LOG_ERR("STATS", "Short write for %s: %u/%u bytes", tmpPath.c_str(), static_cast<unsigned>(written),
-            static_cast<unsigned>(STATS_FILE_SIZE));
-    f.close();
-    Storage.remove(tmpPath.c_str());
-    return false;
-  }
-
-  f.flush();
-  if (!f.sync()) {
-    LOG_ERR("STATS", "Failed to sync %s", tmpPath.c_str());
-    f.close();
-    Storage.remove(tmpPath.c_str());
-    return false;
-  }
-
-  if (!f.close()) {
-    LOG_ERR("STATS", "Failed to close %s", tmpPath.c_str());
-    Storage.remove(tmpPath.c_str());
-    return false;
-  }
-
-  const bool hadOriginal = Storage.exists(statsPath.c_str());
-  if (hadOriginal) {
-    if (Storage.exists(backupPath.c_str()) && !Storage.remove(backupPath.c_str())) {
-      LOG_ERR("STATS", "Could not remove stale stats backup: %s", backupPath.c_str());
-      Storage.remove(tmpPath.c_str());
-      return false;
-    }
-    if (!Storage.rename(statsPath.c_str(), backupPath.c_str())) {
-      LOG_ERR("STATS", "Could not back up %s", statsFileName.c_str());
-      Storage.remove(tmpPath.c_str());
-      return false;
-    }
-  }
-
-  if (!Storage.rename(tmpPath.c_str(), statsPath.c_str())) {
-    LOG_ERR("STATS", "Could not publish %s", statsFileName.c_str());
-    if (hadOriginal && !Storage.rename(backupPath.c_str(), statsPath.c_str())) {
-      LOG_ERR("STATS", "Could not restore stats backup: %s", backupPath.c_str());
-    }
-    if (hadOriginal && Storage.exists(statsPath.c_str())) Storage.remove(tmpPath.c_str());
-    return false;
-  }
-
-  if (hadOriginal && Storage.exists(backupPath.c_str()) && !Storage.remove(backupPath.c_str())) {
-    LOG_ERR("STATS", "Could not remove completed stats backup: %s", backupPath.c_str());
-  }
-  return true;
+  return two_slot::write("STATS", statsPath.c_str(), backupPath.c_str(), data, sizeof(data),
+                         [](const uint8_t* bytes, size_t size) {
+                           return size == STATS_FILE_SIZE && bytes[0] == STATS_FILE_VERSION && validPaceFraction(bytes);
+                         });
 }
 
 bool BookReadingStats::remove(const std::string& cachePath) {
   const std::string statsFileName = statsFileNameForVersion(STATS_FILE_VERSION);
   const std::string statsPath = cachePath + "/" + statsFileName;
-  const std::string previousStatsFileName = statsFileNameForVersion(PREVIOUS_VERSIONED_STATS_FILE_VERSION);
-  const std::string previousStatsPath = cachePath + "/" + previousStatsFileName;
   const std::string legacyStatsPath = cachePath + "/" + LEGACY_STATS_FILE_NAME;
   bool ok = true;
 
@@ -412,21 +427,28 @@ bool BookReadingStats::remove(const std::string& cachePath) {
     LOG_ERR("STATS", "Could not delete %s", LEGACY_STATS_FILE_NAME);
     ok = false;
   }
-  if (Storage.exists(previousStatsPath.c_str()) && !Storage.remove(previousStatsPath.c_str())) {
-    LOG_ERR("STATS", "Could not delete %s", previousStatsFileName.c_str());
-    ok = false;
+  for (uint8_t version = OLDEST_VERSIONED_STATS_FILE_VERSION; version < STATS_FILE_VERSION; ++version) {
+    const std::string previousPath = cachePath + "/" + statsFileNameForVersion(version);
+    // A previous firmware may have left a recoverable save behind.
+    for (const char* suffix : {".tmp", ".bak", ""}) {
+      const std::string path = previousPath + suffix;
+      if (Storage.exists(path.c_str()) && !Storage.remove(path.c_str())) {
+        LOG_ERR("STATS", "Could not delete %s", path.c_str());
+        ok = false;
+      }
+    }
   }
-  for (const char* suffix : {".tmp", ".bak"}) {
-    const std::string transactionPath = statsPath + suffix;
-    if (Storage.exists(transactionPath.c_str()) && !Storage.remove(transactionPath.c_str())) {
-      LOG_ERR("STATS", "Could not delete %s", transactionPath.c_str());
+  const std::string newest = two_slot::preferredPath("STATS", statsPath, STATS_FILE_SIZE, true);
+  const std::string older = newest == statsPath ? statsPath + ".bak" : statsPath;
+  for (const auto& path : {statsPath + ".tmp", older}) {
+    if (Storage.exists(path.c_str()) && !Storage.remove(path.c_str())) {
+      LOG_ERR("STATS", "Could not delete %s", path.c_str());
       ok = false;
     }
   }
-  // Keep the canonical file when a recovery artifact could not be removed.
-  // Otherwise a later load could restore stats that the user just reset.
-  if (ok && Storage.exists(statsPath.c_str()) && !Storage.remove(statsPath.c_str())) {
-    LOG_ERR("STATS", "Could not delete %s", statsFileName.c_str());
+  // Keep the newest valid slot until all fallbacks are gone.
+  if (ok && Storage.exists(newest.c_str()) && !Storage.remove(newest.c_str())) {
+    LOG_ERR("STATS", "Could not delete %s", newest.c_str());
     ok = false;
   }
   return ok;
