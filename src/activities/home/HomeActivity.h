@@ -142,7 +142,10 @@ class HomeActivity final : public Activity {
   int getVisibleRecentBookCount() const;
   bool canSwapHomeBook() const;
   void showNextRecentBookOnHome();
-  void updateHighlightedBookContext(bool allowChapterTitleRead = true);
+  // Whether the caller already holds the (non-recursive) RenderLock, as
+  // ActivityManager does around onFrontlightPanelClosed().
+  enum class RenderLockHeld : uint8_t { No, Yes };
+  void updateHighlightedBookContext(bool allowChapterTitleRead = true, RenderLockHeld lockHeld = RenderLockHeld::No);
   void loadRecentBooks(int maxBooks);
   // Returns true when Home needs a repaint for new artwork or to clear progress.
   bool loadCoverGridThumbnails();

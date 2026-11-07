@@ -17,6 +17,8 @@ constexpr int kBookRowHeaderHeight = 33;
 constexpr int kBookRowCoverInset = 10;
 constexpr int kShelfCoverTop = 36;
 constexpr int kShelfCaptionHeight = 22;
+// How far the selection ring is drawn outside what it selects.
+constexpr int kRingOutset = 4;
 
 struct Grid {
   int top = 0;

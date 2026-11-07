@@ -36,9 +36,15 @@ BookOrbitHomeStore::CoverSizes coverSizes(const GfxRenderer& renderer) {
   const Grid layout = grid(renderer);
   const int count = BookOrbitHomeSnapshot::SHELF_COUNT;
 
+  // Under a shelf's captions, room for the selection ring and 4 px of white above the
+  // tile's border. Only the X3's short screen lets the height limit the covers; the
+  // other boards keep their size, and so their cached covers.
+  constexpr int kShelfBottomReserve = kRingOutset + 4;
+
   BookOrbitHomeStore::CoverSizes sizes;
-  sizes.shelfWidth = std::min((spanHeight(layout, 2) - kShelfCoverTop - kShelfCaptionHeight - 4) * 2 / 3,
-                              (layout.contentWidth - 2 * kPad - (count - 1) * kGap) / count);
+  sizes.shelfWidth =
+      std::min((spanHeight(layout, 2) - kShelfCoverTop - kShelfCaptionHeight - kShelfBottomReserve) * 2 / 3,
+               (layout.contentWidth - 2 * kPad - (count - 1) * kGap) / count);
   sizes.shelfHeight = sizes.shelfWidth * 3 / 2;
   const int rows = alsoReadingRows(SETTINGS.shouldTrackReadingStats());
   sizes.rowHeight = bookRowHeight(spanHeight(layout, rows)) - kBookRowCoverInset;
