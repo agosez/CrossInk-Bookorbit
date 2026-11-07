@@ -5,6 +5,14 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.6.1.
+
+### Fixed
+
+- With the BookOrbit theme, closing the panel pulled down from the top of the Home screen no longer freezes the X4 Pro and Sticky until a restart. The panel stayed on screen and the reader stopped responding to touch and buttons ([#107](https://github.com/agosez/CrossInk-Bookorbit/issues/107)).
+
 ## [v1.6.1+bookorbit.5] - 2026-11-06
 
 Based on CrossInk v1.6.1.

@@ -1060,11 +1060,13 @@ void HomeActivity::onFrontlightPanelClosed() {
   showAllDevicesStats = GlobalReadingStats::hasSyncedStats();
   allDevicesGlobalStats = showAllDevicesStats ? GlobalReadingStats::loadAggregated(globalStats) : globalStats;
   bookStatsCached = false;
-  updateHighlightedBookContext();
+  // ActivityManager's pop path calls this hook under the RenderLock, which is
+  // not recursive: locking it again here hangs the main loop for good (#107).
+  updateHighlightedBookContext(true, RenderLockHeld::Yes);
   requestUpdate();
 }
 
-void HomeActivity::updateHighlightedBookContext(const bool allowChapterTitleRead) {
+void HomeActivity::updateHighlightedBookContext(const bool allowChapterTitleRead, const RenderLockHeld lockHeld) {
   currentBookStats = BookReadingStats{};
   currentBookProgressPercent = -1.0f;
   currentBookChapterTitle.clear();
@@ -1096,8 +1098,12 @@ void HomeActivity::updateHighlightedBookContext(const bool allowChapterTitleRead
 
   // After the first paint the render task reads what begin() rewrites.
   if (bookOrbitUi && firstRenderDone) {
-    RenderLock lock;
-    beginBookOrbitUi();
+    if (lockHeld == RenderLockHeld::Yes) {
+      beginBookOrbitUi();
+    } else {
+      RenderLock lock;
+      beginBookOrbitUi();
+    }
   }
 }
 
