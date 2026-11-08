@@ -24,6 +24,7 @@ Refer to https://freeink.org/llms.txt for guidance.
 ## Real Hardware / Storage
 
 - SdFat on hardware allows only one open reader per file path at a time. If a fallback needs to reopen the same file, close the first handle before reopening.
+- `Storage.usedBytes()` (SdFat `freeClusterCount()`) reads the whole allocation table one sector at a time with the SD and SPI locks held: four bytes per cluster on FAT32, one bit on exFAT. The time per sector varies about 30x between cards: a 32 GB FAT32 card took ~8 s on an X4 and minutes on a reporter's X3 (#110). Never call it where the user waits on FAT32: ask `CardSpace::isQuickToCount()` first. The BookOrbit Home only counts on exFAT; `checkFreeSpace` downloads count before writing on exFAT and, on FAT32, only after a failed write, to report a full card. Nearby and OTA still count unconditionally. SdFat hides the volume type and the SDK is upstream's (no push rights): a directory's recorded size, 0 on FAT and its clusters on exFAT, tells them apart.
 
 ## Rendering / Reader Pipeline
 

@@ -74,9 +74,10 @@ class HttpDownloader {
     // before it replaces destPath). Returning false fails the download and
     // removes the file. Catches bodies cut short without a Content-Length.
     bool (*validate)(const std::string& path) = nullptr;
-    // Once the response length is known, fail with INSUFFICIENT_SPACE before
-    // writing anything if the SD card cannot hold the file. The first check
-    // can scan the whole FAT, so leave it off for small files.
+    // Fail with INSUFFICIENT_SPACE when the SD card cannot hold the file: on exFAT
+    // before writing anything, once the response length is known; on FAT32, whose
+    // count can take minutes (see CardSpace), only once a write has failed. The
+    // count reads the card's whole allocation table, so leave it off for small files.
     bool checkFreeSpace = false;
     // The body spans many TLS records: a book, not a JSON reply. wolfSSL then sizes its
     // input buffer for a full record at the start of the handshake, while the heap still

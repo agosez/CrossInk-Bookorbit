@@ -206,7 +206,7 @@ class BookOrbitHomeUi final {
   // Books the Library's index counted on its last scan; -1 before the first one.
   int32_t cardBookCount = -1;
   int32_t serverBookCount = 0;  // catalog downloads recorded in BookOrbitDownloadIndex
-  uint64_t cardTotalBytes = 0;  // 0 when the card did not say
+  uint64_t cardTotalBytes = 0;  // 0 when the card did not say, or is FAT32 (see readCardSpace)
   uint64_t cardUsedBytes = 0;
 
   // Two bits per day over the heatmap's window: unread, a little, some, a lot.
