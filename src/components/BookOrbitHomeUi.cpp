@@ -36,6 +36,7 @@
 #include "components/icons/night.h"
 #include "components/icons/streak.h"
 #include "fontIds.h"
+#include "util/CardSpace.h"
 
 namespace {
 using BookOrbitHomeLayout::kBookRowCoverInset;
@@ -130,8 +131,9 @@ void formatGigabytes(const uint64_t bytes, char* out, const size_t outSize) {
   }
 }
 
-// Counting free clusters can mean reading the whole FAT, so the card is asked once per
-// boot. Every download and file transfer ends in a restart, which renews it.
+// Counting the used space froze Home at every start on slow FAT32 cards (#110), so only
+// exFAT cards get a storage bar (see CardSpace). The card is asked once per boot; every
+// download and file transfer ends in a restart, which renews it.
 void readCardSpace(uint64_t& total, uint64_t& used) {
   static bool read = false;
   static uint64_t cachedTotal = 0;
@@ -141,8 +143,10 @@ void readCardSpace(uint64_t& total, uint64_t& used) {
     const unsigned long start = millis();
 #ifndef SIMULATOR
     // The host storage shim does not expose card capacity.
-    cachedTotal = Storage.totalBytes();
-    cachedUsed = cachedTotal > 0 ? Storage.usedBytes() : 0;
+    if (CardSpace::isQuickToCount()) {
+      cachedTotal = Storage.totalBytes();
+      cachedUsed = Storage.usedBytes();
+    }
 #endif
     LOG_DBG("HOME", "Card space read in %lu ms (used=%llu total=%llu)", millis() - start,
             static_cast<unsigned long long>(cachedUsed), static_cast<unsigned long long>(cachedTotal));

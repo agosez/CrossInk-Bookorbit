@@ -297,18 +297,36 @@ class AdminClient:
         return next(int(f["id"]) for f in detail["files"] if f["format"].lower() == "epub")
 
     def save_web_progress(self, file_id: int, xpointer: str, percentage: float) -> None:
-        """What BookOrbit's web reader posts two seconds after it lands on a position,
+        """What BookOrbit's web reader saves two seconds after it lands on a position,
         the one it opens a book at included: the position as a KOReader xpointer and a
         0-100 percentage. The server dates the save with its own clock, and serves it
-        to devices as ``bookorbit-web`` for as long as it is the newest thing it holds."""
-        request_json("POST", self.api(f"/books/files/{file_id}/progress"), self._headers(),
-                     {"cfi": None, "percentage": percentage, "koreaderProgress": xpointer})
+        to devices as ``bookorbit-web`` for as long as it is the newest thing it holds.
+
+        The web reader writes through ``/reading-progress`` since BookOrbit 3.6.0; 3.7.0
+        keeps the older ``/books/files/{id}/progress`` for its iOS app (App Attest), and
+        3.5.0 has only that one."""
+        status, body = _request("PUT", self.api("/reading-progress"), self._headers(), {"writes": [{
+            "fileId": file_id, "kind": "text", "percentage": percentage,
+            "text": {"cfi": None, "page": None}, "koreader": xpointer}]})
+        if status == 404:
+            request_json("POST", self.api(f"/books/files/{file_id}/progress"), self._headers(),
+                         {"cfi": None, "percentage": percentage, "koreaderProgress": xpointer})
+            return
+        if status != 200:
+            raise HttpError("PUT", self.api("/reading-progress"), status, body)
+        result = json.loads(body)["results"][0]
+        assert result["status"] == "saved", f"the web reader's save was not stored: {result}"
 
     def reset_progress(self, file_id: int) -> None:
         """Clear the file's reading progress, as BookOrbit's own interface does. Until a
         device has pushed the start position, the server serves devices the start of the
-        book dated now, as ``bookorbit-web``, and holds back any other position they push."""
-        request_json("DELETE", self.api(f"/books/files/{file_id}/progress"), self._headers(), ok=(200, 204))
+        book dated now, as ``bookorbit-web``, and holds back any other position they push.
+        Same routes as ``save_web_progress``."""
+        status, body = _request("DELETE", self.api(f"/reading-progress/{file_id}"), self._headers())
+        if status == 404:
+            request_json("DELETE", self.api(f"/books/files/{file_id}/progress"), self._headers(), ok=(200, 204))
+        elif status != 204:
+            raise HttpError("DELETE", self.api(f"/reading-progress/{file_id}"), status, body)
 
     def ensure_smart_scope(self, name: str, icon: str, rules: list[dict]) -> int:
         """Create a SmartScope matching ``rules``, or return the existing one by name.

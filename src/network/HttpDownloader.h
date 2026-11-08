@@ -88,9 +88,10 @@ class HttpDownloader {
     // restriction, not TLS authentication (WOLFSSL currently uses insecure TLS).
     bool (*allowUrl)(std::string_view url, void* context) = nullptr;
     void* urlContext = nullptr;
-    // Once the response length is known, fail with INSUFFICIENT_SPACE before
-    // writing anything if the SD card cannot hold the file. The first check
-    // can scan the whole FAT, so leave it off for small files.
+    // Fail with INSUFFICIENT_SPACE when the SD card cannot hold the file: on exFAT
+    // before writing anything, once the response length is known; on FAT32, whose
+    // count can take minutes (see CardSpace), only once a write has failed. The
+    // count reads the card's whole allocation table, so leave it off for small files.
     bool checkFreeSpace = false;
     // Opt in only for bulk WOLFSSL transfers. Reserve after request text is
     // freed; other transports and SDK builds without retention ignore this.

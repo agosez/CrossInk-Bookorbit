@@ -24,7 +24,10 @@ push and on CI.
 - **Library**: [seed/make_library.py](seed/make_library.py) generates ~100
   EPUB variants from `test/epubs/` fixtures (unique title/author/uuid, and a
   verified-unique KOReader partial-MD5 each, since BookOrbit identifies books
-  by content) into `library/`, the local reference copy. The seeder copies
+  by content) into `library/`, the local reference copy. Every book except
+  each 10th embeds a generated PNG cover, which the server extracts on
+  ingestion: the BookOrbit Home scenarios decode those thumbnails, and the
+  coverless books keep the placeholder path covered. The seeder copies
   them into the book-dock volume — the dock consumes its files on finalize.
 - **Seed**: [seed/seed.py](seed/seed.py) bootstraps the server (setup token →
   user → KOReader sync credentials), waits for the library ingestion, then

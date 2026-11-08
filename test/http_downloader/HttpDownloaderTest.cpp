@@ -18,7 +18,8 @@ class HttpDownloaderTest : public testing::TestWithParam<HttpDownloader::Transpo
     nextReply = 0;
     failWrite = failSync = false;
     cardCapacity = cardUsedBytes = 0;
-    fileWriteOpens = capacityChecks = 0;
+    fileWriteOpens = capacityChecks = usedSpaceCounts = 0;
+    cardQuickToCount = true;
     failRemovePaths.clear();
     failRenameSources.clear();
   }
@@ -705,6 +706,54 @@ TEST_P(HttpDownloaderTest, UsedCapacityAboveTotalSaturatesWithoutUnsignedWrap) {
   EXPECT_EQ(HttpDownloader::downloadToFile("https://example.com/book", "/book", nullptr, nullptr, "", "", options),
             HttpDownloader::INSUFFICIENT_SPACE);
   EXPECT_EQ(fileWriteOpens, 0u);
+}
+
+// Counting a FAT32 card's used space can take minutes (#110): the download starts without
+// it, and only a failed write asks the card how full it is.
+TEST_P(HttpDownloaderTest, Fat32CardDownloadsWithoutCountingUsedSpace) {
+  HttpDownloader::DownloadOptions options;
+  options.transport = GetParam();
+  options.stageAsPart = options.checkFreeSpace = true;
+  options.expectedBytes = 6;
+  cardQuickToCount = false;
+  cardCapacity = 14;
+  cardUsedBytes = 8;
+  replies = {{200, "abcdef", 6}};
+  EXPECT_EQ(HttpDownloader::downloadToFile("https://example.com/book", "/book", nullptr, nullptr, "", "", options),
+            HttpDownloader::OK);
+  EXPECT_EQ(files["/book"], "abcdef");
+  EXPECT_EQ(usedSpaceCounts, 0u);
+}
+
+TEST_P(HttpDownloaderTest, Fat32FullCardIsReportedOnceTheWriteFails) {
+  HttpDownloader::DownloadOptions options;
+  options.transport = GetParam();
+  options.stageAsPart = options.checkFreeSpace = true;
+  options.expectedBytes = 3;
+  files["/book"] = "original";
+  cardQuickToCount = false;
+  cardCapacity = cardUsedBytes = 8;
+  failWrite = true;
+  replies = {{200, "abc", 3}};
+  EXPECT_EQ(HttpDownloader::downloadToFile("https://example.com/book", "/book", nullptr, nullptr, "", "", options),
+            HttpDownloader::INSUFFICIENT_SPACE);
+  EXPECT_EQ(fileWriteOpens, 1u);
+  EXPECT_EQ(files["/book"], "original");
+}
+
+TEST_P(HttpDownloaderTest, Fat32WriteErrorWithRoomLeftStaysAFileError) {
+  HttpDownloader::DownloadOptions options;
+  options.transport = GetParam();
+  options.stageAsPart = options.checkFreeSpace = true;
+  options.expectedBytes = 3;
+  files["/book"] = "original";
+  cardQuickToCount = false;
+  cardCapacity = 8;
+  cardUsedBytes = 2;
+  failWrite = true;
+  replies = {{200, "abc", 3}};
+  EXPECT_EQ(HttpDownloader::downloadToFile("https://example.com/book", "/book", nullptr, nullptr, "", "", options),
+            HttpDownloader::FILE_ERROR);
 }
 #endif
 TEST_P(HttpDownloaderTest, FeedDiagnosticsFollowFinalResponseAndAuthorization) {

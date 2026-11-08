@@ -47,6 +47,9 @@ inline std::map<std::string, std::string> files;
 inline bool failWrite = false, failSync = false;
 inline uint64_t cardCapacity = 0, cardUsedBytes = 0;
 inline size_t fileWriteOpens = 0, capacityChecks = 0;
+// CardSpace::isQuickToCount() (CardSpaceStub.cpp): true for exFAT, false for FAT32.
+inline bool cardQuickToCount = true;
+inline size_t usedSpaceCounts = 0;
 inline std::set<std::string> failRemovePaths, failRenameSources;
 struct FsFile {
   std::string path;
@@ -69,7 +72,10 @@ struct StorageFake {
     ++capacityChecks;
     return cardCapacity;
   }
-  uint64_t usedBytes() { return cardUsedBytes; }
+  uint64_t usedBytes() {
+    ++usedSpaceCounts;
+    return cardUsedBytes;
+  }
   bool exists(const char* p) { return files.count(p); }
   bool remove(const char* p) { return !failRemovePaths.count(p) && files.erase(p) > 0; }
   bool rename(const char* a, const char* b) {

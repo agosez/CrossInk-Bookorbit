@@ -831,10 +831,14 @@ def scenario_sleep_sync_cancel(verbose: bool) -> None:
         sim_path = fs.add_book(source)
         fs.set_open_book(sim_path)
         # The 2500 ms press puts the device to sleep, which restarts it into the sleep
-        # sync; the press of the second script lands inside that boot. Woken, the device
-        # stays on its home screen, so the run only ends at the timeout.
+        # sync; the press of the second script lands inside that boot, while the sync
+        # joins Wi-Fi. The simulator samples the button only when the sync checks for a
+        # wake, first as the join ends, and the 20 ms hold completes at a later check, so
+        # the press must be down before the sync's requests start: BookOrbit 3.7.0 answers
+        # them all within the few hundred milliseconds an earlier press would leave.
+        # Woken, the device stays on its home screen, so the run only ends at the timeout.
         output = run_simulator(fs, input_script="2500:POWER:120", choice="none",
-                               timeout_s=14, verbose=verbose, after_reboot_script="300:POWER:600")
+                               timeout_s=14, verbose=verbose, after_reboot_script="100:POWER:600")
         assert "Restarting into the BookOrbit sleep sync" in output, "sleep did not hand over to the sleep sync"
         assert "Sleep sync cancelled: the device was woken" in output, "the press did not cancel the sleep sync"
         cancelled_at = output.index("Sleep sync cancelled")
