@@ -183,7 +183,10 @@ ClippingStore::AddResult ClippingStore::addClipping(const uint16_t spineIndex, c
   clipping.endWordIndex = endWordIndex;
   clipping.wordCount = wordCount;
   clipping.paragraphIndex = paragraphIndex;
-  clipping.timestamp = static_cast<uint32_t>(millis() / 1000UL);
+  // Never 0: the BookOrbit stores and the reader's position mint read 0 as "no timestamp"
+  // and never join such a clipping to its record. A sync can apply received highlights
+  // within the first second of its network boot.
+  clipping.timestamp = std::max<uint32_t>(1, static_cast<uint32_t>(millis() / 1000UL));
   clipping.layoutSignature = layoutSignature;
   clipping.tableSelection = tableSelection;
   copyBounded(clipping.chapterTitle, sizeof(clipping.chapterTitle), chapterTitle);
