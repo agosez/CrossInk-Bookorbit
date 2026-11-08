@@ -1231,6 +1231,15 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
 bool BookOrbitCatalogBrowserActivity::restartForDownload(const int64_t bookId, const int64_t fileId,
                                                          const std::string& title, const std::string& path) {
 #if FREEINK_MCU_C3
+  // A BookOrbit Home shelf opens the catalog's network boot straight onto its book, and
+  // that session ends on Home without browsing. Only the book's details were fetched, so
+  // the heap is still the clean one a download boot gives: a second restart would only
+  // add a second Wi-Fi connection.
+  if (networkBoot && downloadFromHome) {
+    LOG_INF("BookOrbit", "Downloading book %lld in the catalog's network boot, without restarting",
+            static_cast<long long>(bookId));
+    return false;
+  }
   BookOrbitDownloadResume resume;
   resume.bookId = bookId;
   resume.fileId = fileId;

@@ -9,6 +9,10 @@ on; for everything inherited from upstream, see the
 
 Based on CrossInk v1.6.1.
 
+### Changed
+
+- On the X3 and X4, a book picked on a BookOrbit theme shelf now downloads after one restart and one Wi-Fi connection instead of two. The reader used to connect, announce the download, then restart and connect again before it started.
+
 ### Fixed
 
 - With the BookOrbit theme, Home no longer stalls at each start when the SD card is formatted as FAT32: a few seconds on a typical card, several minutes on a slow one, with the screen stuck on "Loading". Home counted the card's used space for the Library page's storage bar, which on FAT32 means reading the whole file allocation table. The storage bar now only appears on exFAT cards, where the same count takes a fraction of a second ([#110](https://github.com/agosez/CrossInk-Bookorbit/issues/110)).
