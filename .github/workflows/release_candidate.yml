@@ -146,9 +146,8 @@ jobs:
             git fetch --depth=1 origin gh-pages
             git worktree add "$PAGES_DIR" FETCH_HEAD
           else
-            git worktree add --detach "$PAGES_DIR"
-            git -C "$PAGES_DIR" checkout -q --orphan gh-pages
-            git -C "$PAGES_DIR" rm -rq .
+            # First publication: an empty worktree on a branch with no history.
+            git worktree add --orphan -b gh-pages "$PAGES_DIR"
           fi
           touch "$PAGES_DIR/.nojekyll"
 
