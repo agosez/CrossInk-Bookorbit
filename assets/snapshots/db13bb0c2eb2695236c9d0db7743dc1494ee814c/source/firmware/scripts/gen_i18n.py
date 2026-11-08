@@ -1,0 +1,1077 @@
+#!/usr/bin/env python3
+"""
+Generate selected built-in I18n languages and stable translation-key metadata.
+
+Reads english.yaml and the frozen languages.json compatibility registry and generates:
+- I18nKeys.h:     Language enum, StrId enum, helper functions
+- I18nStrings.h:  String array declarations
+- I18nStrings.cpp: English strings and stable key metadata
+
+Each YAML file must contain:
+  _language_name: "Native Name"     (e.g. "Español")
+  _language_code: "ENUM_NAME"       (e.g. "ES")
+  STR_KEY: "translation text"
+
+Only selected built-in YAML files are read during firmware builds. Other
+community YAML files remain independent SD assets.
+
+By default the script scans the src/ and lib/ trees for STR_* references and
+reports any translation keys that are never used.  Pass --strip-unused to
+omit those keys from the generated output entirely.
+
+Usage:
+    python gen_i18n.py [translations_dir [output_dir]] [options]
+
+Examples:
+    python gen_i18n.py
+    python gen_i18n.py lib/I18n/translations lib/I18n/
+    python gen_i18n.py --strip-unused
+    python gen_i18n.py --strip-unused --src-dirs src lib/EpdFont
+"""
+
+import hashlib
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+
+ENGLISH_FALLBACK_OFFSET = 0xFFFF
+
+
+# ---------------------------------------------------------------------------
+# YAML file reading (simple key: "value" format, no PyYAML dependency)
+# ---------------------------------------------------------------------------
+
+
+def _unescape_yaml_value(raw: str, filepath: str = "", line_num: int = 0) -> str:
+    """
+    Process escape sequences in a YAML value string.
+
+    Recognized escapes:  \\\\  →  \\       \\"  →  "       \\n  →  newline
+    """
+    result: List[str] = []
+    i = 0
+    while i < len(raw):
+        if raw[i] == "\\" and i + 1 < len(raw):
+            nxt = raw[i + 1]
+            if nxt == "\\":
+                result.append("\\")
+            elif nxt == '"':
+                result.append('"')
+            elif nxt == "n":
+                result.append("\n")
+            else:
+                raise ValueError(f"{filepath}:{line_num}: unknown escape '\\{nxt}'")
+            i += 2
+        else:
+            result.append(raw[i])
+            i += 1
+    return "".join(result)
+
+
+def parse_yaml_file(filepath: str) -> Dict[str, str]:
+    """
+    Parse a simple YAML file of the form:
+        key: "value"
+
+    Only supports flat key-value pairs with quoted string values.
+    Aborts on formatting errors.
+    """
+    result = {}
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line_num, raw_line in enumerate(f, start=1):
+            line = raw_line.rstrip("\n\r")
+
+            if not line.strip():
+                continue
+
+            match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*"(.*)"$', line)
+            if not match:
+                raise ValueError(
+                    f"{filepath}:{line_num}: bad format: {line!r}\n"
+                    f'  Expected:  KEY: "value"'
+                )
+
+            key = match.group(1)
+            raw_value = match.group(2)
+
+            # Un-escape: process character by character to handle
+            # \\, \", and \n sequences correctly
+            value = _unescape_yaml_value(raw_value, filepath, line_num)
+
+            if key in result:
+                raise ValueError(f"{filepath}:{line_num}: duplicate key '{key}'")
+
+            result[key] = value
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Load English from the source YAML directory
+# ---------------------------------------------------------------------------
+
+
+def load_translations(
+    translations_dir: str,
+    verbose: bool = False,
+    builtin: Optional[Set[str]] = None,
+) -> Tuple[List[str], List[str], List[str], Dict[str, List[str]], List[Set[str]]]:
+    """Load selected sources while retaining the frozen legacy identity order.
+
+    Omitted languages inherit English and are never parsed. This keeps an
+    English-only build independent of malformed community starter files.
+    """
+    directory = Path(translations_dir)
+    english = parse_yaml_file(str(directory / "english.yaml"))
+    if english.get("_language_code", "").upper() != "EN":
+        raise ValueError("english.yaml must declare _language_code: EN")
+    identities = known_languages()
+    languages = [code for code, _ in identities]
+    names = [name for _, name in identities]
+    selected = set(languages) if builtin is None else set(builtin) | {"EN"}
+    parsed = {"EN": english}
+    if selected != {"EN"}:
+        for path in sorted(directory.glob("*.yaml")):
+            if path.name == "english.yaml":
+                continue
+            # Read only the identity before deciding whether to validate a source.
+            match = re.search(rb'^_language_code:\s*"([A-Za-z0-9_-]+)"\s*$',
+                              path.read_bytes(), re.MULTILINE)
+            code = match.group(1).decode("ascii").upper() if match else ""
+            if builtin is not None and code not in selected:
+                continue
+            data = parse_yaml_file(str(path))
+            if code not in languages or not data.get("_language_name"):
+                raise ValueError(f"{path.name}: unknown or missing language identity")
+            if code in parsed:
+                raise ValueError(f"Duplicate built-in language code {code}")
+            parsed[code] = data
+    missing = selected - parsed.keys()
+    if missing:
+        raise ValueError(f"Missing built-in translation source(s): {', '.join(sorted(missing))}")
+    keys = [key for key in english if not key.startswith("_")]
+    inherited = [set() for _ in languages]
+    translations = {}
+    for key in keys:
+        reference = english[key]
+        formatted = key.endswith("_FORMAT") or key in FORMAT_KEYS
+        signature = format_signature(reference) if formatted else None
+        if formatted and signature is None:
+            raise ValueError(f"Invalid English printf contract: {key}")
+        row = []
+        for index, code in enumerate(languages):
+            value = parsed.get(code, {}).get(key, "")
+            if not value.strip() or (formatted and format_signature(value) != signature):
+                value = reference
+                if code != "EN":
+                    inherited[index].add(key)
+            row.append(value)
+        translations[key] = row
+    return languages, names, keys, translations, inherited
+
+
+def known_languages():
+    """Frozen compatibility identities, independent of community translations."""
+    root = Path(__file__).resolve().parent.parent if "__file__" in globals() else Path.cwd()
+    return json.loads((root / "lib/I18n/languages.json").read_text(encoding="utf-8"))
+
+
+def stable_hash(text):
+    value = 14695981039346656037
+    for byte in text.encode("utf-8"):
+        value = ((value ^ byte) * 1099511628211) & 0xffffffffffffffff
+    return value
+
+
+# Existing printf keys without the preferred _FORMAT suffix.
+FORMAT_KEYS = {
+    "STR_NETWORKS_FOUND", "STR_NEARBY_TRANSFER_SIZE", "STR_MOVE_TO_READ_FAILED_BODY",
+    "STR_HOLD_FOR_KEYBOARD", "STR_LIBRARY_SCAN_COUNT", "STR_LIBRARY_FILES_COUNT",
+    "STR_STATS_UPLOAD_COUNTS", "STR_FOLDER_SYNC_COUNTS",
+}
+
+
+def format_signature(text):
+    """Match the bounded printf argument contract enforced by LanguageCache."""
+    pattern = re.compile(r'%[-+ #0]*(\*|[0-9]*)(?:\.(\*|[0-9]*))?'
+                         r'(hh|ll|h|l|j|z|t|L)?([diouxXaAeEfFgGcsp])')
+    lengths = {None: 0, "h": 1, "hh": 2, "l": 3, "ll": 4, "j": 5, "z": 6, "t": 7, "L": 8}
+    types = {**dict.fromkeys("di", 1), **dict.fromkeys("ouxX", 2),
+             **dict.fromkeys("aAeEfFgG", 3), "c": 4, "s": 5, "p": 6}
+    signature = []
+    index = 0
+    while (index := text.find("%", index)) >= 0:
+        if text.startswith("%%", index):
+            index += 2
+            continue
+        match = pattern.match(text, index)
+        if not match:
+            return None
+        width, precision, length, conversion = match.groups()
+        for value, limit in [(width, 1024), (precision, 128)]:
+            if value == "*":
+                signature.append(1)
+            elif value is not None and int(value or "0") > limit:
+                return None
+        signature.append(types[conversion] + lengths[length] * 8)
+        if len(signature) > 32:
+            return None
+        index = match.end()
+    return tuple(signature)
+
+
+# ---------------------------------------------------------------------------
+# Unused-string detection
+# ---------------------------------------------------------------------------
+
+_GENERATED_FILENAMES: Set[str] = {"I18nKeys.h", "I18nStrings.h", "I18nStrings.cpp"}
+
+
+def find_used_string_keys(
+    src_dirs: List[str],
+    skip_filenames: Optional[Set[str]] = None,
+) -> Set[str]:
+    """
+    Scan C/C++ source files under *src_dirs* for STR_* identifiers.
+
+    Files whose basename appears in *skip_filenames* are skipped so that
+    the generated I18n files don't count as "usage" of themselves.
+
+    Returns the set of all STR_KEY names that appear at least once.
+    """
+    if skip_filenames is None:
+        skip_filenames = _GENERATED_FILENAMES
+
+    pattern = re.compile(r"\bSTR_[A-Za-z0-9_]+\b")
+    used: Set[str] = set()
+
+    for src_dir in src_dirs:
+        p = Path(src_dir)
+        if not p.is_dir():
+            continue
+        for f in p.rglob("*"):
+            if f.suffix not in {".cpp", ".h", ".c"}:
+                continue
+            if f.name in skip_filenames:
+                continue
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for m in pattern.finditer(text):
+                used.add(m.group(0))
+
+    return used
+
+
+def report_unused_keys(
+    string_keys: List[str],
+    used_keys: Set[str],
+) -> List[str]:
+    """Return a sorted list of keys from *string_keys* absent in *used_keys*."""
+    return [k for k in sorted(string_keys) if k not in used_keys]
+
+
+# ---------------------------------------------------------------------------
+# C++ string escaping
+# ---------------------------------------------------------------------------
+
+
+def escape_cpp_string(s: str) -> List[str]:
+    r"""
+    Convert *s* into one or more C++ string literal segments.
+
+    Non-ASCII characters are emitted as \xNN hex sequences. After each
+    hex escape a new segment is started so the compiler doesn't merge
+    subsequent hex digits into the escape.
+
+    Returns a list of string segments (without quotes). For simple ASCII
+    strings this is a single-element list.
+    """
+    if not s:
+        return [""]
+
+    s = s.replace("\n", "\\n")
+
+    # Build a flat list of "tokens", where each token is either a regular
+    # character sequence or a hex escape.  A segment break happens after
+    # every hex escape.
+    segments: List[str] = []
+    current: List[str] = []
+    i = 0
+
+    def _flush() -> None:
+        segments.append("".join(current))
+        current.clear()
+
+    while i < len(s):
+        ch = s[i]
+
+        if ch == "\\" and i + 1 < len(s):
+            nxt = s[i + 1]
+            if nxt in 'ntr"\\':
+                current.append(ch + nxt)
+                i += 2
+            elif nxt == "x" and i + 3 < len(s):
+                current.append(s[i : i + 4])
+                _flush()  # segment break after hex
+                i += 4
+            else:
+                current.append("\\\\")
+                i += 1
+        elif ch == '"':
+            current.append('\\"')
+            i += 1
+        elif ord(ch) < 128:
+            current.append(ch)
+            i += 1
+        else:
+            for byte in ch.encode("utf-8"):
+                current.append(f"\\x{byte:02X}")
+                _flush()  # segment break after hex
+            i += 1
+
+    # Flush remaining content
+    _flush()
+
+    return segments
+
+
+def format_cpp_string_literal(segments: List[str], indent: str = "    ") -> List[str]:
+    """
+    Format string segments (from escape_cpp_string) as indented C++ string
+    literal lines, each wrapped in quotes.
+    Also wraps long segments to respect ~120 column limit.
+    """
+    # Effective limit for content: 120 - 4 (indent) - 2 (quotes) - 1 (comma/safety) = 113
+    # Using 113 to match clang-format exactly (120 - 4 - 2 - 1)
+    MAX_CONTENT_LEN = 113
+
+    lines: List[str] = []
+
+    for seg in segments:
+        # Short segment (e.g. hex escape or short text)
+        if len(seg) <= MAX_CONTENT_LEN:
+            lines.append(f'{indent}"{seg}"')
+            continue
+
+        # Long segment - wrap it
+        current = seg
+        while len(current) > MAX_CONTENT_LEN:
+            # Find best split point
+            # Scan forward to find last space <= MAX_CONTENT_LEN
+            last_space = -1
+            idx = 0
+            while idx <= MAX_CONTENT_LEN and idx < len(current):
+                if current[idx] == " ":
+                    last_space = idx
+
+                # Handle escapes to step correctly
+                if current[idx] == "\\":
+                    idx += 2
+                else:
+                    idx += 1
+
+            # If we found a space, split after it
+            if last_space != -1:
+                # Include the space in the first line
+                split_point = last_space + 1
+                lines.append(f'{indent}"{current[:split_point]}"')
+                current = current[split_point:]
+            else:
+                # No space, forced break at MAX_CONTENT_LEN (or slightly less)
+                cut_at = MAX_CONTENT_LEN
+                # Don't cut in the middle of an escape sequence
+                if current[cut_at - 1] == "\\":
+                    cut_at -= 1
+
+                lines.append(f'{indent}"{current[:cut_at]}"')
+                current = current[cut_at:]
+
+        if current:
+            lines.append(f'{indent}"{current}"')
+
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Character-set computation
+# ---------------------------------------------------------------------------
+
+
+def compute_character_set(translations: Dict[str, List[str]], lang_index: int) -> str:
+    """Return a sorted string of every unique character used in a language."""
+    chars = set()
+    for values in translations.values():
+        for ch in values[lang_index]:
+            chars.add(ord(ch))
+    return "".join(chr(cp) for cp in sorted(chars))
+
+
+# ---------------------------------------------------------------------------
+# Code generators
+# ---------------------------------------------------------------------------
+
+
+def generate_keys_header(
+    languages: List[str],
+    language_names: List[str],
+    string_keys: List[str],
+    output_path: str,
+    verbose: bool = False,
+    builtin: Optional[Set[str]] = None,
+) -> None:
+    """Generate I18nKeys.h.
+
+    Every language keeps its enum value, code and name, so code that names a
+    language (keyboard layouts, the V1 migration table) compiles either way.
+    Only built-in languages get string tables and appear in the picker.
+    """
+    compiled = [c for c in languages if builtin is None or c in builtin]
+    lines: List[str] = [
+        "#pragma once",
+        "#include <cstdint>",
+        "",
+        "// THIS FILE IS AUTO-GENERATED BY gen_i18n.py. DO NOT EDIT.",
+        "// clang-format off",
+        "",
+        "// Forward declarations for flat string data blobs and offset tables",
+        "namespace i18n_strings {",
+    ]
+
+    for code in compiled:
+        lines.append(f"extern const char STRINGS_{code}_DATA[];")
+        lines.append(f"extern const uint16_t OFFSETS_{code}[];")
+
+    lines.append("}  // namespace i18n_strings")
+    lines.append("")
+
+    # Language enum
+    lines.append("// Language enum")
+    lines.append("enum class Language : uint8_t {")
+    for i, (lang, _) in enumerate(known_languages()):
+        lines.append(f"  {lang} = {i},")
+    lines.append("  _COUNT")
+    lines.append("};")
+    lines.append("")
+
+    lines.append("// Only configured languages have embedded translation tables.")
+    lines.append("constexpr bool isLanguageBuiltIn(Language lang) {")
+    lines.append("  switch (lang) {")
+    for code in compiled:
+        lines.append(f"    case Language::{code}:")
+    lines.append("      return true;")
+    lines.append("    default:")
+    lines.append("      return false;")
+    lines.append("  }")
+    lines.append("}")
+    lines.append("")
+
+    # Extern declarations
+    lines.append("// Language codes (defined in I18nStrings.cpp)")
+    lines.append("extern const char* const LANGUAGE_CODES[];")
+    lines.append("")
+
+    lines.append("// Language display names (defined in I18nStrings.cpp)")
+    lines.append("extern const char* const LANGUAGE_NAMES[];")
+    lines.append("")
+    lines.append("// Character sets for each language (defined in I18nStrings.cpp)")
+    lines.append("extern const char* const CHARACTER_SETS[];")
+    lines.append("")
+
+    lines.extend([
+        "// Stable key metadata used only while installing or opening a language cache.",
+        "struct TranslationKey {",
+        "  uint64_t keyHash;",
+        "  uint64_t englishHash;",
+        "  const char* name;",
+        "  uint16_t id;",
+        "  bool formatted;",
+        "};",
+        "extern const TranslationKey TRANSLATION_KEYS[];",
+        "",
+    ])
+
+    # StrId enum
+    lines.append("// String IDs")
+    lines.append("enum class StrId : uint16_t {")
+    for key in string_keys:
+        lines.append(f"  {key},")
+    lines.append("  // Sentinel - must be last")
+    lines.append("  _COUNT")
+    lines.append("};")
+    lines.append("")
+
+    # LangStrings struct
+    lines.append("// Holds a flat string blob and its offset table for one language")
+    lines.append("struct LangStrings {")
+    lines.append("  const char* data;")
+    lines.append("  const uint16_t* offsets;")
+    lines.append("};")
+    lines.append("")
+
+    lines.append(f"constexpr uint16_t I18N_ENGLISH_FALLBACK_OFFSET = {ENGLISH_FALLBACK_OFFSET};")
+    lines.append("")
+
+    # getLanguageStrings helper
+    lines.append("// Helper function to get string data for a language")
+    lines.append("inline LangStrings getLanguageStrings(Language lang) {")
+    lines.append("  switch (lang) {")
+    # A language left out of the build falls through to English below.
+    for code in compiled:
+        lines.append(f"    case Language::{code}:")
+        lines.append(
+            f"      return {{i18n_strings::STRINGS_{code}_DATA, i18n_strings::OFFSETS_{code}}};"
+        )
+    first_code = languages[0]
+    lines.append("    default:")
+    lines.append(
+        f"      return {{i18n_strings::STRINGS_{first_code}_DATA, i18n_strings::OFFSETS_{first_code}}};"
+    )
+    lines.append("  }")
+    lines.append("}")
+    lines.append("")
+
+    # getLanguageCount helper (single line to match checked-in format)
+    lines.append("// Helper function to get language count")
+    lines.append(
+        "constexpr uint8_t getLanguageCount() "
+        "{ return static_cast<uint8_t>(Language::_COUNT); }"
+    )
+    lines.append("")
+
+    # V1 language.bin migration table -- frozen enum order from commit 2f969a9.
+    # Maps the old uint8_t index stored on disk to the current Language enum.
+    # If a Language enum value listed here is ever removed, this will fail to
+    # compile, signalling that the migration table needs updating.
+    v1_codes = [
+        "EN", "ES", "FR", "DE", "CS", "PT", "RU", "SV", "RO", "CA", "UK",
+        "BE", "IT", "PL", "FI", "DA", "NL", "TR", "KK", "HU", "LT", "SI",
+    ]
+    lines.append("// V1 language.bin migration table (frozen enum order from 2f969a9)")
+    lines.append("constexpr Language V1_LANGUAGES[] = {")
+    lines.append("    " + ", ".join(f"Language::{c}" for c in v1_codes) + ",")
+    lines.append("};")
+    lines.append(
+        f"constexpr uint8_t V1_LANGUAGE_COUNT = {len(v1_codes)};"
+    )
+
+    _write_file(output_path, lines, verbose)
+
+
+def generate_strings_header(
+    languages: List[str],
+    language_names: List[str],
+    output_path: str,
+    verbose: bool = False,
+    builtin: Optional[Set[str]] = None,
+) -> None:
+    """Generate I18nStrings.h."""
+    lines: List[str] = [
+        "#pragma once",
+        '#include "I18nKeys.h"',
+        "",
+        "// THIS FILE IS AUTO-GENERATED BY gen_i18n.py. DO NOT EDIT.",
+        "// clang-format off",
+        "",
+        "namespace i18n_strings {",
+        "",
+    ]
+
+    lines.append("extern const char SOURCE_SHA256[];")
+    lines.append("extern const char KEYSET_SHA256[];")
+
+    for code in (c for c in languages if builtin is None or c in builtin):
+        lines.append(f"extern const char STRINGS_{code}_DATA[];")
+        lines.append(f"extern const uint16_t OFFSETS_{code}[];")
+
+    lines.append("")
+    lines.append("}  // namespace i18n_strings")
+    _write_file(output_path, lines, verbose)
+
+
+def generate_strings_cpp(
+    languages: List[str],
+    language_names: List[str],
+    string_keys: List[str],
+    translations: Dict[str, List[str]],
+    output_path: str,
+    verbose: bool = False,
+    builtin: Optional[Set[str]] = None,
+    source_sha256: str = "",
+    keyset_sha256: str = "",
+) -> None:
+    """Generate I18nStrings.cpp."""
+    compiled = [c for c in languages if builtin is None or c in builtin]
+    lines: List[str] = [
+        "// THIS FILE IS AUTO-GENERATED BY gen_i18n.py. DO NOT EDIT.",
+        "// clang-format off",
+        '#include "I18nStrings.h"',
+        "",
+        "#include <cstddef>",
+        "",
+    ]
+
+    # LANGUAGE_CODES array
+    lines.append("// Language codes")
+    lines.append("const char* const LANGUAGE_CODES[] = {")
+    for code, _ in known_languages():
+        _append_string_entry(lines, code)
+    lines.append("};")
+    lines.append("")
+
+    # LANGUAGE_NAMES array
+    lines.append("// Language display names")
+    lines.append("const char* const LANGUAGE_NAMES[] = {")
+    for _, name in known_languages():
+        _append_string_entry(lines, name)
+    lines.append("};")
+    lines.append("")
+
+    # CHARACTER_SETS array
+    lines.append("// Character sets for each language")
+    lines.append("const char* const CHARACTER_SETS[] = {")
+    for lang_idx, name in enumerate(language_names):
+        # A language left out of the build renders English strings, so it needs English glyphs.
+        in_build = languages[lang_idx] in compiled
+        charset = compute_character_set(translations, lang_idx if in_build else 0)
+        _append_string_entry(lines, charset, comment=name)
+    lines.append("};")
+    lines.append("")
+
+    keyed = sorted((stable_hash(key), key, i) for i, key in enumerate(string_keys))
+    if len({h for h, _, _ in keyed}) != len(keyed):
+        raise ValueError("Translation key hash collision")
+    lines.append("const TranslationKey TRANSLATION_KEYS[] = {")
+    for key_hash, key, i in keyed:
+        source_hash = stable_hash(translations[key][0])
+        formatted = "true" if key.endswith("_FORMAT") or key in FORMAT_KEYS else "false"
+        lines.append(f'  {{0x{key_hash:016x}ULL, 0x{source_hash:016x}ULL, "{key}", {i}, {formatted}}},')
+    lines.extend(["};", ""])
+
+    # Per-language flat string blobs and offset tables.
+    # Non-English languages skip strings identical to English; their offset
+    # tables use the reserved offset 0xFFFF to select the same key in English.
+    # This leaves the other 16-bit offsets available for localized UTF-8 data.
+    lines.append("namespace i18n_strings {")
+    lines.append("")
+
+    lines.append(f'const char SOURCE_SHA256[] = "{source_sha256}";')
+    lines.append(f'const char KEYSET_SHA256[] = "{keyset_sha256}";')
+
+    en_strings = [translations[key][0] for key in string_keys]
+    for lang_idx, code in enumerate(languages):
+        if code not in compiled:
+            continue
+        lang_strings = [translations[key][lang_idx] for key in string_keys]
+        is_english = lang_idx == 0
+
+        if is_english:
+            # Precompute byte offsets (UTF-8 encoded, +1 per string for null terminator)
+            offsets: List[int] = []
+            current_offset = 0
+            for s in lang_strings:
+                offsets.append(current_offset)
+                current_offset += len(s.encode("utf-8")) + 1
+            if current_offset > ENGLISH_FALLBACK_OFFSET:
+                raise ValueError(
+                    f"Language {code}: blob size ({current_offset} bytes) exceeds "
+                    "16-bit blob limit (65535)"
+                )
+            blob_strings = lang_strings
+        else:
+            offsets = []
+            current_offset = 0
+            blob_strings = []
+            for s, en_s in zip(lang_strings, en_strings):
+                if s == en_s:
+                    offsets.append(ENGLISH_FALLBACK_OFFSET)
+                else:
+                    offsets.append(current_offset)
+                    current_offset += len(s.encode("utf-8")) + 1
+                    blob_strings.append(s)
+            if current_offset > ENGLISH_FALLBACK_OFFSET:
+                raise ValueError(
+                    f"Language {code}: blob size ({current_offset} bytes) exceeds "
+                    "16-bit blob limit (65535)"
+                )
+
+        # Flat string data blob — all strings concatenated with \0 separators.
+        lines.append(f"const char STRINGS_{code}_DATA[] =")
+        for text in blob_strings:
+            _append_string_data_entry(lines, text)
+        if not blob_strings:
+            _append_string_data_entry(lines, "")
+        lines.append(";")
+        lines.append("")
+
+        # Offset table — one uint16_t per StrId
+        lines.append(f"const uint16_t OFFSETS_{code}[] = {{")
+        chunk_size = 12
+        for i in range(0, len(offsets), chunk_size):
+            chunk = offsets[i : i + chunk_size]
+            lines.append("    " + ", ".join(str(o) for o in chunk) + ",")
+        lines.append("};")
+        lines.append("")
+
+    lines.append("}  // namespace i18n_strings")
+    lines.append("")
+
+    # Compile-time size checks
+    lines.append("// Compile-time validation of array sizes")
+    for code in compiled:
+        lines.append(
+            f"static_assert(sizeof(i18n_strings::OFFSETS_{code}) "
+            f"/ sizeof(i18n_strings::OFFSETS_{code}[0]) =="
+        )
+        lines.append("                  static_cast<size_t>(StrId::_COUNT),")
+        lines.append(f'              "OFFSETS_{code} size mismatch");')
+
+    _write_file(output_path, lines, verbose)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _print_language_table(
+    language_codes: List[str],
+    language_names: List[str],
+    inherited_sets: List[Set[str]],
+    string_keys: List[str],
+    unused_keys: Set[str],
+    data_sizes: List[int],
+) -> None:
+    """Print a per-language summary table."""
+    total = len(string_keys)
+    headers = ("Language", "Code", "Own", "Fallback", "Unused", "Data (B)")
+
+    rows = []
+    for code, name, inherited, size in zip(
+        language_codes, language_names, inherited_sets, data_sizes
+    ):
+        own = total - len(inherited)
+        fallback = len(inherited)
+        # strings this language translated but the code never calls
+        unused = len(unused_keys - inherited)
+        rows.append((name, code, str(own), str(fallback), str(unused), str(size)))
+
+    # EN first, then alphabetically by ISO code
+    rows.sort(key=lambda r: (0 if r[1] == "EN" else 1, r[1]))
+
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], len(cell))
+
+    fmt = "  ".join(f"{{:<{w}}}" for w in col_widths)
+    sep = "  ".join("-" * w for w in col_widths)
+
+    def _safe_print(line: str) -> None:
+        print(
+            line.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(
+                sys.stdout.encoding or "utf-8", errors="replace"
+            )
+        )
+
+    _safe_print(fmt.format(*headers))
+    _safe_print(sep)
+    for row in rows:
+        _safe_print(fmt.format(*row))
+    used = total - len(unused_keys)
+    dedup_size = sum(data_sizes)
+    n_lang = len(rows)
+    n_keys = len(string_keys)
+    offset_table_size = n_lang * n_keys * 2
+    current_total = dedup_size + offset_table_size
+    print(
+        f"\n  Total: {total}  |  Used in code: {used}  |  Never used: {len(unused_keys)}"
+    )
+    print(
+        f"  Flash: {dedup_size:>7,} B strings (deduped)  +  {offset_table_size:>6,} B offset tables"
+        f"  =  {current_total:>7,} B"
+    )
+
+
+def _append_string_data_entry(lines: List[str], text: str) -> None:
+    """
+    Escape *text*, append a \\0 null separator, and format as indented C++
+    string literal lines for inclusion in a flat char data array blob.
+    """
+    segments = escape_cpp_string(text)
+    # Append the null entry separator to the last segment
+    if segments and segments[-1] != "":
+        segments[-1] += "\\0"
+    elif segments:
+        segments[-1] = "\\0"
+    else:
+        segments = ["\\0"]
+    lines.extend(format_cpp_string_literal(segments))
+
+
+def _append_string_entry(lines: List[str], text: str, comment: str = "") -> None:
+    """Escape *text*, format as indented C++ lines, append comma (and optional comment)."""
+    segments = escape_cpp_string(text)
+    formatted = format_cpp_string_literal(segments)
+    suffix = f",  // {comment}" if comment else ","
+    formatted[-1] += suffix
+    lines.extend(formatted)
+
+
+def _write_file(path: str, lines: List[str], verbose: bool = False) -> None:
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines))
+        f.write("\n")
+    if verbose:
+        print(f"Generated: {path}")
+
+
+def parse_builtin_langs(value: Optional[str], languages: List[str]) -> Optional[Set[str]]:
+    """Resolve a comma-separated language list to the set compiled into the firmware.
+
+    None, empty or "all" means every language (returns None). English is always
+    included: it is the fallback every other language's offsets point into.
+    An unknown code is an error rather than silently dropped, so a typo cannot
+    ship a build that is missing a language someone asked for.
+    """
+    if value is None or value.strip().lower() in ("", "all"):
+        return None
+    by_upper = {c.upper(): c for c in languages}
+    requested = [t.strip().upper() for t in value.split(",") if t.strip()]
+    unknown = [t for t in requested if t not in by_upper]
+    if unknown:
+        raise ValueError(
+            f"Unknown language code(s) in built-in list: {', '.join(unknown)}. "
+            f"Valid codes: {', '.join(languages)}"
+        )
+    return {by_upper[t] for t in requested} | {"EN"}
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main(
+    translations_dir: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    src_dirs: Optional[List[str]] = None,
+    strip_unused: bool = False,
+    verbose: bool = False,
+    builtin_langs: Optional[str] = "en",
+) -> None:
+    # Default paths (relative to project root)
+    default_translations_dir = "lib/I18n/translations"
+    default_output_dir = "lib/I18n/"
+    default_src_dirs = ["src", "lib"]
+
+    if translations_dir is None or output_dir is None:
+        if len(sys.argv) == 3:
+            translations_dir = sys.argv[1]
+            output_dir = sys.argv[2]
+        else:
+            # Default for no arguments or weird arguments (e.g. SCons)
+            translations_dir = default_translations_dir
+            output_dir = default_output_dir
+
+    if src_dirs is None:
+        src_dirs = default_src_dirs
+
+    if not os.path.isdir(translations_dir):
+        print(f"Error: Translations directory not found: {translations_dir}")
+        sys.exit(1)
+
+    if not os.path.isdir(output_dir):
+        print(f"Error: Output directory not found: {output_dir}")
+        sys.exit(1)
+
+    if verbose:
+        print(f"Reading translations from: {translations_dir}")
+        print(f"Output directory: {output_dir}")
+        print()
+
+    try:
+        builtin = parse_builtin_langs(builtin_langs, [code for code, _ in known_languages()])
+        languages, language_names, string_keys, translations, inherited_sets = (
+            load_translations(translations_dir, verbose, builtin)
+        )
+
+        # --- Unused-string detection ---
+        scan_dirs = [d for d in src_dirs if os.path.isdir(d)]
+        if scan_dirs:
+            used_keys = find_used_string_keys(scan_dirs)
+            unused_set = set(report_unused_keys(string_keys, used_keys))
+        else:
+            used_keys = set(string_keys)
+            unused_set = set()
+
+        # --- Missing-string detection (used in code but absent from English) ---
+        missing_keys = sorted(used_keys - set(string_keys))
+        if missing_keys:
+            print(
+                f"\n  CRITICAL: {len(missing_keys)} string(s) used in source but missing from english.yaml:"
+            )
+            for key in missing_keys:
+                print(f"    - {key}")
+            print()
+            sys.exit(1)
+
+        # Compute per-language data blob sizes (after dedup).
+        # Non-English languages omit strings identical to English.
+        data_sizes = []
+        for i in range(len(languages)):
+            if i == 0:
+                data_sizes.append(
+                    sum(len(translations[k][0].encode("utf-8")) + 1 for k in string_keys)
+                )
+            else:
+                data_sizes.append(
+                    sum(
+                        len(translations[k][i].encode("utf-8")) + 1
+                        for k in string_keys
+                        if translations[k][i] != translations[k][0]
+                    )
+                )
+
+        _print_language_table(
+            languages,
+            language_names,
+            inherited_sets,
+            string_keys,
+            unused_set,
+            data_sizes,
+        )
+        print()
+
+        if verbose and unused_set:
+            print(f"  Unused keys ({len(unused_set)}):")
+            for key in sorted(unused_set):
+                print(f"    - {key}")
+            print()
+
+        source_bytes = (Path(translations_dir) / "english.yaml").read_bytes()
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        source_keys = [key for key in parse_yaml_file(str(Path(translations_dir) / "english.yaml"))
+                       if key.startswith("STR_")]
+        keyset_sha256 = hashlib.sha256(("\n".join(source_keys) + "\n").encode("utf-8")).hexdigest()
+
+        if unused_set and strip_unused:
+            string_keys = [k for k in string_keys if k not in unused_set]
+            translations = {
+                k: v for k, v in translations.items() if k not in unused_set
+            }
+            inherited_sets = [s - unused_set for s in inherited_sets]
+            print(f"  Stripping {len(unused_set)} unused string(s) from output.")
+
+        out = Path(output_dir)
+        generate_keys_header(
+            languages,
+            language_names,
+            string_keys,
+            str(out / "I18nKeys.h"),
+            verbose,
+            builtin,
+        )
+        generate_strings_header(
+            languages, language_names, str(out / "I18nStrings.h"), verbose, builtin
+        )
+        generate_strings_cpp(
+            languages,
+            language_names,
+            string_keys,
+            translations,
+            str(out / "I18nStrings.cpp"),
+            verbose,
+            builtin,
+            source_sha256,
+            keyset_sha256,
+        )
+
+        print()
+        print("Code generation complete!")
+        if builtin is None:
+            print(f"  Languages: {len(languages)}")
+        else:
+            compiled_codes = ", ".join(c for c in languages if c in builtin)
+            print(f"  Languages: {len(builtin)} of {len(languages)} built in ({compiled_codes})")
+        print(f"  String keys: {len(string_keys)}")
+        if unused_set and not strip_unused:
+            print(
+                f"  Unused keys: {len(unused_set)} (pass --strip-unused to remove them)"
+            )
+
+    except Exception as e:
+        print(f"\nError: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Generate English-only I18n firmware data and stable translation-key metadata."
+    )
+    parser.add_argument(
+        "translations_dir",
+        nargs="?",
+        default=None,
+        help="Path to the translations directory (default: lib/I18n/translations)",
+    )
+    parser.add_argument(
+        "output_dir",
+        nargs="?",
+        default=None,
+        help="Path to the output directory (default: lib/I18n/)",
+    )
+    parser.add_argument(
+        "--src-dirs",
+        nargs="+",
+        metavar="DIR",
+        default=None,
+        help="Source directories to scan for STR_* usage (default: src lib)",
+    )
+    parser.add_argument(
+        "--strip-unused",
+        action="store_true",
+        help="Remove unused STR_* keys from the generated output",
+    )
+    parser.add_argument(
+        "--builtin-langs",
+        metavar="CODES",
+        default="en",
+        help='Comma-separated language codes to compile in, or "all" (default: en)',
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Print per-key INFO/WARNING messages and file generation details",
+    )
+    args = parser.parse_args()
+    main(
+        args.translations_dir,
+        args.output_dir,
+        args.src_dirs,
+        args.strip_unused,
+        args.verbose,
+        args.builtin_langs,
+    )
+else:
+    try:
+        Import("env")
+        main(
+            strip_unused=True,
+            builtin_langs=env.GetProjectOption("custom_i18n_builtin_langs", "en"),
+        )
+        keys_path = Path("lib/I18n/I18nKeys.h")
+        layout_hash = hashlib.sha256(keys_path.read_bytes()).hexdigest()[:16]
+        # StrId values are compiled into every tr(...) call. Include the
+        # generated layout in the command signature so PlatformIO rebuilds
+        # consumers when IDs move, not only the generated string table.
+        env.Append(CPPDEFINES=[f"I18N_LAYOUT_{layout_hash}"])
+    except NameError:
+        pass
