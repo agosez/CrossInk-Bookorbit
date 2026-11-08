@@ -1,0 +1,38 @@
+{
+  "format": "CPHY v1",
+  "languages": [
+    "de",
+    "es",
+    "fr",
+    "it",
+    "pl",
+    "pt",
+    "ru",
+    "sv",
+    "uk"
+  ],
+  "source": "CrossInk checked-in generated hyphenation tables",
+  "sha256": {
+    ".crossink/hyphenation/hyph-de.cphyph": "0f1900894309c7506359806e9342287ce548f7391ddc3a9941951436653b8ca2",
+    ".crossink/hyphenation/hyph-es.cphyph": "e4a84514922fcc2c7477a523b8e46c0c62eab0395619c1c69c0cef036e6aecef",
+    ".crossink/hyphenation/hyph-fr.cphyph": "d4f720ce0bd3ac6c728584e1f76726db71f58699f476a82c1a0dd5cb9bc5e203",
+    ".crossink/hyphenation/hyph-it.cphyph": "8f8306b1af27e5109f20c5afdd44b73246685405dd35bd7b511d05e34b730b2a",
+    ".crossink/hyphenation/hyph-pl.cphyph": "ece20f3e6c391e2a0ee91e4e838620ec582824460dfe5467b0c92c617f8e441e",
+    ".crossink/hyphenation/hyph-pt.cphyph": "7aef3bc622cd1128c848b666856f44041f2d45c668b0fa0e9cb41d8b5692a275",
+    ".crossink/hyphenation/hyph-ru.cphyph": "10e093c562f2358cb12e519658fd0da0ca75a94d2a3d497ef06c0d096f0edbe7",
+    ".crossink/hyphenation/hyph-sv.cphyph": "6b2e76e0e125b8d73a23512d271dd6ae1e5955145163fd55e10a29421da2b35a",
+    ".crossink/hyphenation/hyph-uk.cphyph": "abd9f19848b6062ee836ccf9798317826f5b30ade8f3f09671d8d91bca445050",
+    "hyphenation-sources/LICENSE-APACHE": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+    "hyphenation-sources/LICENSE-MIT": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1",
+    "hyphenation-sources/README.md": "12caac3343917ae493270d7bfaae73d2815a40c5e5fe97b0c5a73a40c3a45815",
+    "hyphenation-sources/patterns/hyph-de-1996.tex": "374ad1ce3263f8a2791ec070ef9b516c532dae64456f3fb656e617e8ae53a9d3",
+    "hyphenation-sources/patterns/hyph-es.tex": "6a2e5f39a991a23d1cd8a23dbd0f6fe96a9f07561a6695f4f3320f47030e236c",
+    "hyphenation-sources/patterns/hyph-fr.tex": "526cad6fe8f52fcd3caa3fcaf667cb1740cfc14bca198680e00dc343a84594de",
+    "hyphenation-sources/patterns/hyph-it.tex": "6ce56ed6ed2ca7c0688838e366e6595e0429f984f4fc6e96ec045cebb1e76a47",
+    "hyphenation-sources/patterns/hyph-pl.tex": "83ddbbd21bc06a44bc4f4a4c49c38782e809cff5f026b764c044daa29e818843",
+    "hyphenation-sources/patterns/hyph-pt.tex": "c110a39e501db372d1d755e1c64464321a2efa7d8e9617f66001000389b941f2",
+    "hyphenation-sources/patterns/hyph-ru.tex": "ce988fcc66e5e29d7474df5ab5b489d3f52a50ebccf570997f992d84221b922a",
+    "hyphenation-sources/patterns/hyph-sv.tex": "102253382bd91cdb7535de5c20744254c9ac9aaa4ca12ed420eb835e5004c0b3",
+    "hyphenation-sources/patterns/hyph-uk.tex": "05fdacf5a771f5c528dd65f6f67b63fedb6f6caf768902c24ec81676e500966f"
+  }
+}
