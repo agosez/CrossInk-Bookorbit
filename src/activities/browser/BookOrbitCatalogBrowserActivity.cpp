@@ -150,6 +150,11 @@ void addCountBadge(Entry& entry, const int count) {
   entry.title += " (" + std::to_string(count) + ")";
 }
 
+// Root sections that list facets (authors, series...) rather than books.
+bool isFacetSection(const std::string& id) {
+  return id == "authors" || id == "series" || id == "collections" || id == "libraries" || id == "smart-scopes";
+}
+
 constexpr size_t BOOKORBIT_DOWNLOAD_BUFFER_SIZE = 2048;
 constexpr char READ_FOLDER_PREFIX[] = "/Read";
 constexpr size_t MAX_LOCAL_ENTRIES = 200;
@@ -402,10 +407,15 @@ void BookOrbitCatalogBrowserActivity::onWifiSelectionComplete(const bool connect
     showLoadingBeforeFetch();
     loadRoot();
   }
+  // A linked section opens over the root, which Back returns to.
   if (!entryLink.sectionId.empty()) {
     const BookOrbitCatalogLink link = std::move(entryLink);
     entryLink = BookOrbitCatalogLink{};
-    loadFacetEntries(link.sectionId, link.title, 1);
+    if (isFacetSection(link.sectionId)) {
+      loadFacetEntries(link.sectionId, link.title, 1);
+    } else {
+      openBookListing(BookOrbitCatalogClient::sectionBookQuery(link.sectionId), link.title, /*fromFacet=*/false);
+    }
   }
 }
 
@@ -465,9 +475,7 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   listFreedForDownload = false;
   for (auto& section : sections) {
     Entry entry;
-    const bool isFacet = section.id == "authors" || section.id == "series" || section.id == "collections" ||
-                         section.id == "libraries" || section.id == "smart-scopes";
-    entry.type = isFacet ? EntryType::FACET_SECTION : EntryType::SECTION;
+    entry.type = isFacetSection(section.id) ? EntryType::FACET_SECTION : EntryType::SECTION;
     entry.title = section.title;
     const int count = sectionCount(section.id);
     if (count >= 0) addCountBadge(entry, count);

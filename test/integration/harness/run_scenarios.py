@@ -653,6 +653,39 @@ def scenario_home_download_returns_home(verbose: bool) -> None:
         assert not (fs.crosspoint / "bookorbit_download.json").exists(), "the download was left to resume"
 
 
+def home_snapshot_continue_total(fs: SimFs) -> int:
+    """The snapshot's continueTotal: the eighth 4-byte field of BookOrbitHomeSnapshot."""
+    return struct.unpack_from("<i", (fs.crosspoint / "bookorbit_home.bin").read_bytes(), 8 + 7 * 4)[0]
+
+
+def scenario_home_also_reading_link(verbose: bool) -> None:
+    """The BookOrbit Home's "All (N) >" link opens the catalog on Continue reading, over
+    the root that Back returns to, and N is that listing's total as the sync counted it."""
+    manifest, _ = load_seed()
+    server = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                          manifest["kosync"]["password"], SIM_DEVICE_ID)
+    reading_total = server.catalog_page(size=1, format="epub", readStatus="reading")["total"]
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        (fs.crosspoint / "crossink-settings.json").write_text(json.dumps({"uiTheme": UI_THEME_BOOKORBIT}))
+        run_simulator(fs, input_script="3000:DOWN:120;4500:CONFIRM:120", choice="none", timeout_s=14,
+                      verbose=verbose)
+        assert home_snapshot_header(fs) is not None, "the tile wrote no Home snapshot"
+        assert home_snapshot_continue_total(fs) == reading_total, \
+            f"snapshot counts {home_snapshot_continue_total(fs)} books in progress, the server {reading_total}"
+
+        # Without books the link is the page's third stop, after the BookOrbit tile.
+        script = ";".join(["3000:DOWN:120", "3500:DOWN:120", "4500:CONFIRM:120", "14000:QUIT"])
+        run_simulator(fs, input_script=script, choice="none", timeout_s=40, verbose=verbose)
+
+        caches = [json.loads(p.read_text())
+                  for p in sorted((fs.crosspoint / "bookorbit_lists").glob("*.json"))]
+        assert any("sections" in c for c in caches), "the catalog root was never loaded"
+        # Book cache keys are books|page|sort|readStatus|...
+        listings = {tuple(c["key"].split("|")[2:4]) for c in caches if c.get("key", "").startswith("books|")}
+        assert listings == {("recently_read", "reading")}, f"the link did not open Continue reading: {listings}"
+
+
 def scenario_sleep_sync_refreshes_home(verbose: bool) -> None:
     """Sync on Sleep also refreshes the Home snapshot, but only under the BookOrbit theme."""
     manifest, _ = load_seed()
@@ -1891,6 +1924,7 @@ SCENARIOS = {
     "sleep_sync_refreshes_home": scenario_sleep_sync_refreshes_home,
     "home_theme_refresh": scenario_home_theme_refresh,
     "home_download_returns_home": scenario_home_download_returns_home,
+    "home_also_reading_link": scenario_home_also_reading_link,
     "sleep_sync_after_web_open": scenario_sleep_sync_after_web_open,
     "sleep_sync_conflict": scenario_sleep_sync_conflict,
     "sleep_sync_keeps_progress_reset": scenario_sleep_sync_keeps_progress_reset,

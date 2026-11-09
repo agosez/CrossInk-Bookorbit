@@ -174,6 +174,9 @@ class BookOrbitCatalogClient {
    */
   static bool fetchBooks(const BookOrbitBookQuery& query, int page, BookOrbitBookPage& outPage);
 
+  /** The total of a books listing, read from a single-item page. -1 on failure. */
+  static int fetchBookTotal(const BookOrbitBookQuery& query);
+
   /**
    * Fetch a page of a drill-down facet listing ("authors" or "series").
    * @param sectionId The facet section id from the catalog root

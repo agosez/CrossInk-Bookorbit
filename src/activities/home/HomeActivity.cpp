@@ -1241,6 +1241,13 @@ void HomeActivity::activateBookOrbitStop(const BookOrbitHomeUi::Stop& stop) {
       activityManager.goToBookOrbitCatalog(std::move(link));
       break;
     }
+    case BookOrbitHomeUi::Action::OpenContinueReading: {
+      BookOrbitCatalogLink link;
+      link.sectionId = "continue-reading";
+      link.title = tr(STR_CONTINUE_READING);
+      activityManager.goToBookOrbitCatalog(std::move(link));
+      break;
+    }
     case BookOrbitHomeUi::Action::Refresh:
       silentRestartToNetwork(NetworkBootTarget::BOOKORBIT_HOME_REFRESH);
       break;

@@ -33,7 +33,8 @@ struct BookOrbitHomeSnapshot {
   int32_t authors = -1;
   int32_t series = -1;
   int32_t collections = -1;
-  int16_t goalBooks = 0;  // 0: no yearly goal configured on the server
+  int32_t continueTotal = -1;  // the catalog's Continue Reading listing: EPUBs being read
+  int16_t goalBooks = 0;       // 0: no yearly goal configured on the server
   int16_t goalCompleted = 0;
   int16_t goalYear = 0;
   int16_t currentStreak = 0;

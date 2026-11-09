@@ -398,6 +398,8 @@ void BookOrbitHomeUi::computeLayout() {
   addStop(showStats ? cell(1, 3) : cell(0, 2, 2), kTileRadius, kRingOutset,
           hasAccount ? Action::Refresh : Action::OpenLibrary);
   const Rect also = alsoReadingTile();
+  // The header's "All (N) >" leads to every book in progress, which the rows cannot hold.
+  addStop(alsoReadingLinkRect(also), 6, 0, hasAccount ? Action::OpenContinueReading : Action::OpenLibrary);
   for (int i = 0; i < rowCount; i++) {
     const Row& row = rows[static_cast<size_t>(i)];
     if (row.local != nullptr) {
@@ -504,6 +506,28 @@ Rect BookOrbitHomeUi::currentBookTile() const { return cell(0, 0, 2, 2); }
 Rect BookOrbitHomeUi::alsoReadingTile() const {
   const int rows = BookOrbitHomeLayout::alsoReadingRows(showStats);
   return cell(0, kRowCount - rows, 2, rows);
+}
+
+// The count of what the link opens: the server's books in progress once a sync has
+// counted them, the recent books on the card before that or without an account.
+void BookOrbitHomeUi::formatAlsoReadingLink(char* out, const size_t outSize) const {
+  const auto count = snapshot && snapshot->continueTotal >= 0 ? static_cast<unsigned>(snapshot->continueTotal)
+                                                              : static_cast<unsigned>(data.recentBookCount);
+  snprintf(out, outSize, tr(STR_HOME_ALL_FORMAT), count);
+}
+
+// Button boards ring the header's link alone, clear of its text so that erasing the ring
+// leaves the text whole, and right-aligned with the rows' rings. Touch boards draw no
+// ring, so the whole header band takes the tap: an easier target than a line of text.
+Rect BookOrbitHomeUi::alsoReadingLinkRect(const Rect& tile) const {
+  if (!showRing) return Rect{tile.x, tile.y, tile.width, kBookRowHeaderHeight};
+  char link[24];
+  formatAlsoReadingLink(link, sizeof(link));
+  // The text ends kPad from the tile's edge; the ring keeps 4 px from it on either side,
+  // and ends on the header band's last line, just above the first row.
+  const int right = tile.x + tile.width - 5;
+  const int width = renderer.getTextWidth(SMALL_FONT_ID, link) + kPad + 2;
+  return Rect{right - width, tile.y + 4, width, kBookRowHeaderHeight - 4};
 }
 
 Rect BookOrbitHomeUi::bookRowRect(const Rect& tile, const int rowIndex) const {
@@ -994,9 +1018,10 @@ void BookOrbitHomeUi::drawSyncAge(const Rect& tile) const {
 
 void BookOrbitHomeUi::drawAlsoReading(const Rect& tile) const {
   drawTileHeader(tile, tr(STR_HOME_ALSO_READING));
-  char all[24];
-  snprintf(all, sizeof(all), tr(STR_HOME_ALL_FORMAT), static_cast<unsigned>(data.recentBookCount));
-  drawRightAligned(SMALL_FONT_ID, tile.x + tile.width - kPad, tile.y + 9, all);
+  char link[24];
+  formatAlsoReadingLink(link, sizeof(link));
+  // At the title's height, which centres it in the ring alsoReadingLinkRect() draws.
+  drawRightAligned(SMALL_FONT_ID, tile.x + tile.width - kPad, tile.y + 7, link);
 
   for (int i = 0; i < rowCount; i++) {
     const Row& book = rows[static_cast<size_t>(i)];

@@ -802,11 +802,15 @@ uncovers. All values are little-endian.
 
 ## `/.crosspoint/bookorbit_home.bin`
 
-### Version 1
+### Version 2
 
 What the BookOrbit Home shows from the server, so that opening Home never touches the
 network. A sync writes it to `bookorbit_home.tmp` and renames it into place. A file with
 another magic, version or struct size is ignored until the next sync replaces it.
+
+Version 2 adds `continueTotal` after `collections`: the total of the catalog's Continue
+Reading listing (EPUBs being read), which Home's "All (N)" shows, or -1 when no sync has
+counted it. A version 1 file is ignored, so Home shows no server data until the next sync.
 
 | Offset | Size | Field |
 | --- | --- | --- |

@@ -24,8 +24,8 @@ constexpr char PATH[] = "/.crosspoint/bookorbit_home.bin";
 constexpr char TMP_PATH[] = "/.crosspoint/bookorbit_home.tmp";
 constexpr char COVER_DIR[] = "/.crosspoint/bookorbit_home";
 constexpr uint32_t MAGIC = 0x484F4242;  // "BBOH"
-constexpr uint16_t VERSION = 1;
-constexpr size_t HEADER_SIZE = 8;  // magic, version, sizeof(BookOrbitHomeSnapshot)
+constexpr uint16_t VERSION = 2;         // 2: continueTotal
+constexpr size_t HEADER_SIZE = 8;       // magic, version, sizeof(BookOrbitHomeSnapshot)
 // One boot's worth of covers: the rest comes with the next sync.
 constexpr int MAX_COVER_FETCHES = 8;
 // Shelves and rows hold 11 covers; the older ones stay until a sync finds more than this.
@@ -260,6 +260,12 @@ bool refresh(const StopCheck shouldStop, const CoverSizes& sizes) {
     next->recentCount = previous->recentCount;
     memcpy(next->recent, previous->recent, sizeof(next->recent));
   }
+
+  // What Home's "All (N)" opens: the dashboard's own in-progress count takes in every
+  // format, the catalog only EPUBs. A failure keeps the last count.
+  next->continueTotal =
+      BookOrbitCatalogClient::fetchBookTotal(BookOrbitCatalogClient::sectionBookQuery("continue-reading"));
+  if (next->continueTotal < 0 && hadPrevious) next->continueTotal = previous->continueTotal;
   previous.reset();
 
   ok = file.seekSet(HEADER_SIZE) &&

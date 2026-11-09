@@ -267,8 +267,9 @@ BookOrbitCatalogBook bookFromItem(JsonObjectConst item) {
   return book;
 }
 
-// The total of a books listing, read from a single-item page. -1 on failure.
-int fetchBookTotal(const BookOrbitBookQuery& query) {
+}  // namespace
+
+int BookOrbitCatalogClient::fetchBookTotal(const BookOrbitBookQuery& query) {
   JsonDocument filter;
   filter["total"] = true;
   JsonDocument doc;
@@ -279,7 +280,6 @@ int fetchBookTotal(const BookOrbitBookQuery& query) {
   }
   return doc["total"] | -1;
 }
-}  // namespace
 
 BookOrbitBookQuery BookOrbitCatalogClient::sectionBookQuery(const std::string& sectionId) {
   BookOrbitBookQuery query;

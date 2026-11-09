@@ -5,6 +5,18 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.6.1.
+
+### Added
+
+- With the BookOrbit theme, "All (N) >" in the header of Home's Also Reading tile now opens the BookOrbit catalog's Continue Reading list, where every book you are reading shows, not only the few that fit on Home. On the X3 and X4, Up and Down select it after the BookOrbit tile; on touch devices, a tap anywhere on the tile's header opens it. Without a BookOrbit account, it opens the Library.
+
+### Changed
+
+- With the BookOrbit theme, the number in "All (N)" on Home's Also Reading tile is now how many books that Continue Reading list holds, counted on the server at each sync. It used to count the recent books on the device, so it could read "All (0)" above books being read elsewhere. Without a BookOrbit account, it still counts the recent books on the device. After updating, Home shows only the device's own data until its next sync.
+
 ## [v1.6.1+bookorbit.7] - 2026-11-08
 
 Based on CrossInk v1.6.1.

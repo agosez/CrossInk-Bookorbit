@@ -41,6 +41,7 @@ class BookOrbitHomeUi final {
     OpenCatalog,
     OpenAuthors,
     OpenSeries,
+    OpenContinueReading,  // the catalog's books in progress
     Refresh,
   };
   enum class Page : uint8_t { Home, Library, Stats, Count };
@@ -100,6 +101,8 @@ class BookOrbitHomeUi final {
   Rect statsCell(int column, int row, int columns = 1) const;
   Rect bookRowRect(const Rect& tile, int rowIndex) const;
   Rect alsoReadingTile() const;
+  Rect alsoReadingLinkRect(const Rect& tile) const;
+  void formatAlsoReadingLink(char* out, size_t outSize) const;
   Rect currentBookTile() const;
   void computeLayout();
   void computeReadingData();
@@ -218,8 +221,8 @@ class BookOrbitHomeUi final {
   uint32_t yearMinutes = 0;
   uint32_t yearBestMonthMinutes = 0;
 
-  // The most stops the fullest page set can hold.
-  static constexpr int MAX_STOPS = 20;
+  // The most stops the fullest page set can hold: Home 6, Library 12, Stats 3.
+  static constexpr int MAX_STOPS = 21;
   std::array<Stop, MAX_STOPS> stops{};
   std::array<uint8_t, static_cast<size_t>(Page::Count) + 1> pageFirstStop{};
   std::array<Page, static_cast<size_t>(Page::Count)> pages{};
