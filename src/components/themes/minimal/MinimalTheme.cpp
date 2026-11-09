@@ -29,10 +29,12 @@
 #include "components/UiAppHelpers.h"
 #include "components/icons/afternoon.h"
 #include "components/icons/book24.h"
+#include "components/icons/bookOrbitIcons.h"
 #include "components/icons/evening.h"
 #include "components/icons/morning.h"
 #include "components/icons/night.h"
 #include "components/icons/streak.h"
+#include "components/themes/bookorbit/BookOrbitHomeLayout.h"
 #include "fontIds.h"
 
 namespace {
@@ -71,13 +73,6 @@ constexpr int kFileBrowserIconSize = 24;
 constexpr int kFileBrowserRowVerticalPadding = 6;
 constexpr int kFileBrowserTextGap = 8;
 constexpr int kFileBrowserValueMaxWidth = 76;
-constexpr int kMenuPanelWidth = 384;
-constexpr int kMenuRowHeight = 64;
-constexpr int kMenuPanelTop = 210;
-constexpr int kMenuPanelRadius = 3;
-constexpr int kMenuSelectionTriangleWidth = 14;
-constexpr int kMenuSelectionTriangleHeight = 20;
-constexpr int kMenuSelectionTriangleInset = 30;
 constexpr int kCoverTopOffset = 0;
 constexpr int kProgressBlockGap = 8;
 constexpr int kProgressBarGap = 4;
@@ -86,6 +81,88 @@ constexpr int kStatsFooterReaderIconSize = 24;
 constexpr int kStatsFooterStreakIconSize = 24;
 constexpr int kStatsFooterSideInset = 48;
 int homeButtonHintSelection = -1;
+
+// The Home menu: tiles drawn like the BookOrbit Home's, in as many columns as the width
+// holds, from where the BookOrbit Home's tiles start down to the button hints. Anchored at
+// the top like Home's pages, a tile keeps its place whatever the number of entries.
+using BookOrbitHomeLayout::kGap;
+using BookOrbitHomeLayout::kMargin;
+using BookOrbitHomeLayout::kPad;
+using BookOrbitHomeLayout::kRingOutset;
+using BookOrbitHomeLayout::kRingWidth;
+using BookOrbitHomeLayout::kTileRadius;
+using BookOrbitHomeLayout::kTitleRowTop;
+constexpr int kMenuMinTileWidth = 200;  // two columns in portrait, three in landscape
+constexpr int kMenuIconSize = 32;
+constexpr int kMenuIconGap = 8;
+constexpr int kMenuLabelLines = 2;
+constexpr int kMenuDotRadius = 4;
+constexpr int kMenuDotPitch = 15;
+
+struct MenuGrid {
+  Rect block;  // a full page of tiles
+  int columns = 1;
+  int pageRows = 1;
+  int tileHeight = 0;
+
+  int pageItems() const { return columns * pageRows; }
+};
+
+MenuGrid menuGrid(const GfxRenderer& renderer, const int buttonCount) {
+  MenuGrid grid;
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, !gpio.hasTouch(), false);
+  const int top = BookOrbitHomeLayout::grid(renderer).top;
+  const int height = std::max(0, safe.y + safe.height - kGap - top);
+  const int width = safe.width - 2 * kMargin;
+
+  grid.columns = std::clamp((width + kGap) / (kMenuMinTileWidth + kGap), 1, std::max(1, buttonCount));
+  grid.tileHeight =
+      2 * kPad + kMenuIconSize + kMenuIconGap + kMenuLabelLines * renderer.getLineHeight(uiScaleSpec().bodyFontId);
+  const int rows = (buttonCount + grid.columns - 1) / grid.columns;
+  grid.pageRows = std::clamp((height + kGap) / (grid.tileHeight + kGap), 1, std::max(1, rows));
+
+  const int blockHeight = grid.pageRows * grid.tileHeight + (grid.pageRows - 1) * kGap;
+  grid.block = Rect{safe.x + kMargin, top, width, blockHeight};
+  return grid;
+}
+
+// A row with fewer tiles than columns, the last one, spreads them over the whole width.
+Rect menuTileRect(const MenuGrid& grid, const int buttonCount, const int index) {
+  const int slot = index % grid.pageItems();
+  const int column = slot % grid.columns;
+  const int inRow = std::min(grid.columns, buttonCount - (index - column));
+  const int width = (grid.block.width - (inRow - 1) * kGap) / inRow;
+  const int x = grid.block.x + column * (width + kGap);
+  const int right = column == inRow - 1 ? grid.block.x + grid.block.width : x + width;
+  return Rect{x, grid.block.y + slot / grid.columns * (grid.tileHeight + kGap), right - x, grid.tileHeight};
+}
+
+freeink::ui::Rect uiRect(const int x, const int y, const int width, const int height) {
+  return freeink::ui::Rect{static_cast<int16_t>(x), static_cast<int16_t>(y), static_cast<int16_t>(width),
+                           static_cast<int16_t>(height)};
+}
+
+// The icon over its label, wrapped on two lines; a tile three times wider than tall, the
+// last row's, puts them side by side on one line instead.
+void drawMenuTileContent(const GfxRenderer& renderer, freeink::ui::DrawTarget& target, const Rect& tile,
+                         const char* label, const freeink::Icon* icon, freeink::ui::TextStyle style) {
+  const int iconSpace = icon != nullptr ? kMenuIconSize + kMenuIconGap : 0;
+  if (tile.width >= 3 * tile.height) {
+    style.maxLines = 1;
+    const int available = tile.width - 2 * kPad - iconSpace;
+    const int labelWidth = std::min<int>(available, target.measureText(style.font, label, style).width);
+    const int x = tile.x + (tile.width - iconSpace - labelWidth) / 2;
+    if (icon != nullptr) drawLucideIcon(renderer, *icon, x, tile.y + (tile.height - kMenuIconSize) / 2);
+    target.text(uiRect(x + iconSpace, tile.y, labelWidth, tile.height), label, style);
+    return;
+  }
+
+  const int labelWidth = tile.width - 2 * kPad;
+  const int labelHeight = freeink::ui::measureWrappedText(target, label, style, labelWidth).height;
+  const int y = tile.y + (tile.height - iconSpace - labelHeight) / 2;
+  if (icon != nullptr) drawLucideIcon(renderer, *icon, tile.x + (tile.width - kMenuIconSize) / 2, y);
+  target.text(uiRect(tile.x + kPad, y + iconSpace, labelWidth, labelHeight), label, style);
+}
 
 bool dominantReaderTypeBucket(const GlobalReadingStats& globalStats, ReadingTimeBucket& bucketOut) {
   const auto& values = globalStats.timeOfDaySeconds;
@@ -607,11 +684,18 @@ Rect MinimalTheme::buttonMenuPanelRect(const GfxRenderer& renderer, const int bu
   if (buttonCount <= 0) {
     return Rect{0, 0, 0, 0};
   }
+  return menuGrid(renderer, buttonCount).block;
+}
 
-  const int panelW = std::min(kMenuPanelWidth, renderer.getScreenWidth() - 80);
-  const int panelH = buttonCount * kMenuRowHeight + 2;
-  const int panelX = (renderer.getScreenWidth() - panelW) / 2;
-  return Rect{panelX, kMenuPanelTop, panelW, panelH};
+const freeink::Icon* MinimalTheme::menuIcon(const UIIcon icon) {
+  switch (icon) {
+    case UIIcon::BookmarkIcon:  // Lyra draws its own ribbon instead
+      return &icon_bookmark_32;
+    case UIIcon::BookOrbit:
+      return &icon_bookorbit_32;
+    default:
+      return iconForName(icon, kMenuIconSize);
+  }
 }
 
 void MinimalTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
@@ -743,42 +827,53 @@ void MinimalTheme::drawStatsSleepScreen(const GfxRenderer& renderer, const Recen
 void MinimalTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                                   const std::function<const char*(int index)>& buttonLabel,
                                   const std::function<UIIcon(int index)>& rowIcon) const {
+  // The menu places itself in the screen's free space, the same way buttonMenuPanelRect()
+  // reports it to HomeActivity's tap test, so the caller's rect is not used.
   (void)rect;
-  (void)rowIcon;
 
   if (buttonCount <= 0) {
     return;
   }
 
-  const Rect panel = buttonMenuPanelRect(renderer, buttonCount);
-  const int panelX = panel.x;
-  const int panelY = panel.y;
-  const int panelW = panel.width;
-  const int panelH = panel.height;
+  const MenuGrid grid = menuGrid(renderer, buttonCount);
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, !gpio.hasTouch(), false);
+  const int titleY = kTitleRowTop + UITheme::getTopStatusBarInset(renderer);
+  renderer.drawText(UI_12_FONT_ID, safe.x + kMargin, titleY, tr(STR_MENU), true, EpdFontFamily::BOLD);
+
+  const int pageItems = grid.pageItems();
+  const int pages = (buttonCount + pageItems - 1) / pageItems;
+  const int page = std::clamp(selectedIndex, 0, buttonCount - 1) / pageItems;
+  if (pages > 1) {
+    const int dotTop = titleY + 17 - kMenuDotRadius;
+    const int dotSize = 2 * kMenuDotRadius + 1;
+    int left = safe.x + safe.width - kMargin - dotSize;
+    for (int i = pages - 1; i >= 0; i--, left -= kMenuDotPitch) {
+      if (i == page) {
+        renderer.fillRoundedRect(left, dotTop, dotSize, dotSize, kMenuDotRadius, Color::Black);
+      } else {
+        renderer.drawRoundedRect(left, dotTop, dotSize, dotSize, 1, kMenuDotRadius, true);
+      }
+    }
+  }
+
   const auto scale = uiScaleSpec();
   freeink::ui::GfxRendererFrame<1> ui(renderer, scale.smallFontId, scale.bodyFontId, scale.titleFontId);
   freeink::ui::TextStyle labelText = uiThemeTokens(ui.target).bodyText;
   labelText.align = freeink::ui::TextAlign::Center;
-  labelText.maxLines = 1;
-  renderer.drawRoundedRect(panelX, panelY, panelW, panelH, 1, kMenuPanelRadius, true);
+  labelText.bold = true;
+  labelText.maxLines = kMenuLabelLines;
 
-  for (int i = 0; i < buttonCount; ++i) {
-    const int rowY = panelY + 1 + i * kMenuRowHeight;
-    TouchRegistry::getInstance().add(Rect{panelX, rowY, panelW, kMenuRowHeight}, i, TouchRegistry::Item);
+  const int first = page * pageItems;
+  for (int i = first; i < std::min(buttonCount, first + pageItems); ++i) {
+    const Rect tile = menuTileRect(grid, buttonCount, i);
+    TouchRegistry::getInstance().add(tile, i, TouchRegistry::Item);
+    renderer.drawRoundedRect(tile.x, tile.y, tile.width, tile.height, 1, kTileRadius, true);
     if (i == selectedIndex) {
-      const int triangleX = panelX + kMenuSelectionTriangleInset;
-      const int triangleCenterY = rowY + kMenuRowHeight / 2;
-      const int triangleHalfH = kMenuSelectionTriangleHeight / 2;
-      const int triangleXPoints[3] = {triangleX, triangleX, triangleX + kMenuSelectionTriangleWidth};
-      const int triangleYPoints[3] = {triangleCenterY - triangleHalfH, triangleCenterY + triangleHalfH,
-                                      triangleCenterY};
-      renderer.fillPolygon(triangleXPoints, triangleYPoints, 3, true);
+      renderer.drawRoundedRect(tile.x - kRingOutset, tile.y - kRingOutset, tile.width + 2 * kRingOutset,
+                               tile.height + 2 * kRingOutset, kRingWidth, kTileRadius + kRingOutset, true);
     }
-
-    const char* label = buttonLabel != nullptr ? buttonLabel(i) : "";
-    if (!label) label = "";
-    ui.target.text(freeink::ui::Rect{static_cast<int16_t>(panelX), static_cast<int16_t>(rowY),
-                                     static_cast<int16_t>(panelW), static_cast<int16_t>(kMenuRowHeight)},
-                   label, labelText);
+    const char* label = buttonLabel != nullptr ? buttonLabel(i) : nullptr;
+    drawMenuTileContent(renderer, ui.target, tile, label != nullptr ? label : "",
+                        rowIcon != nullptr ? menuIcon(rowIcon(i)) : nullptr, labelText);
   }
 }

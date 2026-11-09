@@ -21,8 +21,7 @@ using BookOrbitHomeLayout::kIconSize;
 using BookOrbitHomeLayout::kMargin;
 using BookOrbitHomeLayout::kPad;
 using BookOrbitHomeLayout::kTileRadius;
-
-constexpr int kTitleRowTop = 27;
+using BookOrbitHomeLayout::kTitleRowTop;
 
 // The big numbers. Boards with scalable reader fonts do not carry the built-in Lexend.
 #if CROSSINK_SCALABLE_FONTS

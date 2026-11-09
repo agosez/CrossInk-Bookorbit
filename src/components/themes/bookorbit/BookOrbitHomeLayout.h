@@ -15,7 +15,6 @@ constexpr int kMargin = 12;
 constexpr int kGap = 8;
 constexpr int kPad = 12;
 constexpr int kRowCount = 6;
-constexpr int kTileRadius = 10;
 constexpr int kIconSize = 24;  // the icons in tile headers
 constexpr int kBookPad = 13;   // inside the current book's tile
 constexpr int kBookRowHeaderHeight = 33;
@@ -24,6 +23,10 @@ constexpr int kShelfCoverTop = 36;
 constexpr int kShelfCaptionHeight = 22;
 // How far the selection ring is drawn outside what it selects.
 constexpr int kRingOutset = 4;
+// The tiles' look, shared with the Home menu's tiles (MinimalTheme::drawButtonMenu).
+constexpr int kTileRadius = 10;
+constexpr int kRingWidth = 3;
+constexpr int kTitleRowTop = 27;  // the page title, under the status bar
 
 struct Grid {
   int top = 0;

@@ -18,8 +18,8 @@
 
 namespace {
 using BookOrbitHomeLayout::kMargin;
+using BookOrbitHomeLayout::kRingWidth;
 
-constexpr int kRingWidth = 3;
 constexpr int kTopBarHeight = 22;
 }  // namespace
 

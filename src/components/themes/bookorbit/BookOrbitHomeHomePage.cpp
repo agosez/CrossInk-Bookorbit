@@ -72,7 +72,7 @@ Rect alsoReadingLinkRect(const BookOrbitHomePageContext& context, const Rect& ti
 }
 
 void drawCurrentBook(const BookOrbitHomePageContext& context, const Rect& tile) {
-  GfxRenderer& renderer = context.renderer;
+  const GfxRenderer& renderer = context.renderer;
   const BookOrbitHomeTiles& tiles = context.tiles;
   const BookOrbitHomeModel& model = context.model;
   const BookOrbitHomeSource& data = model.data;

@@ -73,4 +73,7 @@ class MinimalTheme : public LyraTheme {
                       const std::function<UIIcon(int index)>& rowIcon) const override;
   bool usesCompactFileBrowserRows() const override { return true; }
   int compactFileBrowserRowHeight(const GfxRenderer& renderer) const override;
+
+ private:
+  static const freeink::Icon* menuIcon(UIIcon icon);
 };

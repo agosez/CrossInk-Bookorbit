@@ -137,6 +137,7 @@ class HomeActivity final : public Activity {
   void activateCoverGridSelection();
   void beginBookOrbitUi();
   bool waitingForInitialFrontRelease();
+  void openMinimalMenu();
   void loopBookOrbitHome();
   void activateBookOrbitStop(const BookOrbitHomeUi::Stop& stop);
   void loadBookOrbitThumbnails();
