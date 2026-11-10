@@ -11,8 +11,8 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
-#include "components/BookOrbitHomeLayout.h"
 #include "components/UITheme.h"
+#include "components/themes/bookorbit/BookOrbitHomeLayout.h"
 #include "network/SavedWifiConnect.h"
 
 namespace {

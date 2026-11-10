@@ -13,9 +13,9 @@
 #include "activities/Activity.h"
 #include "activities/reader/BookReadingStats.h"
 #include "activities/reader/GlobalReadingStats.h"
-#include "components/BookOrbitHomeUi.h"
 #include "components/CoverGridHomeUi.h"
 #include "components/OptionPopup.h"
+#include "components/themes/bookorbit/BookOrbitHomeUi.h"
 #include "util/ButtonNavigator.h"
 
 struct RecentBook;
