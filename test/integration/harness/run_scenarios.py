@@ -745,6 +745,102 @@ def scenario_home_also_reading_link(verbose: bool) -> None:
         assert listings == {("recently_read", "reading")}, f"the link did not open Continue reading: {listings}"
 
 
+# BookOrbitHomeBook: int32 id, uint32 coverVersion, uint8 progress, bool hasCover, char[46].
+HOME_BOOK = struct.Struct("<iIBB46s")
+# BookOrbitHomeShelf: its BookOrbitHomeShelfSource (kind, char id[20], char name[46]), the
+# book count, then its four books.
+HOME_SHELF_HEAD = struct.Struct("<B20s46sB")
+HOME_SHELF_SIZE = HOME_SHELF_HEAD.size + 4 * HOME_BOOK.size
+HOME_SHELF_KIND = {"discover": 0, "recently_added": 1, "want_to_read": 2, "collection": 3, "smart_scope": 4}
+
+
+def home_snapshot_shelves(fs: SimFs) -> list[dict]:
+    """The snapshot's two Library shelves, the last fields of BookOrbitHomeSnapshot."""
+    raw = (fs.crosspoint / "bookorbit_home.bin").read_bytes()
+    _, version, size = struct.unpack_from("<IHH", raw)
+    assert version == 3, f"unexpected Home snapshot version {version}"
+    shelves = []
+    for index in range(2):
+        base = 8 + size - (2 - index) * HOME_SHELF_SIZE
+        kind, source_id, name, count = HOME_SHELF_HEAD.unpack_from(raw, base)
+        ids = [HOME_BOOK.unpack_from(raw, base + HOME_SHELF_HEAD.size + i * HOME_BOOK.size)[0]
+               for i in range(count)]
+        shelves.append({"kind": kind, "sourceId": source_id.split(b"\0")[0].decode(),
+                        "name": name.split(b"\0")[0].decode(), "ids": ids})
+    return shelves
+
+
+def scenario_home_shelf_sources(verbose: bool) -> None:
+    """The BookOrbit Home's two Library shelves list what BookOrbit Sync > Home chose: a
+    collection and the want-to-read shelf from bookorbit.json first, then the top shelf
+    switched to the SmartScope through the screens. Refresh lists restarts into its own
+    network boot and saves the server's collections and SmartScopes; leaving the screen
+    with a changed shelf syncs the Home, whose snapshot then lists the scope's books."""
+    manifest, _ = load_seed()
+    server = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                          manifest["kosync"]["password"], SIM_DEVICE_ID)
+    collection, scope = manifest["collection"], manifest["smart_scope"]
+
+    def listing_ids(**params) -> set[int]:
+        return {b["id"] for b in server.catalog_page(size=50, format="epub", **params)["items"]}
+
+    collection_ids = listing_ids(collectionId=collection["id"])
+    scope_ids = listing_ids(smartScopeId=scope["id"])
+    shelf = request_json("GET", server.api("/plugin/catalog/dashboard/sections/want-to-read"),
+                         server._headers(), ok=(200,))
+    want_ids = {b["id"] for b in shelf["section"]["books"] if "epub" in [f.lower() for f in b["formats"]]}
+    assert collection_ids and scope_ids and want_ids, "the seed has no books to shelve"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])  # no open book: Power opens BookOrbit Sync
+        settings = json.loads((fs.crosspoint / "crossink-settings.json").read_text())
+        settings["uiTheme"] = UI_THEME_BOOKORBIT
+        (fs.crosspoint / "crossink-settings.json").write_text(json.dumps(settings))
+        bookorbit = json.loads((fs.crosspoint / "bookorbit.json").read_text())
+        # Each shelf is "kind:id:name"; only a collection or SmartScope has an id and name.
+        bookorbit["homeShelfTop"] = f"{HOME_SHELF_KIND['collection']}:{collection['id']}:{collection['name']}"
+        bookorbit["homeShelfBottom"] = f"{HOME_SHELF_KIND['want_to_read']}::"
+        (fs.crosspoint / "bookorbit.json").write_text(json.dumps(bookorbit))
+
+        # The Home tile's sync, as in home_theme_refresh.
+        run_simulator(fs, input_script="3000:DOWN:120;4500:CONFIRM:120", choice="none", timeout_s=14,
+                      verbose=verbose)
+        top, bottom = home_snapshot_shelves(fs)
+        assert top["kind"] == HOME_SHELF_KIND["collection"] and top["sourceId"] == str(collection["id"]), \
+            f"the top shelf does not list the collection: {top}"
+        assert top["name"] == collection["name"], f"the collection shelf lost its name: {top}"
+        assert set(top["ids"]) <= collection_ids and len(top["ids"]) == min(4, len(collection_ids)), \
+            f"collection shelf {top['ids']} is not the collection's {collection_ids}"
+        assert bottom["kind"] == HOME_SHELF_KIND["want_to_read"], f"the bottom shelf is not Want to read: {bottom}"
+        assert set(bottom["ids"]) <= want_ids and len(bottom["ids"]) == min(4, len(want_ids)), \
+            f"want-to-read shelf {bottom['ids']} is not the server's {want_ids}"
+
+        # Power (BookOrbit Sync without a book) opens its settings; Up wraps to Home, the
+        # last row, and Up again to Refresh lists, which restarts into the shelves' boot.
+        script = "3000:POWER:120;4500:UP:120;5500:CONFIRM:120;6500:UP:120;7500:CONFIRM:120"
+        # That boot fetches, then shows the rows on Refresh: Up twice to the top shelf, whose
+        # popup lists Discover, Recently added and Want to Read, then the two collections
+        # and the scope, on the collection it shows. Down twice to the scope, then Back.
+        after = ";".join(["9000:UP:120", "9500:UP:120", "10500:CONFIRM:120", "11500:DOWN:120",
+                          "12000:DOWN:120", "13000:CONFIRM:120", "14500:BACK:120"])
+        output = run_simulator(fs, input_script=script, choice="none", timeout_s=40, verbose=verbose,
+                               after_reboot_script=after)
+        assert "Saved 3 shelf options" in output, "Refresh lists did not save both collections and the scope"
+        assert "Home shelves changed: syncing the Home" in output, "leaving the screen did not sync the Home"
+
+        saved = json.loads((fs.crosspoint / "bookorbit.json").read_text())
+        assert saved["homeShelfTop"] == f"{HOME_SHELF_KIND['smart_scope']}:{scope['id']}:{scope['name']}", \
+            f"the top shelf setting is not the scope: {saved['homeShelfTop']}"
+        assert saved["homeShelfBottom"] == f"{HOME_SHELF_KIND['want_to_read']}::", \
+            f"the bottom shelf setting moved: {saved['homeShelfBottom']}"
+        top, bottom = home_snapshot_shelves(fs)
+        assert top["kind"] == HOME_SHELF_KIND["smart_scope"] and top["sourceId"] == str(scope["id"]), \
+            f"the Home sync did not follow the new top shelf: {top}"
+        assert set(top["ids"]) <= scope_ids and len(top["ids"]) == min(4, len(scope_ids)), \
+            f"scope shelf {top['ids']} is not the scope's {scope_ids}"
+        assert bottom["kind"] == HOME_SHELF_KIND["want_to_read"], f"the bottom shelf changed: {bottom}"
+
+
 def scenario_sleep_sync_refreshes_home(verbose: bool) -> None:
     """Sync on Sleep also refreshes the Home snapshot, but only under the BookOrbit theme."""
     manifest, _ = load_seed()
@@ -2184,6 +2280,7 @@ SCENARIOS = {
     "home_theme_refresh": scenario_home_theme_refresh,
     "home_download_returns_home": scenario_home_download_returns_home,
     "home_also_reading_link": scenario_home_also_reading_link,
+    "home_shelf_sources": scenario_home_shelf_sources,
     "sleep_sync_after_web_open": scenario_sleep_sync_after_web_open,
     "sleep_sync_conflict": scenario_sleep_sync_conflict,
     "sleep_sync_keeps_progress_reset": scenario_sleep_sync_keeps_progress_reset,

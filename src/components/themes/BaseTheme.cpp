@@ -1247,7 +1247,16 @@ void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, 
       }
 
       const auto style = primaryOptionIndex == optionIndex ? EpdFontFamily::BOLD : optionStyle;
-      const int textW = renderer.getTextWidth(optionFontId, labelText, style);
+      // The dialog stops at the screen's margins: a longer label, such as a BookOrbit
+      // collection's name, ends in an ellipsis instead of running over the frame.
+      int textW = renderer.getTextWidth(optionFontId, labelText, style);
+      std::string fitted;
+      const int maxTextW = std::max(1, itemRectW - selectionHPadding * 2);
+      if (textW > maxTextW) {
+        fitted = renderer.truncatedText(optionFontId, labelText, maxTextW, style);
+        labelText = fitted.c_str();
+        textW = renderer.getTextWidth(optionFontId, labelText, style);
+      }
       const int textY = itemY + (rowHeight - optionLineHeight) / 2;
       const int textX = itemRectX + (itemRectW - textW) / 2;
       // Unselected items: text is dark (invert=true means draw on white bg).

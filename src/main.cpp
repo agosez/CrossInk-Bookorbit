@@ -1682,6 +1682,7 @@ void setup() {
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_DOWNLOAD) ||
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_CATALOG) ||
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_HOME_REFRESH) ||
+        snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_HOME_SHELVES) ||
         snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::FILE_TRANSFER)) {
       BOOKORBIT_STORE.loadFromFile();
     }
@@ -1867,6 +1868,18 @@ void setup() {
           launched = true;
         } else {
           LOG_ERR("MAIN", "OOM: BookOrbit Home refresh after minimal boot (free=%u maxAlloc=%u)", ESP.getFreeHeap(),
+                  ESP.getMaxAllocHeap());
+        }
+        break;
+      }
+      case NetworkBootTarget::BOOKORBIT_HOME_SHELVES: {
+        auto shelves = makeUniqueNoThrow<BookOrbitSettingsActivity>(
+            renderer, mappedInputManager, BookOrbitSettingsActivity::Page::Home, /*networkBoot=*/true);
+        if (shelves) {
+          activityManager.replaceActivity(std::move(shelves));
+          launched = true;
+        } else {
+          LOG_ERR("MAIN", "OOM: BookOrbit Home shelves after minimal boot (free=%u maxAlloc=%u)", ESP.getFreeHeap(),
                   ESP.getMaxAllocHeap());
         }
         break;

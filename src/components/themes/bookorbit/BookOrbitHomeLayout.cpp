@@ -36,7 +36,7 @@ int bookRowHeight(const int tileHeight) {
 
 BookOrbitHomeStore::CoverSizes coverSizes(const GfxRenderer& renderer) {
   const Grid layout = grid(renderer);
-  const int count = BookOrbitHomeSnapshot::SHELF_COUNT;
+  const int count = BookOrbitHomeShelf::BOOK_COUNT;
 
   // Under a shelf's captions, room for the selection ring and 4 px of white above the
   // tile's border. Only the X3's short screen lets the height limit the covers; the
@@ -87,7 +87,7 @@ Rect bookRowRect(const Rect& tile, const int rowIndex) {
 // title's last pixels to end above it, and the neighbouring cover to start clear of it.
 Rect shelfCoverRect(const GfxRenderer& renderer, const Rect& tile, const int index) {
   const auto sizes = coverSizes(renderer);
-  const int count = BookOrbitHomeSnapshot::SHELF_COUNT;
+  const int count = BookOrbitHomeShelf::BOOK_COUNT;
   const int gap = (tile.width - 2 * kPad - count * sizes.shelfWidth) / (count - 1);
   return Rect{tile.x + kPad + index * (sizes.shelfWidth + gap), tile.y + kShelfCoverTop, sizes.shelfWidth,
               sizes.shelfHeight + kShelfCaptionHeight};

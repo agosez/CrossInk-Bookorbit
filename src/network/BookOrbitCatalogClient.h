@@ -191,6 +191,7 @@ class BookOrbitCatalogClient {
    * Fill the BookOrbit Home snapshot from the dashboard endpoint, the one BookOrbit's own
    * KOReader plugin draws from. The year's minutes per day go straight to yearOut, right
    * where the file's cursor is. Only EPUB books are kept: the catalog offers nothing else.
+   * The dashboard's Discover draw fills each shelf whose kind is already set to it.
    */
   static bool fetchHomeDashboard(BookOrbitHomeSnapshot& out, HalFile& yearOut);
 

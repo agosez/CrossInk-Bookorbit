@@ -33,9 +33,12 @@ struct BookOrbitHomeSource {
 // Home never waits on the network; the pages only read it.
 class BookOrbitHomeModel {
  public:
-  // An OpenCatalogBook stop's arg: the snapshot's lists laid end to end.
-  static constexpr int kDiscoverArgBase = BookOrbitHomeSnapshot::CONTINUE_COUNT;
-  static constexpr int kRecentArgBase = kDiscoverArgBase + BookOrbitHomeSnapshot::SHELF_COUNT;
+  // An OpenCatalogBook stop's arg: the snapshot's lists laid end to end, Continue Reading
+  // then each shelf.
+  static constexpr int kShelfArgBase = BookOrbitHomeSnapshot::CONTINUE_COUNT;
+  static constexpr int shelfArg(const int shelf, const int book) {
+    return kShelfArgBase + shelf * BookOrbitHomeShelf::BOOK_COUNT + book;
+  }
 
   // The rows under the current book: other recent books, then what the server says is
   // being read elsewhere. Exactly one of the two is set.
@@ -68,8 +71,7 @@ class BookOrbitHomeModel {
   // Home is open: on the heap so the other themes do not pay for it, and fallible because
   // Home has a full local page to fall back on.
   std::unique_ptr<BookOrbitHomeSnapshot> snapshot;
-  uint8_t discoverOnCard = 0;  // bit per shelf entry
-  uint8_t recentOnCard = 0;
+  std::array<uint8_t, BookOrbitHomeSnapshot::SHELVES> shelfOnCard{};  // bit per shelf entry
   // Books the Library's index counted on its last scan; -1 before the first one.
   int32_t cardBookCount = -1;
   int32_t serverBookCount = 0;  // catalog downloads recorded in BookOrbitDownloadIndex

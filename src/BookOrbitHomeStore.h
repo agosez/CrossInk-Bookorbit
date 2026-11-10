@@ -1,9 +1,11 @@
 #pragma once
 
+#include <BookOrbitHomeShelfSource.h>
 #include <HalStorage.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 /**
  * What the BookOrbit Home shows from the server, kept on the SD card so opening Home
@@ -20,9 +22,19 @@ struct BookOrbitHomeBook {
   char title[46] = {};
 };
 
+// One shelf of the Library page, as the sync that wrote it fetched it: it keeps showing
+// that source, under that name, until the next sync follows the settings.
+struct BookOrbitHomeShelf {
+  static constexpr int BOOK_COUNT = 4;
+
+  BookOrbitHomeShelfSource source;  // a collection or SmartScope is titled by its name
+  uint8_t count = 0;
+  BookOrbitHomeBook books[BOOK_COUNT];
+};
+
 struct BookOrbitHomeSnapshot {
   static constexpr int CONTINUE_COUNT = 3;
-  static constexpr int SHELF_COUNT = 4;
+  static constexpr int SHELVES = 2;  // the Library page's, top then bottom
 
   uint32_t generatedAt = 0;  // Unix seconds, 0 when the clock was not set
   uint32_t fetchDay = 0;     // local day index of the fetch
@@ -45,15 +57,12 @@ struct BookOrbitHomeSnapshot {
   uint16_t yearDayCount = 0;
   uint8_t lastSevenDays = 0;  // bit 0 is six days before fetchDay, bit 6 is fetchDay
   uint8_t continueCount = 0;
-  uint8_t discoverCount = 0;
-  uint8_t recentCount = 0;
   char displayName[24] = {};
   char badgeName[32] = {};
   char highlightText[180] = {};
   char highlightBook[46] = {};
   BookOrbitHomeBook continueReading[CONTINUE_COUNT];
-  BookOrbitHomeBook discover[SHELF_COUNT];
-  BookOrbitHomeBook recent[SHELF_COUNT];
+  BookOrbitHomeShelf shelves[SHELVES];
 };
 
 namespace BookOrbitHomeStore {
@@ -75,6 +84,21 @@ bool load(BookOrbitHomeSnapshot& out);
 // new snapshot cannot hold, what still waits in the books' upload queues, becomes the
 // pending time of ReadingDailyMinutes.
 bool refresh(StopCheck shouldStop, const CoverSizes& sizes);
+
+// False when the snapshot's shelves are not the ones the BookOrbit settings choose, so
+// the next sync would change them. True without a snapshot: there is nothing to follow.
+bool shelvesFollowSettings();
+
+// The most collections and SmartScopes refreshShelfOptions() saves, together.
+constexpr int MAX_SHELF_OPTIONS = 64;
+
+// Saves the server's collections and SmartScopes for the shelf settings to pick from,
+// collections first. Needs Wi-Fi up.
+bool refreshShelfOptions();
+
+// What the last refreshShelfOptions() saved. False when it never ran or its file is
+// unreadable, which leaves out empty.
+bool loadShelfOptions(std::vector<BookOrbitHomeShelfSource>& out);
 
 // True when a fetched cover is waiting to be decoded.
 bool hasPendingCovers();

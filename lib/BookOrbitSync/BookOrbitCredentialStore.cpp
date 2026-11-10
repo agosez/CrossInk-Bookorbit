@@ -4,6 +4,10 @@
 #include <MD5Builder.h>
 #include <ObfuscationUtils.h>
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 namespace {
 // BookOrbit's kosync-compatible progress endpoints live under this path prefix
 // (e.g. GET {server}/api/v1/koreader/users/auth), unlike a plain koreader-sync
@@ -20,6 +24,32 @@ std::string trimmed(const std::string& value) {
   }
   return value.substr(first, value.find_last_not_of(WHITESPACE) - first + 1);
 }
+
+// The Home shelves, top then bottom, each as "kind:id:name": the id and name are empty
+// but for a collection or SmartScope. Two flat strings cost the C3 far less code than
+// nested JSON.
+constexpr const char* HOME_SHELF_KEYS[BookOrbitCredentialStore::HOME_SHELF_COUNT] = {"homeShelfTop", "homeShelfBottom"};
+
+// Leaves the shelf as it was when the text cannot be one: a kind from a newer firmware, or
+// a list without its id.
+void parseHomeShelf(const char* text, BookOrbitHomeShelfSource& shelf) {
+  char* end = nullptr;
+  const unsigned long kind = strtoul(text, &end, 10);
+  if (end == text || *end != ':' || kind >= BOOKORBIT_HOME_SHELF_KIND_COUNT) return;
+  const char* id = end + 1;
+  const char* name = strchr(id, ':');
+  if (name == nullptr) return;
+  const auto chosen = static_cast<BookOrbitHomeShelfKind>(kind);
+  const auto idLength = static_cast<size_t>(name - id);
+  if (!isNamedHomeShelfKind(chosen)) {
+    shelf.kind = chosen;
+  } else if (idLength > 0 && idLength < sizeof(shelf.id)) {
+    shelf.kind = chosen;
+    memcpy(shelf.id, id, idLength);
+    shelf.id[idLength] = '\0';
+    snprintf(shelf.name, sizeof(shelf.name), "%s", name + 1);
+  }
+}
 }  // namespace
 
 void BookOrbitCredentialStore::toJson(JsonDocument& doc) const {
@@ -29,6 +59,12 @@ void BookOrbitCredentialStore::toJson(JsonDocument& doc) const {
   doc["downloadFolder"] = downloadFolder;
   doc["syncBehavior"] = static_cast<uint8_t>(syncBehavior);
   doc["syncOnSleep"] = syncOnSleep;
+  for (int i = 0; i < HOME_SHELF_COUNT; i++) {
+    const BookOrbitHomeShelfSource& shelf = homeShelves[i];
+    char value[sizeof(shelf.id) + sizeof(shelf.name) + 4];
+    snprintf(value, sizeof(value), "%u:%s:%s", static_cast<unsigned>(shelf.kind), shelf.id, shelf.name);
+    doc[HOME_SHELF_KEYS[i]] = value;
+  }
   if (!cfClientId.empty()) {
     doc["cfClientId"] = cfClientId;
   }
@@ -54,6 +90,14 @@ bool BookOrbitCredentialStore::fromJson(JsonVariantConst doc) {
   syncBehavior = behavior == static_cast<uint8_t>(BookOrbitSyncBehavior::SMART) ? BookOrbitSyncBehavior::SMART
                                                                                 : BookOrbitSyncBehavior::ASK_EVERY_TIME;
   syncOnSleep = doc["syncOnSleep"] | false;
+
+  // A missing or unreadable shelf is the one the Home had before shelves could be chosen.
+  for (int i = 0; i < HOME_SHELF_COUNT; i++) {
+    BookOrbitHomeShelfSource& shelf = homeShelves[i];
+    shelf = BookOrbitHomeShelfSource{};
+    shelf.kind = i == 0 ? BookOrbitHomeShelfKind::DISCOVER : BookOrbitHomeShelfKind::RECENTLY_ADDED;
+    parseHomeShelf(doc[HOME_SHELF_KEYS[i]] | "", shelf);
+  }
 
   setCfClientId(doc["cfClientId"] | "");
   // Unlike the password, this field has no legacy encoding to accept: a value that does not

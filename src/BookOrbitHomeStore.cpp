@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "BookOrbitCredentialStore.h"
 #include "BookOrbitStatsQueue.h"
 #include "activities/reader/GlobalReadingStats.h"
 #include "activities/reader/ReadingDailyMinutes.h"
@@ -24,7 +25,7 @@ constexpr char PATH[] = "/.crosspoint/bookorbit_home.bin";
 constexpr char TMP_PATH[] = "/.crosspoint/bookorbit_home.tmp";
 constexpr char COVER_DIR[] = "/.crosspoint/bookorbit_home";
 constexpr uint32_t MAGIC = 0x484F4242;  // "BBOH"
-constexpr uint16_t VERSION = 2;         // 2: continueTotal
+constexpr uint16_t VERSION = 3;         // 2: continueTotal, 3: shelves chosen in the settings
 constexpr size_t HEADER_SIZE = 8;       // magic, version, sizeof(BookOrbitHomeSnapshot)
 // One boot's worth of covers: the rest comes with the next sync.
 constexpr int MAX_COVER_FETCHES = 8;
@@ -39,6 +40,20 @@ constexpr uint32_t MIN_PLAUSIBLE_EPOCH = 1700000000;
 constexpr char BOOK_STATE_ROOT[] = "/.crosspoint";
 constexpr char BOOK_STATE_PREFIX[] = "book_";  // BookContentId::bookStateDirName()
 constexpr size_t QUEUE_BATCH = 32;             // 512 bytes of events at a time
+constexpr char OPTIONS_PATH[] = "/.crosspoint/bookorbit_home_shelves.bin";
+constexpr char OPTIONS_TMP_PATH[] = "/.crosspoint/bookorbit_home_shelves.tmp";
+constexpr uint32_t OPTIONS_MAGIC = 0x53424248;  // "HBBS"
+constexpr uint16_t OPTIONS_VERSION = 1;
+struct OptionsHeader {
+  uint32_t magic = OPTIONS_MAGIC;
+  uint16_t version = OPTIONS_VERSION;
+  uint16_t count = 0;
+};
+static_assert(sizeof(OptionsHeader) == 8, "bookorbit_home_shelves.bin starts with 8 bytes");
+
+static_assert(BookOrbitHomeSnapshot::SHELVES == BookOrbitCredentialStore::HOME_SHELF_COUNT,
+              "Every shelf the settings choose needs its place in the snapshot");
+static_assert(sizeof(BookOrbitHomeShelfSource) == 67, "bookorbit_home_shelves.bin holds 67-byte entries");
 
 bool writeHeader(HalFile& file) {
   uint8_t header[HEADER_SIZE];
@@ -72,11 +87,10 @@ void forEachCover(const BookOrbitHomeSnapshot& snapshot, const CoverSizes& sizes
   for (int i = 0; i < snapshot.continueCount; i++) {
     if (snapshot.continueReading[i].hasCover) visit(snapshot.continueReading[i], sizes.rowWidth, sizes.rowHeight);
   }
-  for (int i = 0; i < snapshot.discoverCount; i++) {
-    if (snapshot.discover[i].hasCover) visit(snapshot.discover[i], sizes.shelfWidth, sizes.shelfHeight);
-  }
-  for (int i = 0; i < snapshot.recentCount; i++) {
-    if (snapshot.recent[i].hasCover) visit(snapshot.recent[i], sizes.shelfWidth, sizes.shelfHeight);
+  for (const BookOrbitHomeShelf& shelf : snapshot.shelves) {
+    for (int i = 0; i < shelf.count; i++) {
+      if (shelf.books[i].hasCover) visit(shelf.books[i], sizes.shelfWidth, sizes.shelfHeight);
+    }
   }
 }
 
@@ -201,6 +215,46 @@ void rebuildPendingReading() {
 }
 }  // namespace
 
+namespace {
+template <size_t N>
+void copyText(char (&out)[N], const char* text) {
+  snprintf(out, N, "%s", text != nullptr ? text : "");
+}
+
+// A shelf of the outgoing snapshot that listed the same source, wherever it sat.
+const BookOrbitHomeShelf* findShelf(const BookOrbitHomeSnapshot& snapshot, const BookOrbitHomeShelfSource& source) {
+  for (const BookOrbitHomeShelf& shelf : snapshot.shelves) {
+    if (shelf.source.sameAs(source)) return &shelf;
+  }
+  return nullptr;
+}
+
+// A collection or SmartScope lists its newest books first: a shelf is a glimpse of what
+// changed, where the catalog lists them by title.
+BookOrbitBookQuery shelfQuery(const BookOrbitHomeShelfSource& source) {
+  BookOrbitBookQuery query = BookOrbitCatalogClient::sectionBookQuery(
+      source.kind == BookOrbitHomeShelfKind::WANT_TO_READ ? BookOrbitCatalogClient::WANT_TO_READ_SHELF : "recent");
+  if (source.kind == BookOrbitHomeShelfKind::COLLECTION) query.collectionId = source.id;
+  if (source.kind == BookOrbitHomeShelfKind::SMART_SCOPE) query.smartScopeId = source.id;
+  return query;
+}
+
+// The first books of a shelf's listing. Discover is the dashboard's to fill.
+bool fetchShelf(BookOrbitHomeShelf& shelf) {
+  BookOrbitBookPage page;
+  if (!BookOrbitCatalogClient::fetchBooks(shelfQuery(shelf.source), 1, page)) return false;
+  shelf.count = 0;
+  for (const auto& book : page.books) {
+    if (shelf.count >= BookOrbitHomeShelf::BOOK_COUNT) break;
+    BookOrbitHomeBook& out = shelf.books[shelf.count++];
+    out.id = static_cast<int32_t>(book.id);
+    out.hasCover = true;
+    copyText(out.title, book.title.c_str());
+  }
+  return true;
+}
+}  // namespace
+
 bool refresh(const StopCheck shouldStop, const CoverSizes& sizes) {
   // The sleep sync comes here after the book's own exchanges. Everything below is
   // retried by the next sync, so short of heap it can simply wait for one.
@@ -220,6 +274,9 @@ bool refresh(const StopCheck shouldStop, const CoverSizes& sizes) {
   }
   const bool hadPrevious = load(*previous);
 
+  // Each shelf lists what the settings chose; the dashboard below fills the Discover ones.
+  for (int i = 0; i < BookOrbitHomeSnapshot::SHELVES; i++) next->shelves[i].source = BOOKORBIT_STORE.getHomeShelf(i);
+
   HalFile file;
   if (!Storage.openFileForWrite("BookOrbit", TMP_PATH, file)) return false;
   // The year's minutes follow the struct: reserve its place, then come back to it.
@@ -238,27 +295,17 @@ bool refresh(const StopCheck shouldStop, const CoverSizes& sizes) {
   next->fetchDay = getCurrentLocalReadingStatsDateTimeAnyClock(today) ? readingStatsDayIndex(today.date) : 0;
   next->localFinishedAtFetch = GlobalReadingStats::load().completedBooks;
 
-  // The server draws Discover anew on every request. Keeping a day's draw stops each sync
-  // from costing a new set of covers.
-  if (hadPrevious && next->fetchDay != 0 && previous->fetchDay == next->fetchDay && previous->discoverCount > 0) {
-    next->discoverCount = previous->discoverCount;
-    memcpy(next->discover, previous->discover, sizeof(next->discover));
-  }
-
-  // The first page of the recent listing. A failure leaves the shelf as it was.
-  BookOrbitBookPage page;
-  if (BookOrbitCatalogClient::fetchBooks(BookOrbitCatalogClient::sectionBookQuery("recent"), 1, page)) {
-    next->recentCount = 0;
-    for (const auto& book : page.books) {
-      if (next->recentCount >= BookOrbitHomeSnapshot::SHELF_COUNT) break;
-      BookOrbitHomeBook& out = next->recent[next->recentCount++];
-      out.id = static_cast<int32_t>(book.id);
-      out.hasCover = true;
-      snprintf(out.title, sizeof(out.title), "%s", book.title.c_str());
+  for (BookOrbitHomeShelf& shelf : next->shelves) {
+    const BookOrbitHomeShelf* kept = hadPrevious ? findShelf(*previous, shelf.source) : nullptr;
+    // The server draws Discover anew on every request. Keeping a day's draw stops each
+    // sync from costing a new set of covers. A failed listing leaves its shelf as it was.
+    const bool keep = shelf.source.kind == BookOrbitHomeShelfKind::DISCOVER
+                          ? next->fetchDay != 0 && previous->fetchDay == next->fetchDay
+                          : !fetchShelf(shelf);
+    if (keep && kept != nullptr && kept->count > 0) {
+      shelf.count = kept->count;
+      memcpy(shelf.books, kept->books, sizeof(shelf.books));
     }
-  } else if (hadPrevious) {
-    next->recentCount = previous->recentCount;
-    memcpy(next->recent, previous->recent, sizeof(next->recent));
   }
 
   // What Home's "All (N)" opens: the dashboard's own in-progress count takes in every
@@ -286,6 +333,86 @@ bool refresh(const StopCheck shouldStop, const CoverSizes& sizes) {
   fetchMissingCovers(*next, shouldStop, sizes);
   evictCovers(*next, sizes);
   return true;
+}
+
+bool shelvesFollowSettings() {
+  auto snapshot = makeUniqueNoThrow<BookOrbitHomeSnapshot>();
+  if (!snapshot) {
+    LOG_ERR("BookOrbit", "Cannot allocate the Home snapshot (%u bytes)", static_cast<unsigned>(sizeof(*snapshot)));
+    return true;
+  }
+  if (!load(*snapshot)) return true;
+  for (int i = 0; i < BookOrbitHomeSnapshot::SHELVES; i++) {
+    if (!snapshot->shelves[i].source.sameAs(BOOKORBIT_STORE.getHomeShelf(i))) return false;
+  }
+  return true;
+}
+
+bool refreshShelfOptions() {
+  // Written as the pages arrive, so no list of them waits in RAM beside the TLS session;
+  // the count goes into the header at the end, and the old file stays until then.
+  HalFile file;
+  if (!Storage.openFileForWrite("BookOrbit", OPTIONS_TMP_PATH, file)) return false;
+  OptionsHeader header;
+  bool ok = file.write(reinterpret_cast<const uint8_t*>(&header), sizeof(header)) == sizeof(header);
+
+  const struct {
+    const char* section;
+    BookOrbitHomeShelfKind kind;
+  } lists[] = {{"collections", BookOrbitHomeShelfKind::COLLECTION},
+               {"smart-scopes", BookOrbitHomeShelfKind::SMART_SCOPE}};
+  uint16_t& count = header.count;
+  BookOrbitFacetPage page;
+  for (const auto& list : lists) {
+    for (int number = 1; ok && count < MAX_SHELF_OPTIONS; number++) {
+      ok = BookOrbitCatalogClient::fetchSectionEntries(list.section, number, page);
+      for (size_t i = 0; ok && i < page.entries.size() && count < MAX_SHELF_OPTIONS; i++) {
+        const BookOrbitFacetEntry& entry = page.entries[i];
+        if (entry.id.empty()) continue;
+        BookOrbitHomeShelfSource option;
+        option.kind = list.kind;
+        copyText(option.id, entry.id.c_str());
+        copyText(option.name, entry.title.c_str());
+        ok = file.write(reinterpret_cast<const uint8_t*>(&option), sizeof(option)) == sizeof(option);
+        count++;
+      }
+      if (!page.hasNext) break;
+    }
+  }
+  ok = ok && file.seekSet(0) && file.write(reinterpret_cast<const uint8_t*>(&header), sizeof(header)) == sizeof(header);
+  file.close();
+  if (ok) {
+    Storage.remove(OPTIONS_PATH);
+    ok = Storage.rename(OPTIONS_TMP_PATH, OPTIONS_PATH);
+  }
+  if (!ok) {
+    LOG_ERR("BookOrbit", "Shelf options not refreshed (http=%d)", HttpDownloader::lastHttpStatus);
+    Storage.remove(OPTIONS_TMP_PATH);
+    return false;
+  }
+  LOG_INF("BookOrbit", "Saved %u shelf options", static_cast<unsigned>(count));
+  return true;
+}
+
+bool loadShelfOptions(std::vector<BookOrbitHomeShelfSource>& out) {
+  out.clear();
+  HalFile file;
+  if (!Storage.exists(OPTIONS_PATH) || !Storage.openFileForRead("BookOrbit", OPTIONS_PATH, file)) return false;
+  OptionsHeader header;
+  bool ok = file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header)) == static_cast<int>(sizeof(header)) &&
+            header.magic == OPTIONS_MAGIC && header.version == OPTIONS_VERSION && header.count <= MAX_SHELF_OPTIONS;
+  if (ok) {
+    std::vector<BookOrbitHomeShelfSource> loaded(header.count);
+    const size_t bytes = header.count * sizeof(BookOrbitHomeShelfSource);
+    ok = file.read(reinterpret_cast<uint8_t*>(loaded.data()), bytes) == static_cast<int>(bytes);
+    out.swap(loaded);
+  }
+  file.close();
+  if (!ok) {
+    LOG_ERR("BookOrbit", "Ignoring an unreadable list of shelf options");
+    out.clear();
+  }
+  return ok;
 }
 
 bool hasPendingCovers() {

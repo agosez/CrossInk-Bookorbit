@@ -99,8 +99,7 @@ void BookOrbitHomeModel::computeRows() {
     row.onCard = true;
   }
 
-  discoverOnCard = 0;
-  recentOnCard = 0;
+  shelfOnCard.fill(0);
   if (!snapshot) return;
 
   const auto isRecentBook = [this, localBooks](const char* title, const std::string& path) {
@@ -121,16 +120,17 @@ void BookOrbitHomeModel::computeRows() {
     row.progress = book.progress != BookOrbitHomeBook::NO_PROGRESS ? static_cast<float>(book.progress) : -1.0f;
     row.onCard = onCard;
   }
-  discoverOnCard = onCardMask(snapshot->discover, snapshot->discoverCount);
-  recentOnCard = onCardMask(snapshot->recent, snapshot->recentCount);
+  for (int i = 0; i < BookOrbitHomeSnapshot::SHELVES; i++) {
+    shelfOnCard[i] = onCardMask(snapshot->shelves[i].books, snapshot->shelves[i].count);
+  }
   serverBookCount = static_cast<int32_t>(BookOrbitDownloadIndex::recordedCount());
   BookOrbitDownloadIndex::unload();
 }
 
 const BookOrbitHomeBook* BookOrbitHomeModel::catalogBook(const int arg) const {
   if (!snapshot || arg < 0) return nullptr;
-  if (arg < kDiscoverArgBase) return &snapshot->continueReading[arg];
-  if (arg < kRecentArgBase) return &snapshot->discover[arg - kDiscoverArgBase];
-  if (arg < kRecentArgBase + BookOrbitHomeSnapshot::SHELF_COUNT) return &snapshot->recent[arg - kRecentArgBase];
-  return nullptr;
+  if (arg < kShelfArgBase) return &snapshot->continueReading[arg];
+  const int shelf = (arg - kShelfArgBase) / BookOrbitHomeShelf::BOOK_COUNT;
+  if (shelf >= BookOrbitHomeSnapshot::SHELVES) return nullptr;
+  return &snapshot->shelves[shelf].books[(arg - kShelfArgBase) % BookOrbitHomeShelf::BOOK_COUNT];
 }

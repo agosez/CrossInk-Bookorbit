@@ -8,6 +8,7 @@
 
 #include "BookOrbitHomeModel.h"
 #include "BookOrbitHomePages.h"
+#include "BookOrbitHomeText.h"
 #include "components/UiAppHelpers.h"
 #include "components/icons/bookOrbitHomeIcons.h"
 #include "fontIds.h"
@@ -32,19 +33,39 @@ void formatGigabytes(const uint64_t bytes, char* out, const size_t outSize) {
   }
 }
 
-void drawShelf(const BookOrbitHomePageContext& context, const Rect& tile, const char* title, const freeink::Icon& icon,
-               const BookOrbitHomeBook* books, const int count, const uint8_t onCardMask) {
+// The top shelf spans grid rows 0-1, the bottom one rows 2-3.
+Rect shelfTile(const BookOrbitHomeLayout::Grid& grid, const int shelf) { return cell(grid, 0, shelf * 2, 2, 2); }
+
+const freeink::Icon& shelfIcon(const BookOrbitHomeShelfKind kind) {
+  switch (kind) {
+    case BookOrbitHomeShelfKind::DISCOVER:
+      break;
+    case BookOrbitHomeShelfKind::RECENTLY_ADDED:
+      return icon_home_clock_24;
+    case BookOrbitHomeShelfKind::WANT_TO_READ:
+      return icon_home_bookmark_24;
+    case BookOrbitHomeShelfKind::COLLECTION:
+      return icon_home_collection_24;
+    case BookOrbitHomeShelfKind::SMART_SCOPE:
+      return icon_home_scope_24;
+  }
+  return icon_home_shuffle_24;
+}
+
+void drawShelf(const BookOrbitHomePageContext& context, const Rect& tile, const BookOrbitHomeShelf& shelf,
+               const uint8_t onCardMask) {
   GfxRenderer& renderer = context.renderer;
   const BookOrbitHomeTiles& tiles = context.tiles;
-  tiles.drawTileHeader(tile, title, &icon);
+  tiles.drawTileHeader(tile, BookOrbitHomeText::shelfTitle(shelf.source), &shelfIcon(shelf.source.kind));
 
-  for (int i = 0; i < count; i++) {
+  for (int i = 0; i < shelf.count; i++) {
+    const BookOrbitHomeBook& book = shelf.books[i];
     const Rect rect = shelfCoverRect(renderer, tile, i);
     const Rect slot{rect.x, rect.y, rect.width, rect.height - kShelfCaptionHeight};
     char path[64];
-    BookOrbitHomeStore::coverPath(books[i], slot.width, slot.height, path, sizeof(path));
+    BookOrbitHomeStore::coverPath(book, slot.width, slot.height, path, sizeof(path));
     tiles.drawCoverFile(path, slot, false);
-    tiles.drawFitted(SMALL_FONT_ID, slot.x, slot.y + slot.height + 1, books[i].title, slot.width);
+    tiles.drawFitted(SMALL_FONT_ID, slot.x, slot.y + slot.height + 1, book.title, slot.width);
     if ((onCardMask & (1u << i)) != 0) {
       constexpr int markSize = 25;
       const int markX = slot.x + slot.width - markSize - 3;
@@ -107,15 +128,12 @@ void addStops(const BookOrbitHomePageContext& context, BookOrbitHomeStops& stops
   const BookOrbitHomeSnapshot* snapshot = context.model.snapshot.get();
   if (!snapshot) return;
   const auto& grid = context.grid;
-  const Rect discover = cell(grid, 0, 0, 2, 2);
-  for (int i = 0; i < snapshot->discoverCount; i++) {
-    stops.add(shelfCoverRect(context.renderer, discover, i), 2, kRingOutset, Action::OpenCatalogBook,
-              BookOrbitHomeModel::kDiscoverArgBase + i);
-  }
-  const Rect recent = cell(grid, 0, 2, 2, 2);
-  for (int i = 0; i < snapshot->recentCount; i++) {
-    stops.add(shelfCoverRect(context.renderer, recent, i), 2, kRingOutset, Action::OpenCatalogBook,
-              BookOrbitHomeModel::kRecentArgBase + i);
+  for (int shelf = 0; shelf < BookOrbitHomeSnapshot::SHELVES; shelf++) {
+    const Rect tile = shelfTile(grid, shelf);
+    for (int i = 0; i < snapshot->shelves[shelf].count; i++) {
+      stops.add(shelfCoverRect(context.renderer, tile, i), 2, kRingOutset, Action::OpenCatalogBook,
+                BookOrbitHomeModel::shelfArg(shelf, i));
+    }
   }
   stops.add(cell(grid, 0, 4), kTileRadius, kRingOutset, Action::OpenCatalog);
   stops.add(cell(grid, 1, 4), kTileRadius, kRingOutset, Action::OpenAuthors);
@@ -129,10 +147,9 @@ void draw(const BookOrbitHomePageContext& context) {
   const BookOrbitHomeSnapshot* snapshot = model.snapshot.get();
   if (!snapshot) return;
   const auto& grid = context.grid;
-  drawShelf(context, cell(grid, 0, 0, 2, 2), tr(STR_HOME_DISCOVER), icon_home_shuffle_24, snapshot->discover,
-            snapshot->discoverCount, model.discoverOnCard);
-  drawShelf(context, cell(grid, 0, 2, 2, 2), tr(STR_HOME_RECENTLY_ADDED), icon_home_clock_24, snapshot->recent,
-            snapshot->recentCount, model.recentOnCard);
+  for (int shelf = 0; shelf < BookOrbitHomeSnapshot::SHELVES; shelf++) {
+    drawShelf(context, shelfTile(grid, shelf), snapshot->shelves[shelf], model.shelfOnCard[shelf]);
+  }
 
   char collections[32];
   snprintf(collections, sizeof(collections), tr(STR_HOME_COLLECTIONS_FORMAT),

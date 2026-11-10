@@ -1,5 +1,8 @@
 #pragma once
 
+#include <BookOrbitHomeShelfSource.h>
+#include <I18nKeys.h>
+
 #include <cstddef>
 #include <cstdint>
 
@@ -15,5 +18,11 @@ void copyInitial(const char* initials, int index, char* out, size_t outSize);
 void copyToken(const char* list, int index, char* out, size_t outSize);
 
 void formatHours(uint32_t hours, char* out, size_t outSize);
+
+// The title of Discover, Recently Added or Want to Read, the kinds the server does not name.
+StrId shelfKindName(BookOrbitHomeShelfKind kind);
+
+// A Library page shelf's title: a collection or SmartScope goes by its own name.
+const char* shelfTitle(const BookOrbitHomeShelfSource& source);
 
 }  // namespace BookOrbitHomeText

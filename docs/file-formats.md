@@ -802,7 +802,7 @@ uncovers. All values are little-endian.
 
 ## `/.crosspoint/bookorbit_home.bin`
 
-### Version 2
+### Version 3
 
 What the BookOrbit Home shows from the server, so that opening Home never touches the
 network. A sync writes it to `bookorbit_home.tmp` and renames it into place. A file with
@@ -811,6 +811,14 @@ another magic, version or struct size is ignored until the next sync replaces it
 Version 2 adds `continueTotal` after `collections`: the total of the catalog's Continue
 Reading listing (EPUBs being read), which Home's "All (N)" shows, or -1 when no sync has
 counted it. A version 1 file is ignored, so Home shows no server data until the next sync.
+
+Version 3 replaces the Library page's `discover` and `recent` lists, and their two counts
+after `continueCount`, with `shelves`: two `BookOrbitHomeShelf` at the end of the struct,
+top then bottom. Each starts with the `BookOrbitHomeShelfSource` it was fetched for (kind,
+then the collection's or SmartScope's id and name, see `bookorbit_home_shelves.bin`), then
+its book count and four books. The page draws each shelf from that source, so a shelf
+keeps the title it was fetched under until a sync follows the settings. A version 2 file
+is ignored, so Home shows no server data until the next sync.
 
 | Offset | Size | Field |
 | --- | --- | --- |
@@ -824,6 +832,29 @@ Covers live in `/.crosspoint/bookorbit_home/`: `<id>_<version>_<w>x<h>.bmp` is w
 draws, and `<id>_<version>.jpg` is a fetched cover waiting for a heap the JPEG decoder
 fits in. `<version>` hashes the server's `updatedAt`, so a changed cover gets a new file.
 A sync removes files nothing shows once the folder holds more than 30.
+
+## `/.crosspoint/bookorbit_home_shelves.bin`
+
+### Version 1
+
+The collections and SmartScopes the BookOrbit Home's shelves can be set to, as BookOrbit
+Sync > Home > Refresh lists last fetched them (`BookOrbitHomeStore::refreshShelfOptions()`).
+The settings pick from this file without the network. A refresh writes it to
+`bookorbit_home_shelves.tmp`, the entries as each page arrives and the count at the end,
+then renames it into place, so a failed refresh keeps the previous list.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | Magic, `0x53424248` |
+| 4 | 2 | Version |
+| 6 | 2 | Entry count, at most 64: collections first, then SmartScopes |
+| 8 | 67 each | `BookOrbitHomeShelfSource` (`lib/BookOrbitSync/BookOrbitHomeShelfSource.h`): `uint8_t` kind (3 collection, 4 SmartScope), `char[20]` id, `char[46]` name, NUL-terminated |
+
+The settings in `bookorbit.json` keep the chosen shelves as two strings, `homeShelfTop` and
+`homeShelfBottom`, each `kind:id:name`: `kind` is 0 Discover, 1 Recently Added, 2 Want to
+Read, 3 collection or 4 SmartScope, and only a collection or SmartScope has an id and a
+name (`3:12:Science fiction`, `2::`). The name runs to the end of the string, so it may
+hold colons. A missing or unreadable value falls back to Discover over Recently Added.
 
 ## `/.crosspoint/wallclock.bin`
 

@@ -1,5 +1,6 @@
 #include "BookOrbitHomeText.h"
 
+#include <I18n.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -32,6 +33,18 @@ void copyToken(const char* list, int index, char* out, const size_t outSize) {
 
 void formatHours(const uint32_t hours, char* out, const size_t outSize) {
   snprintf(out, outSize, "%luh", static_cast<unsigned long>(hours));
+}
+
+StrId shelfKindName(const BookOrbitHomeShelfKind kind) {
+  if (kind == BookOrbitHomeShelfKind::RECENTLY_ADDED) return StrId::STR_HOME_RECENTLY_ADDED;
+  if (kind == BookOrbitHomeShelfKind::WANT_TO_READ) return StrId::STR_BOOKORBIT_WANT_TO_READ;
+  return StrId::STR_HOME_DISCOVER;
+}
+
+const char* shelfTitle(const BookOrbitHomeShelfSource& source) {
+  // The server names every collection and SmartScope; its id stands in for a name lost.
+  if (isNamedHomeShelfKind(source.kind)) return source.name[0] != '\0' ? source.name : source.id;
+  return I18N.get(shelfKindName(source.kind));
 }
 
 }  // namespace BookOrbitHomeText

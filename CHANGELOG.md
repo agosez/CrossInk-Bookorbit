@@ -11,6 +11,7 @@ Based on CrossInk v1.6.1.
 
 ### Added
 
+- With the BookOrbit theme, the two shelves at the top of the Library page, Discover and Recently added, can each show something else: Discover, Recently added, Want to Read, one of your BookOrbit collections or one of your SmartScopes. Pick them in Settings > BookOrbit Sync > Home. Its Refresh lists row fetches your collections and SmartScopes from the server, so one created since is there to pick. Each shelf's header names what it shows, with an icon to match: a folder for a collection, an aperture for a SmartScope, a bookmark for Want to Read. A collection or SmartScope shelf shows its most recently added books. Leaving the screen after a change syncs Home, so the new shelves are there when it opens. After updating, Home shows only the device's own data until its next sync.
 - With the BookOrbit theme, "All (N) >" in the header of Home's Also Reading tile now opens the BookOrbit catalog's Continue Reading list, where every book you are reading shows, not only the few that fit on Home. On the X3 and X4, Up and Down select it after the BookOrbit tile; on touch devices, a tap anywhere on the tile's header opens it. Without a BookOrbit account, it opens the Library.
 
 ### Changed

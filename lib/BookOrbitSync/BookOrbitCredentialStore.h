@@ -4,6 +4,8 @@
 
 #include <string>
 
+#include "BookOrbitHomeShelfSource.h"
+
 /**
  * Singleton class for storing BookOrbit sync credentials on the SD card.
  * Passwords are XOR-obfuscated with the device's unique hardware MAC address
@@ -25,6 +27,10 @@ enum class BookOrbitSyncBehavior : uint8_t {
 };
 
 class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStore> {
+ public:
+  // The Library page's shelves, top then bottom.
+  static constexpr int HOME_SHELF_COUNT = 2;
+
  private:
   std::string username;
   std::string password;
@@ -34,6 +40,9 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
   std::string cfClientSecret;  // Cloudflare Access service token, Client Secret half
   BookOrbitSyncBehavior syncBehavior = BookOrbitSyncBehavior::ASK_EVERY_TIME;
   bool syncOnSleep = false;
+  // Discover over Recently Added, the Library page before shelves could be chosen.
+  BookOrbitHomeShelfSource homeShelves[HOME_SHELF_COUNT] = {{BookOrbitHomeShelfKind::DISCOVER, {}, {}},
+                                                            {BookOrbitHomeShelfKind::RECENTLY_ADDED, {}, {}}};
 
   BookOrbitCredentialStore() = default;
   ~BookOrbitCredentialStore() = default;
@@ -79,6 +88,17 @@ class BookOrbitCredentialStore : public PersistableStore<BookOrbitCredentialStor
   bool getSyncOnSleep() const {
     ensureLoaded();
     return syncOnSleep;
+  }
+
+  // What a Library page shelf lists: index 0 is the top shelf. The Home snapshot only
+  // follows at its next sync.
+  const BookOrbitHomeShelfSource& getHomeShelf(const int index) const {
+    ensureLoaded();
+    return homeShelves[index];
+  }
+  void setHomeShelf(const int index, const BookOrbitHomeShelfSource& source) {
+    ensureLoaded();
+    homeShelves[index] = source;
   }
 
   // Catalog download folder. Callers must pass a normalized value: "" for the SD
