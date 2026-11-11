@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hashlib
+import http.server
 import json
 import os
 import re
@@ -25,7 +27,10 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -44,6 +49,7 @@ SHORT_PWRBTN_SLEEP = 1  # CrossPointSettings::SHORT_PWRBTN::SLEEP
 SHORT_PWRBTN_BOOKORBIT_SYNC = 37  # CrossPointSettings::SHORT_PWRBTN::BOOKORBIT_SYNC
 SYNC_BEHAVIOR_SMART = 1
 UI_THEME_BOOKORBIT = 8
+BOOKORBIT_SYNC_FAILED = 7  # BookOrbitSyncActivity::SYNC_FAILED
 SYNC_MARKER_MAGIC = 0x424F5359  # "BOSY", BookOrbitSmartSync::MARKER_MAGIC
 SYNC_MARKER_FILE = "bookorbit_sync.bin"
 
@@ -441,6 +447,54 @@ def peer_device(manifest: dict) -> KosyncDevice:
     return dev
 
 
+@contextlib.contextmanager
+def server_with_failing_progress():
+    """A local stand-in for the server, yielding its URL: it forwards every request to the
+    real one except those for reading progress, which it answers with a 500. The server
+    is up, its dashboard answers, and a book's sync fails."""
+    upstream = BASE_URL.rstrip("/")
+    dropped = {"host", "connection", "accept-encoding", "content-length", "transfer-encoding"}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args) -> None:
+            pass
+
+        def forward(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else None
+            if "/syncs/progress" in self.path:
+                status, headers, data = 500, {"Content-Type": "application/json"}, b'{"message":"injected"}'
+            else:
+                request = urllib.request.Request(
+                    upstream + self.path, data=body, method=self.command,
+                    headers={k: v for k, v in self.headers.items() if k.lower() not in dropped})
+                try:
+                    with urllib.request.urlopen(request, timeout=30) as response:
+                        status, headers, data = response.status, dict(response.headers), response.read()
+                except urllib.error.HTTPError as error:
+                    status, headers, data = error.code, dict(error.headers), error.read()
+            self.send_response(status)
+            for key, value in headers.items():
+                if key.lower() not in dropped:
+                    self.send_header(key, value)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        do_GET = do_PUT = do_POST = do_DELETE = do_PATCH = forward
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def verify_device(manifest: dict, tag: str) -> KosyncDevice:
     """A never-seen device id: the server offers it everything it has no sync
     state for, which makes it an honest view of what exists server-side."""
@@ -706,6 +760,32 @@ def scenario_sleep_sync_refreshes_home(verbose: bool) -> None:
             assert "Sleep sync over" in output, "sleep sync never ran to its end"
             refreshed = home_snapshot_header(fs) is not None
             assert refreshed == expected, f"theme {theme}: Home snapshot written={refreshed}, expected={expected}"
+
+
+def scenario_sleep_sync_failure_keeps_home(verbose: bool) -> None:
+    """A sleep sync that fails for the book leaves the Home snapshot alone: the tile dates
+    the snapshot as the last sync, so refreshing it would report the failed sync as done.
+    The server's progress endpoint fails while its dashboard still answers."""
+    manifest, _ = load_seed()
+    source = INTEGRATION / "library" / manifest["progress"][2]["file"]
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp, server_with_failing_progress() as url:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        fs.enable_sync_on_sleep()
+        bookorbit = json.loads((fs.crosspoint / "bookorbit.json").read_text())
+        bookorbit["serverUrl"] = url
+        (fs.crosspoint / "bookorbit.json").write_text(json.dumps(bookorbit))
+        settings = json.loads((fs.crosspoint / "crossink-settings.json").read_text())
+        settings["uiTheme"] = UI_THEME_BOOKORBIT
+        (fs.crosspoint / "crossink-settings.json").write_text(json.dumps(settings))
+        sim_path = fs.add_book(source)
+        fs.set_open_book(sim_path)
+        write_progress_bin(fs.epub_cache_dir(sim_path) / "progress.bin", 4, 0, 1)
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="none", timeout_s=90, verbose=verbose)
+        assert "Restarting into the BookOrbit sleep sync" in output, "sleep did not hand over to the sleep sync"
+        assert "Sleep sync over (state=%d)" % BOOKORBIT_SYNC_FAILED in output, "the sleep sync did not fail"
+        assert home_snapshot_header(fs) is None, "a failed sleep sync wrote a Home snapshot"
 
 
 def scenario_sleep_sync_after_web_open(verbose: bool) -> None:
@@ -1922,6 +2002,7 @@ SCENARIOS = {
     "sync_progress_push": scenario_sync_progress_push,
     "sleep_sync_push": scenario_sleep_sync_push,
     "sleep_sync_refreshes_home": scenario_sleep_sync_refreshes_home,
+    "sleep_sync_failure_keeps_home": scenario_sleep_sync_failure_keeps_home,
     "home_theme_refresh": scenario_home_theme_refresh,
     "home_download_returns_home": scenario_home_download_returns_home,
     "home_also_reading_link": scenario_home_also_reading_link,

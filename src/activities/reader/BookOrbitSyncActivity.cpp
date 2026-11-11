@@ -339,8 +339,12 @@ void BookOrbitSyncActivity::runSleepSync() {
   }
   syncSession.reset();
   // The BookOrbit Home draws from what this boot's network leaves behind. Each step is
-  // retried by the next sync, so a wake press can end it anywhere.
-  const bool refreshHome = wifiConnectedForSleepSync && UITheme::hasBookOrbitHome();
+  // retried by the next sync, so a wake press can end it anywhere. Its tile dates the
+  // snapshot as the last sync: a sync that failed for the book leaves it as it was, or
+  // the tile would report as done a sync whose progress never reached the server.
+  const bool homeShown = wifiConnectedForSleepSync && UITheme::hasBookOrbitHome();
+  const bool refreshHome = homeShown && state != SYNC_FAILED;
+  if (homeShown && !refreshHome) LOG_INF("BookOrbit", "Sleep sync failed: the Home snapshot stays as it was");
   const auto homeCoverSizes = BookOrbitHomeLayout::coverSizes(renderer);
   if (refreshHome && !sleepSyncWakeRequested()) BookOrbitHomeStore::refresh(&sleepSyncWakeRequested, homeCoverSizes);
   SavedWifiConnect::disconnect();
@@ -1630,7 +1634,8 @@ void BookOrbitSyncActivity::performUpload() {
   const auto result = BookOrbitSyncClient::updateProgress(progress);
 
   syncSession.reset();
-  SavedWifiConnect::disconnect();
+  // The sleep sync refreshes Home on this connection next; runSleepSync() closes it.
+  if (!sleepSync) SavedWifiConnect::disconnect();
 
   if (result != BookOrbitSyncClient::OK) {
     {

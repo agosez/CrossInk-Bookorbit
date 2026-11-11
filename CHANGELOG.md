@@ -18,6 +18,11 @@ Based on CrossInk v1.6.1.
 - With the BookOrbit theme, the number in "All (N)" on Home's Also Reading tile is now how many books that Continue Reading list holds, counted on the server at each sync. It used to count the recent books on the device, so it could read "All (0)" above books being read elsewhere. Without a BookOrbit account, it still counts the recent books on the device. After updating, Home shows only the device's own data until its next sync.
 - The Home menu of the BookOrbit, Minimal and Dashboard themes is now a grid of tiles in the BookOrbit Home's style, each with an icon and its name, and the selected tile is circled as on Home. The grid starts right under the title, where Home's tiles start, and its size follows the number of entries; with the BookOrbit theme's two extra entries, the old list sat well below the middle of the screen, close to the button hints. The menu now reopens on the entry you last opened from it, until the reader restarts.
 
+### Fixed
+
+- With the BookOrbit theme and Sync on Sleep, the BookOrbit tile on Home no longer counts a failed sync as done. When the sync behind the sleep screen could not exchange the book's progress with the server, Home still refreshed from the server, and the tile showed that sync as having just happened. Home now stays as it was, and the tile keeps the time of the last sync that worked.
+- With the BookOrbit theme and Sync on Sleep, Home now also refreshes after a sleep sync that sent the book's progress to the server. Sending it turned Wi-Fi off, so Home could not reach the server afterwards and the tile kept the time of an earlier sync.
+
 ## [v1.6.1+bookorbit.7] - 2026-11-08
 
 Based on CrossInk v1.6.1.
