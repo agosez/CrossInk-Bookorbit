@@ -102,7 +102,9 @@ class PersistableStore : public PersistableStoreBase {
     const_cast<T*>(static_cast<const T*>(this))->loadFromFile();
   }
 
-  static T& getInstance() {
+  // Out of line on purpose: inlined, every call site carries its own copy of the
+  // static's guard and constructor call (tens of bytes each, ~120 sites).
+  __attribute__((noinline)) static T& getInstance() {
     static T instance;
     return instance;
   }
