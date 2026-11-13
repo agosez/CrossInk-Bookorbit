@@ -25,9 +25,11 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <functional>
 #include <memory>
 
 #include "BookOrbitCredentialStore.h"
+#include "StreamingJsonParser.h"
 
 // This file intentionally mirrors lib/KOReaderSync/KOReaderSyncClient.cpp rather than
 // sharing its HTTP plumbing. BookOrbit was added as a separate, non-breaking sync
@@ -220,16 +222,28 @@ uint32_t requiredHeapFloor() { return s_sessionHandshakePaid ? MIN_HEAP_FOR_KEPT
  */
 class JsonBody {
  public:
-  bool build(const JsonDocument& doc) {
+  // `room`: bytes set aside past the document, for insertBeforeEnd().
+  bool build(const JsonDocument& doc, const size_t room = 0) {
     const size_t length = measureJson(doc);
-    data_ = makeUniqueNoThrow<char[]>(length + 1);
+    data_ = makeUniqueNoThrow<char[]>(length + room + 1);
     if (!data_) {
       LOG_ERR("BookOrbit", "Out of memory for a %u byte request body (heap: %u free, %u max alloc)",
-              (unsigned)(length + 1), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+              (unsigned)(length + room + 1), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
       return false;
     }
     length_ = serializeJson(doc, data_.get(), length + 1);
+    capacity_ = length_ + room;
     return true;
+  }
+
+  // Opens a gap of `len` bytes `fromEnd` bytes before the end of the body, in the room build()
+  // set aside, for the caller to fill. nullptr when it does not fit.
+  char* insertBeforeEnd(const size_t fromEnd, const size_t len) {
+    if (!data_ || fromEnd > length_ || length_ + len > capacity_) return nullptr;
+    char* gap = data_.get() + length_ - fromEnd;
+    memmove(gap + len, gap, fromEnd + 1);  // the tail and its terminator
+    length_ += len;
+    return gap;
   }
 
   const char* c_str() const { return data_ ? data_.get() : ""; }
@@ -241,12 +255,60 @@ class JsonBody {
   void release() {
     data_.reset();
     length_ = 0;
+    capacity_ = 0;
   }
 
  private:
   std::unique_ptr<char[]> data_;
   size_t length_ = 0;
+  size_t capacity_ = 0;
 };
+
+// An annotation exchange's key set, written straight into its body rather than built as JSON
+// nodes: those cost ~100 bytes a key on top of the ~70 each serializes to, which held a key set
+// to 64 keys beside a TLS session, and a book with more never told the server what it deleted.
+// It goes last in the book object, so it is inserted before the body's closing "}]}" (the
+// book, the books array, the document). Keys are hex digests and "YYYY-MM-DD HH:MM:SS"
+// datetimes, so nothing in them needs escaping.
+constexpr char KEYS_OPEN[] = ",\"keys\":[";
+constexpr char KEY_OPEN[] = "{\"k\":\"";
+constexpr char KEY_MIDDLE[] = "\",\"dt\":\"";
+constexpr char KEY_CLOSE[] = "\"}";
+constexpr char BODY_END[] = "}]}";
+
+size_t keySetJsonLength(const BookOrbitAnnotationKeys& keys) {
+  size_t length = sizeof(KEYS_OPEN) - 1 + 1;  // and the closing bracket
+  for (size_t i = 0; keys.rows && i < keys.count; i++) {
+    length += (i > 0 ? 1 : 0) + sizeof(KEY_OPEN) - 1 + strlen(keys.rows[i].k) + sizeof(KEY_MIDDLE) - 1 +
+              strlen(keys.rows[i].dt) + sizeof(KEY_CLOSE) - 1;
+  }
+  return length;
+}
+
+bool writeKeySet(JsonBody& body, const BookOrbitAnnotationKeys& keys, const size_t length) {
+  constexpr size_t endLength = sizeof(BODY_END) - 1;
+  if (body.length() < endLength || strcmp(body.c_str() + body.length() - endLength, BODY_END) != 0) {
+    LOG_ERR("BookOrbit", "Exchange body does not end with its book object; key set not added");
+    return false;
+  }
+  char* out = body.insertBeforeEnd(endLength, length);
+  if (!out) return false;
+  const auto put = [&out](const char* text, const size_t len) {
+    memcpy(out, text, len);
+    out += len;
+  };
+  put(KEYS_OPEN, sizeof(KEYS_OPEN) - 1);
+  for (size_t i = 0; keys.rows && i < keys.count; i++) {
+    if (i > 0) put(",", 1);
+    put(KEY_OPEN, sizeof(KEY_OPEN) - 1);
+    put(keys.rows[i].k, strlen(keys.rows[i].k));
+    put(KEY_MIDDLE, sizeof(KEY_MIDDLE) - 1);
+    put(keys.rows[i].dt, strlen(keys.rows[i].dt));
+    put(KEY_CLOSE, sizeof(KEY_CLOSE) - 1);
+  }
+  put("]", 1);
+  return true;
+}
 
 #ifdef SIMULATOR
 void addAuthHeaders(HTTPClient& http) {
@@ -313,9 +375,11 @@ void configureClient(freeink::SecureHttpClient& http, const bool reuse) {
   http.setInsecure();
 }
 
-int sendBookOrbitRequest(const char* method, const std::string& url, const JsonBody* payload, std::string& outBody,
-                         const size_t maxBodyBytes = NO_BODY_LIMIT) {
-  outBody.clear();
+// Receives a reply's body as it arrives, with the length the server announced (0 when it did not).
+// Returning false stops the reading, which closes the connection.
+using ReplySink = std::function<bool(const uint8_t* data, size_t len, size_t announced)>;
+
+int sendBookOrbitRequest(const char* method, const std::string& url, const JsonBody* payload, const ReplySink& onBody) {
   s_lastBodyRefusal = BodyRefusal::None;
   const bool pooled = s_session != nullptr;
   freeink::SecureHttpClient oneShot;
@@ -340,37 +404,18 @@ int sendBookOrbitRequest(const char* method, const std::string& url, const JsonB
   if (payload != nullptr) {
     http.addHeader("Content-Type", "application/json");
   }
-  const auto sink = [&http, &outBody, maxBodyBytes](const uint8_t* data, const size_t len) {
-    const size_t needed = outBody.size() + len;
-    if (needed > maxBodyBytes) {
-      s_lastBodyRefusal = BodyRefusal::TooLarge;
-      return false;
-    }
-    if (needed > outBody.capacity()) {
-      // The whole body in one allocation when the server announced its length, a step otherwise.
-      const size_t announced = std::min(http.getContentLength(), maxBodyBytes);
-      const size_t target = announced >= needed
-                                ? announced
-                                : (needed + RESPONSE_GROWTH_STEP - 1) / RESPONSE_GROWTH_STEP * RESPONSE_GROWTH_STEP;
-      if (ESP.getMaxAllocHeap() < target + 1 + RESPONSE_HEAP_MARGIN) {
-        s_lastBodyRefusal = BodyRefusal::LowMemory;
-        return false;
-      }
-      outBody.reserve(target);
-    }
-    outBody.append(reinterpret_cast<const char*>(data), len);
-    return true;
-  };
+  size_t received = 0;
   int code = http.sendRequest(method, payload != nullptr ? payload->bytes() : nullptr,
-                              payload != nullptr ? payload->length() : 0, sink);
+                              payload != nullptr ? payload->length() : 0, [&](const uint8_t* data, const size_t len) {
+                                received += len;
+                                return onBody(data, len, http.getContentLength());
+                              });
   const bool bodyRefused = s_lastBodyRefusal != BodyRefusal::None;
   if (bodyRefused) {
     LOG_ERR("BookOrbit", "Reply not read (HTTP %d): %s (%u bytes in, announced %u, heap: %u free, %u max alloc)", code,
             s_lastBodyRefusal == BodyRefusal::TooLarge ? "larger than this request allows" : "not enough memory",
-            static_cast<unsigned>(outBody.size()), static_cast<unsigned>(http.getContentLength()),
+            static_cast<unsigned>(received), static_cast<unsigned>(http.getContentLength()),
             static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
-    outBody.clear();
-    outBody.shrink_to_fit();
     code = BODY_REFUSED;
   }
   // An HTTP status, even an error one, proves the session's handshake is up and paid
@@ -384,6 +429,39 @@ int sendBookOrbitRequest(const char* method, const std::string& url, const JsonB
     http.end();
   }
   logHeapStats("After request");
+  return code;
+}
+
+// A reply read whole into outBody, for the requests whose replies stay small.
+int sendBookOrbitRequest(const char* method, const std::string& url, const JsonBody* payload, std::string& outBody,
+                         const size_t maxBodyBytes = NO_BODY_LIMIT) {
+  outBody.clear();
+  const int code = sendBookOrbitRequest(
+      method, url, payload, [&outBody, maxBodyBytes](const uint8_t* data, const size_t len, const size_t announced) {
+        const size_t needed = outBody.size() + len;
+        if (needed > maxBodyBytes) {
+          s_lastBodyRefusal = BodyRefusal::TooLarge;
+          return false;
+        }
+        if (needed > outBody.capacity()) {
+          // The whole body in one allocation when the server announced its length, a step otherwise.
+          const size_t expected = std::min(announced, maxBodyBytes);
+          const size_t target = expected >= needed
+                                    ? expected
+                                    : (needed + RESPONSE_GROWTH_STEP - 1) / RESPONSE_GROWTH_STEP * RESPONSE_GROWTH_STEP;
+          if (ESP.getMaxAllocHeap() < target + 1 + RESPONSE_HEAP_MARGIN) {
+            s_lastBodyRefusal = BodyRefusal::LowMemory;
+            return false;
+          }
+          outBody.reserve(target);
+        }
+        outBody.append(reinterpret_cast<const char*>(data), len);
+        return true;
+      });
+  if (code == BODY_REFUSED) {
+    outBody.clear();
+    outBody.shrink_to_fit();
+  }
   return code;
 }
 
@@ -898,11 +976,256 @@ bool BookOrbitSyncClient::acceptsSidecarState() {
   return supported;
 }
 
+namespace {
+/**
+ * An annotation exchange reply, read as it arrives.
+ *
+ * Every reply carries a page of the server's own changes (BookOrbit's PUSH_DOWN_PAGE, 100
+ * entries) with their notes, colors and full texts, while a sync takes BOOKORBIT_ANNOTATION_BATCH
+ * of them at a time. Read whole, a page of web highlights is tens of KB, which this chip does not
+ * have beside a TLS session: the reply buffer's allocation aborted on an X4 with 60 waiting (its
+ * largest-free-block check raced the Wi-Fi tasks' own allocations), and refusing such a reply
+ * cleanly would still leave the book unable to sync while the server holds that page. Streamed,
+ * only the entry under way and the ones kept are ever in memory.
+ */
+class ExchangeReplyReader {
+ public:
+  ExchangeReplyReader(const std::string& documentHash, std::vector<BookOrbitIncomingAnnotation>* incoming,
+                      const std::vector<uint32_t>* skipServerIds)
+      : documentHash(documentHash),
+        incoming(incoming),
+        skipServerIds(skipServerIds),
+        parser(JsonCallbacks{this, onKey, onString, onNumber, onBool, nullptr, onObjectStart, onObjectEnd, onArrayStart,
+                             onArrayEnd, onStringPart}) {}
+
+  void feed(const uint8_t* data, const size_t len) { parser.feed(reinterpret_cast<const char*>(data), len); }
+
+  // Parsed to its end, and it either answered for a book or said it does not know this one.
+  bool complete() const { return !parser.hasError() && depth == 0 && (sawResult || unmatched); }
+
+  bool unmatched = false;
+  bool more = false;
+  uint32_t skippedNoPosition = 0;
+  size_t offered = 0;          // valid changes in results[0], skipped ones aside
+  size_t collected = 0;        // of which appended to `incoming`
+  uint32_t deviceDeleted = 0;  // highlights deleted here that the key set made the server delete
+
+ private:
+  enum class Key : uint8_t {
+    Other,
+    Unmatched,
+    Results,
+    ToApply,
+    Add,
+    Delete,
+    More,
+    Skipped,
+    Applied,
+    DeviceDeleted,
+    ServerId,
+    Version,
+    Datetime,
+    Pos0,
+    EntryKey,
+    Text,
+    Chapter
+  };
+  // {"unmatched": [hash...], "results": [{"more", "skippedNoPosition", "applied": {"deviceDeleted"},
+  // "toApply": {"add": [{entry}], "delete": [{entry}]}}]}: the depth of each container this reader
+  // looks into.
+  static constexpr uint8_t LIST = 2;
+  static constexpr uint8_t RESULT = 3;
+  static constexpr uint8_t TO_APPLY = 4;
+  static constexpr uint8_t CHANGES = 5;
+  static constexpr uint8_t ENTRY = 6;
+  static constexpr uint8_t TRACKED = ENTRY + 1;
+
+  static ExchangeReplyReader& self(void* ctx) { return *static_cast<ExchangeReplyReader*>(ctx); }
+
+  static Key classify(const char* key) {
+    static constexpr struct {
+      const char* name;
+      Key key;
+    } KEYS[] = {{"unmatched", Key::Unmatched},
+                {"results", Key::Results},
+                {"toApply", Key::ToApply},
+                {"add", Key::Add},
+                {"delete", Key::Delete},
+                {"more", Key::More},
+                {"skippedNoPosition", Key::Skipped},
+                {"applied", Key::Applied},
+                {"deviceDeleted", Key::DeviceDeleted},
+                {"serverId", Key::ServerId},
+                {"version", Key::Version},
+                {"datetime", Key::Datetime},
+                {"pos0", Key::Pos0},
+                {"key", Key::EntryKey},
+                {"text", Key::Text},
+                {"chapter", Key::Chapter}};
+    for (const auto& entry : KEYS) {
+      if (strcmp(key, entry.name) == 0) return entry.key;
+    }
+    return Key::Other;
+  }
+
+  // The key in force in the container at `depth`: an object's last key, an array's own key.
+  Key keyAt(const uint8_t d) const { return d < TRACKED ? (isArray[d] ? containerKey[d] : lastKey[d]) : Key::Other; }
+  bool inEntry() const { return entryOpen && depth == ENTRY; }
+
+  void open(const bool array) {
+    const Key under = depth < TRACKED ? keyAt(depth) : Key::Other;
+    depth++;
+    if (depth >= TRACKED) return;
+    isArray[depth] = array;
+    containerKey[depth] = under;
+    lastKey[depth] = Key::Other;
+    if (array) return;
+    if (depth == RESULT && containerKey[LIST] == Key::Results && isArray[LIST]) {
+      inFirstResult = resultCount++ == 0;
+      sawResult = sawResult || inFirstResult;
+    } else if (depth == ENTRY && inFirstResult && containerKey[TO_APPLY] == Key::ToApply && isArray[CHANGES] &&
+               (containerKey[CHANGES] == Key::Add || containerKey[CHANGES] == Key::Delete)) {
+      startEntry(containerKey[CHANGES] == Key::Delete);
+    }
+  }
+
+  void close() {
+    if (depth == ENTRY && entryOpen) finishEntry();
+    if (depth == RESULT) inFirstResult = false;
+    if (depth > 0) depth--;
+  }
+
+  void startEntry(const bool deleted) {
+    entryOpen = true;
+    entry.serverId = 0;
+    entry.version = 0;
+    entry.datetime[0] = '\0';
+    entry.key.clear();
+    entry.pos0.clear();
+    entry.text.clear();
+    entry.chapter.clear();
+    entry.deleted = deleted;
+  }
+
+  void finishEntry() {
+    entryOpen = false;
+    if (!incoming) return;
+    // Each kind carries what it needs and nothing more: a deletion has a key, an add has a
+    // position. Demanding a position of both is what dropped every deletion on the floor.
+    if (entry.serverId == 0 || (entry.deleted ? entry.key.empty() : entry.pos0.empty())) return;
+    if (skipServerIds &&
+        std::find(skipServerIds->begin(), skipServerIds->end(), entry.serverId) != skipServerIds->end()) {
+      return;
+    }
+    offered++;
+    // The server re-offers everything not yet acknowledged, so a later pull round repeats the
+    // earlier rounds' entries; appending them again would apply and ack each one twice.
+    const uint32_t serverId = entry.serverId;
+    const bool alreadyCollected =
+        std::any_of(incoming->begin(), incoming->end(),
+                    [serverId](const BookOrbitIncomingAnnotation& seen) { return seen.serverId == serverId; });
+    // Bounded on purpose: each entry carries its text, and the rest stays queued server-side
+    // because nothing acknowledges it. The next pull brings it.
+    if (alreadyCollected || incoming->size() >= BOOKORBIT_ANNOTATION_BATCH) return;
+    if (entry.deleted) entry.version = 0;  // the deletion ack schema has no version field
+    incoming->push_back(std::move(entry));
+    collected++;
+  }
+
+  void appendText(const char* part, const size_t len) {
+    const size_t room = BOOKORBIT_ANNOTATION_TEXT_MAX - std::min(entry.text.size(), BOOKORBIT_ANNOTATION_TEXT_MAX);
+    entry.text.append(part, std::min(len, room));
+  }
+
+  static void onKey(void* ctx, const char* key, size_t) {
+    ExchangeReplyReader& r = self(ctx);
+    if (r.depth < TRACKED && !r.isArray[r.depth]) r.lastKey[r.depth] = classify(key);
+  }
+
+  static void onString(void* ctx, const char* value, const size_t len) {
+    ExchangeReplyReader& r = self(ctx);
+    if (r.depth == LIST && r.isArray[LIST] && r.containerKey[LIST] == Key::Unmatched) {
+      if (r.documentHash == value) r.unmatched = true;
+      return;
+    }
+    if (!r.inEntry() || !r.incoming) return;
+    switch (r.lastKey[ENTRY]) {
+      case Key::Datetime:
+        snprintf(r.entry.datetime, sizeof(r.entry.datetime), "%s", value);
+        break;
+      case Key::Pos0:
+        r.entry.pos0.assign(value, len);
+        break;
+      case Key::EntryKey:
+        r.entry.key.assign(value, len);
+        break;
+      case Key::Text:
+        r.appendText(value, len);
+        break;
+      case Key::Chapter:
+        r.entry.chapter.assign(value, len);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Only a text outgrows the parser's buffer; any other value that long is dropped.
+  static void onStringPart(void* ctx, const char* part, const size_t len, bool) {
+    ExchangeReplyReader& r = self(ctx);
+    if (r.inEntry() && r.incoming && r.lastKey[ENTRY] == Key::Text) r.appendText(part, len);
+  }
+
+  static void onNumber(void* ctx, const char* value, size_t) {
+    ExchangeReplyReader& r = self(ctx);
+    const auto number = static_cast<uint32_t>(strtoul(value, nullptr, 10));
+    if (r.inFirstResult && r.depth == RESULT && r.lastKey[RESULT] == Key::Skipped) {
+      r.skippedNoPosition = number;
+    } else if (r.inFirstResult && r.depth == TO_APPLY && r.containerKey[TO_APPLY] == Key::Applied &&
+               r.lastKey[TO_APPLY] == Key::DeviceDeleted) {
+      r.deviceDeleted = number;
+    } else if (r.inEntry() && r.lastKey[ENTRY] == Key::ServerId) {
+      r.entry.serverId = number;
+    } else if (r.inEntry() && r.lastKey[ENTRY] == Key::Version) {
+      r.entry.version = number;
+    }
+  }
+
+  static void onBool(void* ctx, const bool value) {
+    ExchangeReplyReader& r = self(ctx);
+    if (r.inFirstResult && r.depth == RESULT && r.lastKey[RESULT] == Key::More) r.more = value;
+  }
+
+  static void onObjectStart(void* ctx) { self(ctx).open(false); }
+  static void onArrayStart(void* ctx) { self(ctx).open(true); }
+  static void onObjectEnd(void* ctx) { self(ctx).close(); }
+  static void onArrayEnd(void* ctx) { self(ctx).close(); }
+
+  const std::string& documentHash;
+  std::vector<BookOrbitIncomingAnnotation>* incoming;
+  const std::vector<uint32_t>* skipServerIds;
+  StreamingJsonParser parser;
+
+  uint8_t depth = 0;
+  bool isArray[TRACKED] = {};
+  Key containerKey[TRACKED] = {};
+  Key lastKey[TRACKED] = {};
+  size_t resultCount = 0;
+  bool inFirstResult = false;
+  bool sawResult = false;
+  bool entryOpen = false;
+  BookOrbitIncomingAnnotation entry;
+};
+}  // namespace
+
 BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
     const std::string& documentHash, const std::string& deviceModel, const BookOrbitAnnotationKeys& keys,
     const BookOrbitAnnotation* changes, const size_t changeCount, bool& outUnmatched,
-    std::vector<BookOrbitIncomingAnnotation>* outIncoming, bool* outMorePending) {
+    std::vector<BookOrbitIncomingAnnotation>* outIncoming, bool* outMorePending,
+    const std::vector<uint32_t>* skipServerIds, size_t* outOffered, uint32_t* outDeviceDeleted) {
   lastHttpCode = 0;
+  if (outOffered) *outOffered = 0;
+  if (outDeviceDeleted) *outDeviceDeleted = 0;
   lastTransportError = 0;
   outUnmatched = false;
   if (!BOOKORBIT_STORE.hasCredentials()) {
@@ -923,9 +1246,9 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
     return LOW_MEMORY;
   }
 
-  // Scoped so the node pool is freed before the TLS session opens: the key list alone can
-  // reach a few hundred entries, and only the serialized body has to survive the handshake.
-  // See uploadPageStats for why pluginVersion is a literal.
+  // Scoped so the node pool is freed before the TLS session opens: only the serialized body has
+  // to survive the handshake. See uploadPageStats for why pluginVersion is a literal.
+  const size_t keySetLength = keySetJsonLength(keys);
   JsonBody body;
   {
     JsonDocument doc;
@@ -938,14 +1261,9 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
     book["hash"] = documentHash;
     book["keysComplete"] = keys.complete;
     if (const char* sidecar = sidecarStateName(keys.sidecar)) book["sidecarState"] = sidecar;
-    // Objects, not bare digests: the server validates {k, dt} per key and rejects the whole
-    // request with HTTP 400 otherwise.
-    JsonArray jsonKeys = book["keys"].to<JsonArray>();
-    for (size_t i = 0; keys.rows && i < keys.count; i++) {
-      JsonObject key = jsonKeys.add<JsonObject>();
-      key["k"] = keys.rows[i].k;
-      key["dt"] = keys.rows[i].dt;
-    }
+    // "keys" is added to the serialized body below (see writeKeySet), as objects rather than
+    // bare digests: the server validates {k, dt} per key and rejects the whole request with
+    // HTTP 400 otherwise.
 
     JsonArray jsonChanges = book["changes"].to<JsonArray>();
     for (size_t i = 0; changes && i < changeCount; i++) {
@@ -963,8 +1281,16 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
       if (!annotation.chapter.empty()) entry["chapter"] = annotation.chapter;
       if (annotation.pageno > 0) entry["pageno"] = annotation.pageno;
     }
-    if (!body.build(doc)) return LOW_MEMORY;
+    if (!body.build(doc, keySetLength)) return LOW_MEMORY;
   }
+  if (!writeKeySet(body, keys, keySetLength)) return LOW_MEMORY;
+  // Before the request, like the body: nothing of the reply's size is ever allocated.
+  auto reader = makeUniqueNoThrow<ExchangeReplyReader>(documentHash, outIncoming, skipServerIds);
+  if (!reader) {
+    LOG_ERR("BookOrbit", "Out of memory for the exchange reply reader");
+    return LOW_MEMORY;
+  }
+  const size_t incomingBefore = outIncoming ? outIncoming->size() : 0;
 
 #ifdef SIMULATOR
   HTTPClient http;
@@ -982,102 +1308,51 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
   http.addHeader("Content-Type", "application/json");
 
   const int httpCode = http.POST(body.c_str());
-  std::string response = httpCode > 0 ? http.getString().c_str() : "";
+  if (httpCode > 0) {
+    const std::string response = http.getString().c_str();
+    reader->feed(reinterpret_cast<const uint8_t*>(response.data()), response.size());
+  }
   http.end();
 #else
   LOG_DBG("BookOrbit", "POST body bytes=%u", static_cast<unsigned>(body.length()));
-  std::string response;
-  const int httpCode = sendBookOrbitRequest("POST", url, &body, response);
+  const int httpCode =
+      sendBookOrbitRequest("POST", url, &body, [&reader](const uint8_t* data, const size_t len, size_t /*announced*/) {
+        reader->feed(data, len);
+        return true;  // read to the end, so the session's socket stays usable
+      });
 #endif
   lastHttpCode = httpCode > 0 ? httpCode : 0;
   lastTransportError = httpCode < 0 ? httpCode : 0;
   body.release();
   LOG_DBG("BookOrbit", "Annotation exchange response: %d", httpCode);
 
+  const auto dropCollected = [&] {
+    if (outIncoming) outIncoming->resize(incomingBefore);
+  };
+  if (httpCode < 0 || httpCode == 401 || httpCode < 200 || httpCode >= 300) dropCollected();
   if (httpCode < 0) return transportFailure();
   if (httpCode == 401) return AUTH_FAILED;
   if (httpCode < 200 || httpCode >= 300) return SERVER_ERROR;
 
-  // Filtered so the node pool only holds what is actually used: an exchange response can carry
-  // far more per entry (colors, notes, styles) than a device that draws one kind of highlight
-  // needs, and the pool competes with the socket that is still open.
-  JsonDocument filter;
-  filter["unmatched"] = true;
-  filter["results"][0]["more"] = true;
-  filter["results"][0]["skippedNoPosition"] = true;
-  JsonObject entryFilter = filter["results"][0]["toApply"]["add"].add<JsonObject>();
-  entryFilter["serverId"] = true;
-  entryFilter["version"] = true;
-  entryFilter["datetime"] = true;
-  entryFilter["pos0"] = true;
-  entryFilter["text"] = true;
-  entryFilter["chapter"] = true;
-  // A deletion names its target by key and carries neither position nor text.
-  JsonObject deleteFilter = filter["results"][0]["toApply"]["delete"].add<JsonObject>();
-  deleteFilter["serverId"] = true;
-  deleteFilter["key"] = true;
-  deleteFilter["datetime"] = true;
-
-  JsonDocument doc;
-  if (deserializeJson(doc, response, DeserializationOption::Filter(filter)) != DeserializationError::Ok) {
+  if (!reader->complete()) {
     LOG_ERR("BookOrbit", "Failed to parse annotation exchange response");
+    dropCollected();
     return JSON_ERROR;
   }
-  for (JsonVariantConst hash : doc["unmatched"].as<JsonArrayConst>()) {
-    if (documentHash == hash.as<const char*>()) {
-      LOG_INF("BookOrbit", "Server does not know this document; annotations not exchanged");
-      outUnmatched = true;
-      return OK;
-    }
+  if (reader->unmatched) {
+    LOG_INF("BookOrbit", "Server does not know this document; annotations not exchanged");
+    dropCollected();
+    outUnmatched = true;
+    return OK;
   }
-
-  if (outMorePending) {
-    // `more` says the push-down page was full; skippedNoPosition counts web highlights whose
-    // positions the server converted this round and can only send on the NEXT request.
-    *outMorePending = (doc["results"][0]["more"] | false) || (doc["results"][0]["skippedNoPosition"] | 0) > 0;
-  }
-  if (!outIncoming) return OK;
-
-  JsonObjectConst toApply = doc["results"][0]["toApply"].as<JsonObjectConst>();
-  const auto collect = [&](const char* field, const bool deleted) {
-    for (JsonObjectConst entry : toApply[field].as<JsonArrayConst>()) {
-      // Bounded on purpose: each entry carries its text, and the rest stays queued server-side
-      // because nothing acknowledges it. The next sync brings it back.
-      if (outIncoming->size() >= BOOKORBIT_ANNOTATION_BATCH) {
-        LOG_INF("BookOrbit", "More server-side changes remain; they will arrive on the next sync");
-        return;
-      }
-      const uint32_t serverId = entry["serverId"] | 0U;
-      // The server re-offers everything not yet acknowledged, so a later pull round repeats the
-      // earlier rounds' entries; appending them again would apply and ack each one twice.
-      const bool alreadyCollected =
-          std::any_of(outIncoming->begin(), outIncoming->end(),
-                      [&](const BookOrbitIncomingAnnotation& seen) { return seen.serverId == serverId; });
-      if (alreadyCollected) continue;
-      const char* datetime = entry["datetime"] | "";
-      const char* pos0 = entry["pos0"] | "";
-      const char* key = entry["key"] | "";
-      // Each kind carries what it needs and nothing more: a deletion has a key, an add has a
-      // position. Demanding a position of both is what dropped every deletion on the floor.
-      if (serverId == 0 || (deleted ? !*key : !*pos0)) continue;
-
-      BookOrbitIncomingAnnotation incoming;
-      incoming.serverId = serverId;
-      incoming.version = deleted ? 0U : (entry["version"] | 0U);
-      snprintf(incoming.datetime, sizeof(incoming.datetime), "%s", datetime);
-      incoming.key = key;
-      incoming.pos0 = pos0;
-      incoming.text = entry["text"] | "";
-      if (incoming.text.size() > BOOKORBIT_ANNOTATION_TEXT_MAX) incoming.text.resize(BOOKORBIT_ANNOTATION_TEXT_MAX);
-      incoming.chapter = entry["chapter"] | "";
-      incoming.deleted = deleted;
-      outIncoming->push_back(std::move(incoming));
-    }
-  };
-  collect("add", false);
-  collect("delete", true);
-  if (!outIncoming->empty()) {
-    LOG_INF("BookOrbit", "Server sent %u annotation change(s)", (unsigned)outIncoming->size());
+  // `more` says the push-down page was full; skippedNoPosition counts web highlights whose
+  // positions the server converted this round and can only send on the NEXT request.
+  if (outMorePending) *outMorePending = reader->more || reader->skippedNoPosition > 0;
+  if (outOffered) *outOffered = reader->offered;
+  if (outDeviceDeleted) *outDeviceDeleted = reader->deviceDeleted;
+  if (reader->collected > 0) {
+    LOG_INF("BookOrbit", "Server sent %u annotation change(s), %u offered", (unsigned)reader->collected,
+            (unsigned)reader->offered);
   }
   return OK;
 }

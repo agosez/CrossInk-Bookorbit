@@ -476,9 +476,27 @@ void BookOrbitSyncActivity::performSync() {
     serverAcceptsSidecar = BookOrbitSyncClient::acceptsSidecarState();
     prepareAnnotationBatch();
     prepareBookmarkBatch();
-    uploadAnnotationBatch();
-    // What the server sent is acknowledged only once applied, so stopping before that
-    // leaves it to be offered again.
+    // The server's changes come down first, then this device's go up. Applied before the
+    // returns below, not after: they leave early for a book the server holds no progress for,
+    // and the highlights it just sent would leave with them.
+    if (exchangeAnnotationKeys()) {
+      if (!incomingAnnotations.empty()) {
+        ensureEpubLoaded();
+        if (epub) {
+          drainIncomingAnnotations();
+          // Released for the uploads, which never ran beside it; ensureEpubLoaded() brings it
+          // back for the bookmarks and the progress.
+          epub.reset();
+        } else {
+          LOG_ERR("BookOrbit", "Cannot place server highlights without the epub; they stay pending");
+          incomingAnnotations.clear();
+        }
+      }
+      // What the server sent is acknowledged only once applied, so stopping before that leaves
+      // it to be offered again.
+      if (stopIfWoken()) return;
+      sendAnnotationBacklog();
+    }
     if (stopIfWoken()) return;
     {
       RenderLock lock(*this);
@@ -487,31 +505,39 @@ void BookOrbitSyncActivity::performSync() {
     requestUpdate(true);
     uploadBookmarkBatch();
     if (stopIfWoken()) return;
-    // Applied before the returns below, not after: they leave early for a book the server holds
-    // no progress for, and the highlights it just sent would leave with them.
-    if (!incomingAnnotations.empty() || !incomingBookmarks.empty()) {
+    if (!incomingBookmarks.empty()) {
       ensureEpubLoaded();
       if (epub) {
-        applyIncomingAnnotations();
         applyIncomingBookmarks();
       } else {
-        LOG_ERR("BookOrbit", "Cannot place server highlights without the epub; they stay pending");
+        LOG_ERR("BookOrbit", "Cannot place server bookmarks without the epub; they stay pending");
       }
     }
 
     // Held on screen for a moment: the progress decision replaces this view immediately after,
     // and a count that flashes past is no better than no count at all. Silent when nothing
     // happened, so an ordinary sync does not grow an extra pause.
-    if (annotationsSent > 0 || annotationsAdded > 0 || annotationsRemoved > 0) {
-      char summary[96];
-      snprintf(summary, sizeof(summary), tr(STR_HIGHLIGHTS_SYNCED_FORMAT), static_cast<int>(annotationsSent),
-               static_cast<int>(annotationsAdded), static_cast<int>(annotationsRemoved));
+    if (annotationsSent > 0 || annotationsAdded > 0 || annotationsRemoved > 0 || annotationsDeletedOnServer > 0) {
+      char received[64];
+      char sent[64];
+      snprintf(received, sizeof(received), tr(STR_HIGHLIGHTS_RECEIVED_FORMAT), static_cast<int>(annotationsAdded),
+               static_cast<int>(annotationsRemoved));
+      snprintf(sent, sizeof(sent), tr(STR_HIGHLIGHTS_SENT_FORMAT), static_cast<int>(annotationsSent),
+               static_cast<int>(annotationsDeletedOnServer));
+      LOG_INF("BookOrbit", "Highlights received +%u -%u, sent +%u -%lu", (unsigned)annotationsAdded,
+              (unsigned)annotationsRemoved, (unsigned)annotationsSent,
+              static_cast<unsigned long>(annotationsDeletedOnServer));
       {
         RenderLock lock(*this);
-        statusMessage = summary;
+        statusMessage = tr(STR_HIGHLIGHTS_SYNCED);
+        summaryLines[0] = received;
+        summaryLines[1] = sent;
       }
       requestUpdateAndWait();
       if (!sleepSync) delay(1500);
+      RenderLock lock(*this);
+      summaryLines[0].clear();
+      summaryLines[1].clear();
     }
     if (bookmarksSent > 0 || bookmarksAdded > 0 || bookmarksRemoved > 0) {
       char summary[96];
@@ -694,22 +720,134 @@ void BookOrbitSyncActivity::performSync() {
   requestUpdate(true);
 }
 
+namespace {
+/**
+ * The clipping a record uploads (CLIPPINGS must be loaded), with its index in the store, or
+ * nullptr when there is none to upload.
+ */
+const Clipping* sendableClipping(const BookOrbitAnnotationRecord& record, size_t& outIndex) {
+  const BookOrbitClippingRef wanted{record.timestamp, record.spineIndex, record.paragraphIndex};
+  for (size_t i = 0; i < CLIPPINGS.clippingCount(); i++) {
+    const Clipping* candidate = CLIPPINGS.clippingAt(i);
+    if (candidate &&
+        BookOrbitClippingRef{candidate->timestamp, candidate->spineIndex, candidate->paragraphIndex} == wanted) {
+      outIndex = i;
+      // Received from the server (applyIncomingAnnotations stores those with no word range; a
+      // highlight made here always covers a word). The server holds it already, and with more
+      // than this device can show: sent back, BookOrbit 3.5.0's field-by-field merge reads the
+      // missing note as removed and the plain style as changed, and the range shrinks to pos0.
+      return candidate->wordCount == 0 ? nullptr : candidate;
+    }
+  }
+  return nullptr;  // deleted locally; the key list will tell the server
+}
+
+/**
+ * A timestamp for a clipping received in this chapter and paragraph (CLIPPINGS must be loaded).
+ *
+ * A clipping's record joins back to it by timestamp, chapter and paragraph (BookOrbitClippingRef),
+ * and the timestamp counts seconds since boot: a second highlight received for the same paragraph
+ * in the same second would take the first one's record over, and that one would never be reported
+ * again. A lost copy offered back in full, or a web reader's run of highlights in one paragraph,
+ * makes that likely. So each takes the latest second not already used there, counting back from
+ * now: a second this boot has passed cannot be taken by a highlight made later in it.
+ */
+uint32_t freeClippingTimestamp(const uint16_t spine, const uint16_t paragraph) {
+  const auto taken = [&](const uint32_t timestamp) {
+    for (size_t i = 0; i < CLIPPINGS.clippingCount(); i++) {
+      const Clipping* clipping = CLIPPINGS.clippingAt(i);
+      if (clipping && BookOrbitClippingRef{clipping->timestamp, clipping->spineIndex, clipping->paragraphIndex} ==
+                          BookOrbitClippingRef{timestamp, spine, paragraph}) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const uint32_t now = std::max<uint32_t>(1, static_cast<uint32_t>(millis() / 1000UL));
+  for (uint32_t timestamp = now; timestamp >= 1; timestamp--) {
+    if (!taken(timestamp)) return timestamp;
+  }
+  // A network boot is only seconds old: past those, the store's own bound ends the search.
+  uint32_t timestamp = now + 1;
+  while (taken(timestamp)) timestamp++;
+  return timestamp;
+}
+
+/**
+ * Copy the next upload batch out of the stores (CLIPPINGS must be loaded): the highlights above
+ * `watermark`, oldest identity first.
+ *
+ * An accepted batch moves the watermark to its newest datetime, so the batch has to be the oldest
+ * of what is left. The store keeps insertion order instead, which a clock set back between two
+ * highlights breaks, and a highlight left outside a batch below its newest one would never be
+ * sent. The highlights sharing a datetime go in one batch for the same reason.
+ *
+ * @return true when the batch stopped on a bound with records still above it
+ */
+bool collectAnnotationBatch(const std::vector<BookOrbitAnnotationRecord>& records, const uint32_t watermark,
+                            std::vector<BookOrbitAnnotation>& out, uint32_t& outWatermark) {
+  size_t batchTextBytes = 0;
+  uint32_t datetime = watermark;
+  for (;;) {
+    // The next datetime above the last one taken. One scan per datetime rather than a sort: a
+    // batch spans only a few of them, and std::sort over these records costs ~1 KB of C3 flash.
+    bool found = false;
+    uint32_t next = 0;
+    for (const BookOrbitAnnotationRecord& record : records) {
+      if (record.identityEpoch > datetime && (!found || record.identityEpoch < next)) {
+        next = record.identityEpoch;
+        found = true;
+      }
+    }
+    if (!found) return false;
+    if (out.size() >= BOOKORBIT_ANNOTATION_BATCH || batchTextBytes >= BOOKORBIT_ANNOTATION_BATCH_TEXT_BYTES) {
+      return true;
+    }
+    datetime = next;
+
+    for (const BookOrbitAnnotationRecord& record : records) {
+      if (record.identityEpoch != datetime) continue;
+      size_t clippingIndex = 0;
+      const Clipping* clipping = sendableClipping(record, clippingIndex);
+      if (!clipping) continue;
+
+      BookOrbitAnnotation annotation;
+      // identityEpoch was minted from WallClock when the highlight was created; the server
+      // validates the formatted datetime strictly and drops the entry otherwise.
+      if (!bookOrbitFormatDatetime(record.identityEpoch, annotation.datetime)) continue;
+
+      if (!CLIPPINGS.readClippingText(clippingIndex, annotation.text) || annotation.text.empty()) continue;
+      annotation.pos0 = record.pos0;
+      annotation.pos1 = record.pos1;
+      annotation.chapter = clipping->chapterTitle;
+      annotation.pageno = static_cast<uint16_t>(clipping->startPage + 1);
+      batchTextBytes += annotation.text.size();
+      out.push_back(std::move(annotation));
+      outWatermark = datetime;
+    }
+  }
+}
+}  // namespace
+
 void BookOrbitSyncActivity::prepareAnnotationBatch() {
   pendingAnnotations.clear();
   pendingAnnotationWatermark = 0;
+  annotationsToSend = 0;
   pendingAnnotationSidecar = BookOrbitSidecarState::Unstated;
   annotationStoreUnmarked = false;
 
+  LOG_INF("BookOrbit", "Preparing highlights (free=%u maxAlloc=%u)", (unsigned)ESP.getFreeHeap(),
+          (unsigned)ESP.getMaxAllocHeap());
   const std::string stateDir = BookContentId::bookStateDir(epubPath);
   std::vector<BookOrbitAnnotationRecord> records;
+  uint32_t watermark = 0;
   // A readable store is the proof this book has synced highlights before, even one holding
-  // zero records (see the completeness rule below).
-  const bool syncedHereBefore = BookOrbitAnnotationStore::readAll(stateDir, records);
-
-  const uint32_t watermark = BookOrbitAnnotationStore::readWatermark(stateDir);
+  // zero records (see the completeness rule below). One read for the records and the watermark:
+  // each extra read held another full copy of the records beside these.
+  const bool syncedHereBefore = BookOrbitAnnotationStore::readAll(stateDir, records, &watermark);
   // The store is loaded only for as long as it takes to copy the batch out, and unloaded
   // before returning: only the small batch stays resident beside the open TLS session.
-  if (!CLIPPINGS.loadForBook(epubPath, "", "", "epub")) {
+  if (!CLIPPINGS.loadForSync(epubPath, 0)) {
     LOG_ERR("BookOrbit", "Could not read clippings; highlights will not sync");
     return;
   }
@@ -726,65 +864,21 @@ void BookOrbitSyncActivity::prepareAnnotationBatch() {
       liveClippings.push_back({clipping->timestamp, clipping->spineIndex, clipping->paragraphIndex});
     }
   }
-  if (BookOrbitAnnotationStore::retain(stateDir, liveClippings)) {
-    records.erase(
-        std::remove_if(records.begin(), records.end(),
-                       [&](const BookOrbitAnnotationRecord& record) {
-                         const BookOrbitClippingRef ref{record.timestamp, record.spineIndex, record.paragraphIndex};
-                         return std::find(liveClippings.begin(), liveClippings.end(), ref) == liveClippings.end();
-                       }),
-        records.end());
-  }
+  BookOrbitAnnotationStore::retain(stateDir, watermark, records, liveClippings);
 
-  size_t batchTextBytes = 0;
   for (const BookOrbitAnnotationRecord& record : records) {
-    if (pendingAnnotations.size() >= BOOKORBIT_ANNOTATION_BATCH ||
-        batchTextBytes >= BOOKORBIT_ANNOTATION_BATCH_TEXT_BYTES) {
-      break;
-    }
-    if (record.identityEpoch <= watermark) continue;
-
-    const BookOrbitClippingRef wanted{record.timestamp, record.spineIndex, record.paragraphIndex};
-    const Clipping* clipping = nullptr;
     size_t clippingIndex = 0;
-    for (size_t i = 0; i < CLIPPINGS.clippingCount(); i++) {
-      const Clipping* candidate = CLIPPINGS.clippingAt(i);
-      if (candidate &&
-          BookOrbitClippingRef{candidate->timestamp, candidate->spineIndex, candidate->paragraphIndex} == wanted) {
-        clipping = candidate;
-        clippingIndex = i;
-        break;
-      }
-    }
-    if (!clipping) continue;  // deleted locally; the key list will tell the server
-    // Received from the server (applyIncomingAnnotations stores those with no word range; a
-    // highlight made here always covers a word). The server holds it already, and with more
-    // than this device can show: sent back, BookOrbit 3.5.0's field-by-field merge reads the
-    // missing note as removed and the plain style as changed, and the range shrinks to pos0.
-    if (clipping->wordCount == 0) continue;
-
-    BookOrbitAnnotation annotation;
-    // identityEpoch was minted from WallClock when the highlight was created; the server
-    // validates the formatted datetime strictly and drops the entry otherwise.
-    if (!bookOrbitFormatDatetime(record.identityEpoch, annotation.datetime)) continue;
-
-    if (!CLIPPINGS.readClippingText(clippingIndex, annotation.text) || annotation.text.empty()) continue;
-    annotation.pos0 = record.pos0;
-    annotation.pos1 = record.pos1;
-    annotation.chapter = clipping->chapterTitle;
-    annotation.pageno = static_cast<uint16_t>(clipping->startPage + 1);
-    batchTextBytes += annotation.text.size();
-    pendingAnnotations.push_back(std::move(annotation));
-    pendingAnnotationWatermark = std::max(pendingAnnotationWatermark, record.identityEpoch);
+    if (record.identityEpoch > watermark && sendableClipping(record, clippingIndex)) annotationsToSend++;
   }
+  annotationWatermark = watermark;
 
   CLIPPINGS.unload();
 
   // The key set is what lets the server notice highlights deleted on the device: it compares
-  // its own set against this one. Sending it is optional, and deliberately skipped when it
-  // would not fit -- a heavily-annotated book's full set plus its JSON does not coexist with a
-  // 55KB TLS floor and the ~65KB WiFi leaves. keysComplete=false is exactly the flag for that
-  // case: the server then skips deletion processing rather than reading the gap as deletions.
+  // its own set against this one. Sending it is optional, and skipped when the heap cannot hold
+  // it: 53 bytes a key here, ~70 more in the request body (see exchangeAnnotationKeys).
+  // keysComplete=false is exactly the flag for that case: the server then skips deletion
+  // processing rather than reading the gap as deletions.
   pendingAnnotationKeys.clear();
   pendingKeysComplete = false;
   // Complete means every local highlight is described here -- not that the two counts happen to
@@ -807,9 +901,11 @@ void BookOrbitSyncActivity::prepareAnnotationBatch() {
   // only a server that accepts it and a book with no highlight left here can use. Deletion
   // reporting resumes on its own once highlights sync again.
   const bool everyClippingHasAPosition = records.size() >= localClippingCount;
+  const bool keySetFits =
+      ESP.getMaxAllocHeap() >= records.size() * sizeof(BookOrbitAnnotationKey) + KEY_SET_HEAP_MARGIN;
   if (!syncedHereBefore) {
     LOG_INF("BookOrbit", "No highlight sync history for this book; deletions will not propagate this sync");
-  } else if (records.size() <= MAX_KEYS_PER_SYNC && everyClippingHasAPosition) {
+  } else if (everyClippingHasAPosition && keySetFits) {
     pendingAnnotationKeys.reserve(records.size());
     bool allBuilt = true;
     for (const BookOrbitAnnotationRecord& record : records) {
@@ -827,8 +923,8 @@ void BookOrbitSyncActivity::prepareAnnotationBatch() {
     LOG_INF("BookOrbit", "%u of %u highlights carry a position; deletions will not propagate yet",
             (unsigned)records.size(), (unsigned)localClippingCount);
   } else {
-    LOG_INF("BookOrbit", "%u highlights is too many to report as a key set; deletions will not propagate",
-            (unsigned)records.size());
+    LOG_ERR("BookOrbit", "No heap for a key set of %u highlights (free=%u maxAlloc=%u); deletions will not propagate",
+            (unsigned)records.size(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   }
 
   // Without it, BookOrbit 3.5.0 reads a complete key set that keeps none of the highlights this
@@ -838,27 +934,41 @@ void BookOrbitSyncActivity::prepareAnnotationBatch() {
       bookOrbitSidecarState(syncedHereBefore, watermark, localClippingCount, serverAcceptsSidecar);
   annotationStoreUnmarked = syncedHereBefore && watermark == 0;
 
-  LOG_INF("BookOrbit", "Prepared %u highlight(s) for upload, %u key(s) (watermark=%lu, sidecar=%d)",
-          (unsigned)pendingAnnotations.size(), (unsigned)pendingAnnotationKeys.size(),
-          static_cast<unsigned long>(watermark), static_cast<int>(pendingAnnotationSidecar));
+  LOG_INF("BookOrbit", "%u highlight(s) to send, %u key(s) (watermark=%lu, sidecar=%d)", (unsigned)annotationsToSend,
+          (unsigned)pendingAnnotationKeys.size(), static_cast<unsigned long>(watermark),
+          static_cast<int>(pendingAnnotationSidecar));
 }
 
-void BookOrbitSyncActivity::uploadAnnotationBatch() {
-  // Deliberately not skipped when there is nothing to send. This request is the only thing that
-  // brings the server's own highlight changes down, so returning early here would mean a device
-  // that has said everything it has to say never hears anything back.
+bool BookOrbitSyncActivity::exchangeAnnotationKeys() {
+  // Deliberately not skipped when there is nothing to say. This request is the only thing that
+  // brings the server's own highlight changes down, so skipping it would mean a device that has
+  // said everything it has to say never hears anything back.
   bool unmatched = false;
   bool morePending = false;
   const BookOrbitAnnotationKeys keys{pendingAnnotationKeys.empty() ? nullptr : pendingAnnotationKeys.data(),
                                      pendingAnnotationKeys.size(), pendingKeysComplete, pendingAnnotationSidecar};
-  const BookOrbitSyncClient::Error result = BookOrbitSyncClient::exchangeAnnotations(
-      documentHash, SETTINGS.getEffectiveDeviceName(), keys, pendingAnnotations.data(), pendingAnnotations.size(),
-      unmatched, &incomingAnnotations, &morePending);
-  LOG_INF("BookOrbit", "Highlight upload result=%d (http=%d, unmatched=%d)", static_cast<int>(result),
-          BookOrbitSyncClient::lastHttpCode, unmatched ? 1 : 0);
+  BookOrbitSyncClient::Error result = BookOrbitSyncClient::exchangeAnnotations(
+      documentHash, SETTINGS.getEffectiveDeviceName(), keys, nullptr, 0, unmatched, &incomingAnnotations, &morePending,
+      nullptr, &incomingOffered, &annotationsDeletedOnServer);
+  if (result == BookOrbitSyncClient::LOW_MEMORY && keys.count > 0) {
+    // The body holds the whole key set at once. Without it this sync still brings the server's
+    // changes down and sends what is new; only deletions made here wait for a sync with room.
+    LOG_ERR("BookOrbit", "No heap for a %u-key exchange; exchanging without the key set", (unsigned)keys.count);
+    const BookOrbitAnnotationKeys withoutKeys{nullptr, 0, false, pendingAnnotationSidecar};
+    result = BookOrbitSyncClient::exchangeAnnotations(documentHash, SETTINGS.getEffectiveDeviceName(), withoutKeys,
+                                                      nullptr, 0, unmatched, &incomingAnnotations, &morePending,
+                                                      nullptr, &incomingOffered, &annotationsDeletedOnServer);
+  }
+  LOG_INF("BookOrbit", "Highlight exchange result=%d (http=%d, unmatched=%d, keys=%u, deleted on server=%lu)",
+          static_cast<int>(result), BookOrbitSyncClient::lastHttpCode, unmatched ? 1 : 0, (unsigned)keys.count,
+          static_cast<unsigned long>(annotationsDeletedOnServer));
   documentUnmatched = unmatched;
+  // The key set goes out with the first request only.
+  pendingAnnotationKeys.clear();
+  pendingAnnotationKeys.shrink_to_fit();
+  if (result != BookOrbitSyncClient::OK || unmatched) return false;  // retried on the next sync
 
-  if (result != BookOrbitSyncClient::OK || unmatched) return;  // retried on the next sync
+  if (annotationStoreUnmarked) BookOrbitAnnotationStore::markExchanged(BookContentId::bookStateDir(epubPath));
 
   // The server converts a web highlight's position lazily, one budget per request, and a
   // highlight converted during THIS request only ships on the next one -- with no signal in the
@@ -866,31 +976,90 @@ void BookOrbitSyncActivity::uploadAnnotationBatch() {
   // happened). The first extra round is therefore unconditional: it is the only way a freshly
   // created web highlight arrives on the same sync that converted it, instead of surfacing as
   // "my highlight needed two syncs". The second round runs only when the server says more is
-  // pending. Keys and changes went out with the first request and are not repeated.
+  // pending. The key set went out above and is not repeated.
   const BookOrbitAnnotationKeys noKeys{nullptr, 0, false};
   for (int round = 0;
        round < 2 && incomingAnnotations.size() < BOOKORBIT_ANNOTATION_BATCH && (round == 0 || morePending); round++) {
     morePending = false;
     bool roundUnmatched = false;
     if (BookOrbitSyncClient::exchangeAnnotations(documentHash, SETTINGS.getEffectiveDeviceName(), noKeys, nullptr, 0,
-                                                 roundUnmatched, &incomingAnnotations,
-                                                 &morePending) != BookOrbitSyncClient::OK ||
+                                                 roundUnmatched, &incomingAnnotations, &morePending, nullptr,
+                                                 &incomingOffered) != BookOrbitSyncClient::OK ||
         roundUnmatched) {
       break;
     }
     LOG_INF("BookOrbit", "Pulled again: %u change(s) total", (unsigned)incomingAnnotations.size());
   }
+  incomingMorePending = morePending;
+  return true;
+}
 
+void BookOrbitSyncActivity::sendAnnotationBacklog() {
+  if (annotationsToSend == 0) return;
+  {
+    RenderLock lock(*this);
+    statusMessage = tr(STR_SENDING_HIGHLIGHTS);
+  }
+  showProgress(0, annotationsToSend);
+
+  // One batch per request on the session already open, as the reading stats are drained: a
+  // book highlighted offline used to take one sync per batch. Each batch moves the watermark
+  // once accepted, so a failure or a wake leaves the rest to the next sync.
   const std::string stateDir = BookContentId::bookStateDir(epubPath);
-  if (pendingAnnotationWatermark > 0) {
+  const BookOrbitAnnotationKeys noKeys{nullptr, 0, false};
+  uint32_t sentUpTo = annotationWatermark;
+  bool more = true;
+  while (more) {
+    if (sleepSync && sleepSyncWakeRequested()) break;  // performSync's stopIfWoken() ends the sync
+    more = prepareNextAnnotationBatch(sentUpTo);
+    if (pendingAnnotations.empty()) break;
+    bool unmatched = false;
+    const BookOrbitSyncClient::Error result =
+        BookOrbitSyncClient::exchangeAnnotations(documentHash, SETTINGS.getEffectiveDeviceName(), noKeys,
+                                                 pendingAnnotations.data(), pendingAnnotations.size(), unmatched);
+    if (result != BookOrbitSyncClient::OK || unmatched) {
+      LOG_ERR("BookOrbit", "Highlight batch failed (result=%d, http=%d); the rest follows on the next sync",
+              static_cast<int>(result), BookOrbitSyncClient::lastHttpCode);
+      break;
+    }
+    annotationsSent = static_cast<uint16_t>(annotationsSent + pendingAnnotations.size());
+    LOG_INF("BookOrbit", "Highlight batch accepted: %u of %u sent", (unsigned)annotationsSent,
+            (unsigned)annotationsToSend);
+    showProgress(annotationsSent, annotationsToSend);
     if (!BookOrbitAnnotationStore::advanceWatermark(stateDir, pendingAnnotationWatermark)) {
       LOG_ERR("BookOrbit", "Highlights uploaded but the watermark did not advance; they will be re-sent");
+      break;
     }
-  } else if (annotationStoreUnmarked) {
-    BookOrbitAnnotationStore::markExchanged(stateDir);
+    sentUpTo = pendingAnnotationWatermark;
   }
-  annotationsSent = static_cast<uint16_t>(pendingAnnotations.size());
   pendingAnnotations.clear();
+  pendingAnnotations.shrink_to_fit();
+
+  RenderLock lock(*this);
+  progressDone = 0;
+  progressTotal = 0;
+}
+
+bool BookOrbitSyncActivity::prepareNextAnnotationBatch(const uint32_t watermark) {
+  pendingAnnotations.clear();
+  pendingAnnotationWatermark = 0;
+
+  // Read for each batch rather than kept: the records and the clipping store are exactly what
+  // must not stay resident beside the session (see prepareAnnotationBatch). The orphans were
+  // dropped then, and the key set went out with the first request.
+  const std::string stateDir = BookContentId::bookStateDir(epubPath);
+  std::vector<BookOrbitAnnotationRecord> records;
+  if (!BookOrbitAnnotationStore::readAll(stateDir, records)) {
+    LOG_ERR("BookOrbit", "Could not read the highlight store again; the rest follows on the next sync");
+    return false;
+  }
+  if (!CLIPPINGS.loadForSync(epubPath, 0)) {
+    LOG_ERR("BookOrbit", "Could not read clippings; the rest follows on the next sync");
+    return false;
+  }
+  const bool more = collectAnnotationBatch(records, watermark, pendingAnnotations, pendingAnnotationWatermark);
+  CLIPPINGS.unload();
+  return more;
 }
 
 namespace {
@@ -1215,8 +1384,59 @@ void BookOrbitSyncActivity::applyIncomingBookmarks() {
   incomingBookmarks.clear();
 }
 
-void BookOrbitSyncActivity::applyIncomingAnnotations() {
+void BookOrbitSyncActivity::drainIncomingAnnotations() {
   if (incomingAnnotations.empty()) return;
+  {
+    RenderLock lock(*this);
+    statusMessage = tr(STR_RECEIVING_HIGHLIGHTS);
+  }
+  // The total is what the server offers, which understates a backlog longer than its page: it
+  // is corrected by each pull.
+  size_t landed = 0;
+  size_t total = std::max(incomingOffered, incomingAnnotations.size());
+  bool more = incomingMorePending || incomingOffered > incomingAnnotations.size();
+  showProgress(landed, total);
+
+  // The batch in hand first, then one pull per batch on the session already open, as the
+  // uploads go: the server keeps offering what is not acknowledged, so each acknowledged batch
+  // makes room for the next one. What cannot be placed is set aside rather than offered again.
+  const BookOrbitAnnotationKeys noKeys{nullptr, 0, false};
+  for (size_t round = 0; round < MAX_INCOMING_ROUNDS && !incomingAnnotations.empty(); round++) {
+    const size_t setAsideBefore = unplacedAnnotationIds.size();
+    size_t roundLanded = 0;
+    if (!applyIncomingAnnotations(roundLanded)) break;
+    landed += roundLanded;
+    showProgress(landed, std::max(total, landed));
+    // Nothing landed and nothing set aside: the next pull would offer this very batch again.
+    if (!more || (roundLanded == 0 && unplacedAnnotationIds.size() == setAsideBefore)) break;
+    if (sleepSync && sleepSyncWakeRequested()) break;  // performSync's stopIfWoken() ends the sync
+
+    bool unmatched = false;
+    size_t offered = 0;
+    if (BookOrbitSyncClient::exchangeAnnotations(documentHash, SETTINGS.getEffectiveDeviceName(), noKeys, nullptr, 0,
+                                                 unmatched, &incomingAnnotations, &more, &unplacedAnnotationIds,
+                                                 &offered) != BookOrbitSyncClient::OK ||
+        unmatched) {
+      LOG_ERR("BookOrbit", "Highlight pull failed (http=%d); the rest arrives next sync",
+              BookOrbitSyncClient::lastHttpCode);
+      break;
+    }
+    total = landed + offered;
+    more = more || offered > incomingAnnotations.size();
+  }
+  if (!incomingAnnotations.empty()) {
+    LOG_INF("BookOrbit", "%u server highlight change(s) left for the next sync", (unsigned)incomingAnnotations.size());
+    incomingAnnotations.clear();
+  }
+
+  RenderLock lock(*this);
+  progressDone = 0;
+  progressTotal = 0;
+}
+
+bool BookOrbitSyncActivity::applyIncomingAnnotations(size_t& outLanded) {
+  outLanded = 0;
+  if (incomingAnnotations.empty()) return true;
 
   // This loads the clipping store (~20KB) beside the open TLS session; if that load fails on a
   // tight heap the highlights stay pending for the next sync -- a clean retry, where closing the
@@ -1224,17 +1444,25 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
   // acknowledgment that follows rides the kept session, so no handshake needs room beside the store.
   std::vector<BookOrbitAckEntry> appliedIds;
   std::vector<BookOrbitAckEntry> deletedIds;
-  if (!CLIPPINGS.loadForBook(epubPath, "", "", "epub")) {
+  const size_t additions =
+      static_cast<size_t>(std::count_if(incomingAnnotations.begin(), incomingAnnotations.end(),
+                                        [](const BookOrbitIncomingAnnotation& incoming) { return !incoming.deleted; }));
+  if (!CLIPPINGS.loadForSync(epubPath, additions)) {
     LOG_ERR("BookOrbit", "Could not open clippings; server-side highlights stay pending");
-    return;
+    return false;
   }
 
   const std::string stateDir = BookContentId::bookStateDir(epubPath);
   std::vector<BookOrbitAnnotationRecord> records;
   BookOrbitAnnotationStore::readAll(stateDir, records);
+  // The positions of what lands, written in one go once records and the clipping store are
+  // released: a write per highlight held a second copy of every record beside both.
+  std::vector<BookOrbitAnnotationRecord> received;
+  received.reserve(additions);
 
   bool storeChanged = false;
   size_t addedCount = 0;
+  size_t removedCount = 0;
   for (const BookOrbitIncomingAnnotation& incoming : incomingAnnotations) {
     // A deletion carries no position, only the key this device reported for it. Resolving that
     // key back through the annotation store names the exact highlight, which beats guessing from
@@ -1270,6 +1498,7 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
       }
       if (removed) {
         storeChanged = true;
+        removedCount++;
       } else {
         LOG_INF("BookOrbit", "Server deletion %lu matched no local highlight (key=%s)",
                 static_cast<unsigned long>(incoming.serverId), incoming.key.c_str());
@@ -1290,6 +1519,7 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
         spineIndex >= epub->getSpineItemsCount()) {
       LOG_ERR("BookOrbit", "Cannot place server annotation %lu from %s", static_cast<unsigned long>(incoming.serverId),
               incoming.pos0.c_str());
+      unplacedAnnotationIds.push_back(incoming.serverId);
       continue;  // left unacknowledged, so the server offers it again
     }
     const uint16_t spine = static_cast<uint16_t>(spineIndex);
@@ -1299,7 +1529,10 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
     // comes back with a path that no longer matches the one we sent -- and the paragraph number
     // read out of it is a sibling index, not the count CrossInk assigns. The text is the only
     // identity both sides agree on, and it is also what the reader draws from.
-    if (incoming.text.empty()) continue;
+    if (incoming.text.empty()) {
+      unplacedAnnotationIds.push_back(incoming.serverId);
+      continue;
+    }
 
     // A highlight this device already holds, named by the identity it reported or received: since
     // BookOrbit 3.5.0 keeps its state per device AND book file, the first exchange after a server
@@ -1364,34 +1597,16 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
     const size_t newIndex = CLIPPINGS.clippingCount();
     // No table selection either: a server annotation carries text, not a cell coordinate.
     const auto added = CLIPPINGS.addClipping(spine, 0, 0, 0, 0, 0, 0, incoming.chapter.c_str(), paragraphHint,
-                                             incoming.text, /*tableSelection=*/UINT16_MAX, /*layoutSignature=*/0);
+                                             incoming.text, /*tableSelection=*/UINT16_MAX, /*layoutSignature=*/0,
+                                             freeClippingTimestamp(spine, paragraphHint));
     if (added != ClippingStore::AddResult::Added) {
       LOG_ERR("BookOrbit", "Could not store server annotation %lu (result=%d)",
               static_cast<unsigned long>(incoming.serverId), static_cast<int>(added));
+      unplacedAnnotationIds.push_back(incoming.serverId);
       continue;  // unacknowledged: a full store should not silently swallow it
     }
     storeChanged = true;
-
-    // Its record joins back to it by timestamp, chapter and paragraph (BookOrbitClippingRef), and
-    // the timestamp counts seconds: a second highlight received for the same paragraph in the
-    // same second would take the first one's record over, and that one would never be reported
-    // again. A lost copy offered back in full makes that likely, so it waits for the next sync.
     const Clipping* stored = CLIPPINGS.clippingAt(newIndex);
-    if (stored) {
-      const BookOrbitClippingRef storedRef{stored->timestamp, stored->spineIndex, stored->paragraphIndex};
-      bool sharesItsRef = false;
-      for (size_t i = 0; i < newIndex && !sharesItsRef; i++) {
-        const Clipping* other = CLIPPINGS.clippingAt(i);
-        sharesItsRef =
-            other && BookOrbitClippingRef{other->timestamp, other->spineIndex, other->paragraphIndex} == storedRef;
-      }
-      if (sharesItsRef) {
-        LOG_INF("BookOrbit", "Server annotation %lu shares its paragraph and second with another; next sync",
-                static_cast<unsigned long>(incoming.serverId));
-        CLIPPINGS.removeClippingAt(newIndex);
-        continue;  // unacknowledged, so the server offers it again
-      }
-    }
     addedCount++;
     appliedIds.push_back({incoming.serverId, incoming.version});
 
@@ -1414,35 +1629,56 @@ void BookOrbitSyncActivity::applyIncomingAnnotations() {
       // offered back to us on every sync.
       record.pos0 = incoming.pos0;
       record.pos1 = incoming.pos0;
-      BookOrbitAnnotationStore::put(stateDir, record);
+      received.push_back(std::move(record));
     }
   }
 
+  std::vector<BookOrbitAnnotationRecord>().swap(records);
   if (storeChanged && !CLIPPINGS.saveToFile()) {
     LOG_ERR("BookOrbit", "Failed to save received highlights");
     CLIPPINGS.unload();
-    return;  // nothing acknowledged: the server keeps them and the next sync retries
+    return false;  // nothing acknowledged: the server keeps them and the next sync retries
   }
   CLIPPINGS.unload();
+  if (!received.empty() && !BookOrbitAnnotationStore::putAll(stateDir, received)) {
+    LOG_ERR("BookOrbit", "Could not record the position of every received highlight");
+  }
   // A store this apply just started holds exactly what the exchange delivered, so it counts as
   // exchanged: deleting those highlights on the next sync must not read as a lost copy.
   if (addedCount > 0) BookOrbitAnnotationStore::markExchanged(stateDir);
 
-  // Only what was added counts: a highlight already here is acknowledged too, and after a server
-  // upgrade that is every highlight of the book. The watermark is left alone. Received highlights
+  // Only what changed here counts: a highlight already here is acknowledged too, and after a
+  // server upgrade that is every highlight of the book; so is a deletion of one already gone.
+  // The watermark is left alone. Received highlights
   // are never uploaded (see prepareAnnotationBatch), and a server datetime can be ahead of this
   // device's clock: moving the watermark up to it would hide the next highlights made here.
-  annotationsAdded = static_cast<uint16_t>(addedCount);
-  annotationsRemoved = static_cast<uint16_t>(deletedIds.size());
+  annotationsAdded = static_cast<uint16_t>(annotationsAdded + addedCount);
+  annotationsRemoved = static_cast<uint16_t>(annotationsRemoved + removedCount);
 
-  LOG_INF("BookOrbit", "Applied %u server annotation(s) (%u new), %u deletion(s)", (unsigned)appliedIds.size(),
-          (unsigned)addedCount, (unsigned)deletedIds.size());
-  if (!appliedIds.empty() || !deletedIds.empty()) {
-    // Rides syncSession: a nested Session would replace the shared client and close the
-    // connection performSync() is keeping alive for the progress upload.
-    BookOrbitSyncClient::ackAnnotations(documentHash, SETTINGS.getEffectiveDeviceName(), appliedIds, deletedIds);
-  }
+  LOG_INF("BookOrbit", "Applied %u server annotation(s) (%u new), %u deletion(s) (%u removed) (free=%u maxAlloc=%u)",
+          (unsigned)appliedIds.size(), (unsigned)addedCount, (unsigned)deletedIds.size(), (unsigned)removedCount,
+          (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   incomingAnnotations.clear();
+  if (appliedIds.empty() && deletedIds.empty()) return true;
+  // Rides syncSession: a nested Session would replace the shared client and close the
+  // connection performSync() is keeping alive for the progress upload.
+  if (BookOrbitSyncClient::ackAnnotations(documentHash, SETTINGS.getEffectiveDeviceName(), appliedIds, deletedIds) !=
+      BookOrbitSyncClient::OK) {
+    LOG_ERR("BookOrbit", "Acknowledgment failed (http=%d); the server offers these again next sync",
+            BookOrbitSyncClient::lastHttpCode);
+    return false;
+  }
+  outLanded = appliedIds.size() + deletedIds.size();
+  return true;
+}
+
+void BookOrbitSyncActivity::showProgress(const size_t done, const size_t total) {
+  {
+    RenderLock lock(*this);
+    progressDone = done;
+    progressTotal = total;
+  }
+  requestUpdate(true);
 }
 
 size_t BookOrbitSyncActivity::uploadQueuedStats() {
@@ -1467,14 +1703,14 @@ size_t BookOrbitSyncActivity::uploadQueuedStats() {
     BookOrbitSyncActivity* self;
     ~ProgressScope() {
       RenderLock lock(*self);
-      self->statsUploaded = 0;
-      self->statsTotal = 0;
+      self->progressDone = 0;
+      self->progressTotal = 0;
     }
   } progressScope{this};
   {
     RenderLock lock(*this);
-    statsUploaded = 0;
-    statsTotal = total;
+    progressDone = 0;
+    progressTotal = total;
     statusMessage = tr(STR_SYNCING_READING_SESSIONS);
   }
   requestUpdate(true);
@@ -1585,7 +1821,7 @@ size_t BookOrbitSyncActivity::uploadQueuedStats() {
       shownTenth = tenth;
       {
         RenderLock lock(*this);
-        statsUploaded = uploaded;
+        progressDone = uploaded;
       }
       requestUpdate(true);
     }
@@ -1782,15 +2018,21 @@ void BookOrbitSyncActivity::render(RenderLock&&) {
 
   if (state == SYNCING || state == UPLOADING) {
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, statusMessage.c_str(), true, EpdFontFamily::BOLD);
-    if (statsTotal > 0) {
-      const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+    const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+    int lineY = top;
+    for (const std::string& line : summaryLines) {
+      if (line.empty()) continue;
+      lineY += lineHeight + metrics.verticalSpacing;
+      UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, lineY, line.c_str());
+    }
+    if (progressTotal > 0) {
       char counts[32];
-      snprintf(counts, sizeof(counts), "%u / %u", (unsigned)statsUploaded, (unsigned)statsTotal);
+      snprintf(counts, sizeof(counts), "%u / %u", (unsigned)progressDone, (unsigned)progressTotal);
       UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top + lineHeight + metrics.verticalSpacing, counts);
       const int barWidth = screen.width / 2;
       const int barY = top + 2 * (lineHeight + metrics.verticalSpacing);
-      GUI.drawProgressBar(renderer, Rect{screen.x + (screen.width - barWidth) / 2, barY, barWidth, 16}, statsUploaded,
-                          statsTotal);
+      GUI.drawProgressBar(renderer, Rect{screen.x + (screen.width - barWidth) / 2, barY, barWidth, 16}, progressDone,
+                          progressTotal);
     }
     renderer.displayBuffer();
     return;

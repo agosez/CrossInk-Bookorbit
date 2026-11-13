@@ -103,11 +103,15 @@ class BookOrbitSyncActivity final : public Activity {
   std::string statusMessage;
   std::string documentHash;
 
-  // Reading-session drain progress, drawn under the status message. A long
-  // backlog uploads 25 sessions per request, so without this the screen holds a
-  // single unchanging line for a minute and looks stalled. 0 total = no bar.
-  size_t statsUploaded = 0;
-  size_t statsTotal = 0;
+  // Progress of the phase under way (reading sessions, then highlights), drawn under
+  // the status message as "done / total" and a bar. A long backlog goes out one batch
+  // per request, so without this the screen holds a single unchanging line for a
+  // minute and looks stalled. 0 total = no bar.
+  size_t progressDone = 0;
+  size_t progressTotal = 0;
+  void showProgress(size_t done, size_t total);
+  // A summary's lines under its title (the status message), in place of the count and bar.
+  std::string summaryLines[2];
 
   // Remote progress data
   bool hasRemoteProgress = false;
@@ -148,18 +152,34 @@ class BookOrbitSyncActivity final : public Activity {
   // reported in the sweep record that closes the sync (see completeSweep).
   size_t uploadQueuedStats();
 
-  // Highlights are copied out of the clipping store one batch at a time and the store is
-  // unloaded before the request runs: the resident store is ~20KB, a batch ~6KB, and only
-  // the batch may stay resident beside the sync's open TLS session. One batch per sync;
-  // the watermark makes the rest follow on later syncs.
+  // Highlights sync in three steps on the sync's one session. The first request carries the
+  // key set and brings the server's changes down (exchangeAnnotationKeys); those are applied
+  // (drainIncomingAnnotations), then this device's new highlights go up one batch per request
+  // (sendAnnotationBacklog), as the reading stats do. Each batch is copied out of the clipping
+  // store and the store unloaded before its request runs: the resident store is ~20KB, a batch
+  // ~6KB, and only the batch may stay resident beside the open TLS session.
   void prepareAnnotationBatch();
-  void uploadAnnotationBatch();
+  bool exchangeAnnotationKeys();
+  void sendAnnotationBacklog();
+  bool prepareNextAnnotationBatch(uint32_t watermark);
   // Runs once the epub is loaded: placing an incoming annotation needs the spine to parse its
   // xpointer against. Loads the clipping store beside the open TLS session -- a failed load on
   // a tight heap leaves the highlights pending for the next sync -- and acknowledges what
-  // landed on that same session.
-  void applyIncomingAnnotations();
+  // landed on that same session. Returns false when the batch could not be stored or
+  // acknowledged; outLanded counts what the server was told landed.
+  bool applyIncomingAnnotations(size_t& outLanded);
+  // Applies the batch in hand, then pulls and applies the rest one batch per request, until
+  // the server offers nothing more this device can take.
+  void drainIncomingAnnotations();
   std::vector<BookOrbitIncomingAnnotation> incomingAnnotations;
+  // What the last pull offered (the batch in hand included) and whether it said more waits.
+  size_t incomingOffered = 0;
+  bool incomingMorePending = false;
+  // Server changes this sync could not place: the server offers them until acknowledged, and
+  // left in the pulls they would take a batch's place every round.
+  std::vector<uint32_t> unplacedAnnotationIds;
+  // One per highlight a book can hold, in batches: a safety net, not a limit a book reaches.
+  static constexpr size_t MAX_INCOMING_ROUNDS = 256 / BOOKORBIT_ANNOTATION_BATCH;
 
   // Bookmarks follow the same three phases on the same session. Their identity convention is
   // inverted (see BookOrbitBookmarks.h): applying a web bookmark MINTS a local identity and
@@ -182,11 +202,17 @@ class BookOrbitSyncActivity final : public Activity {
   uint16_t annotationsSent = 0;
   uint16_t annotationsAdded = 0;
   uint16_t annotationsRemoved = 0;
+  // Deleted here and, through the key set, on the server too.
+  uint32_t annotationsDeletedOnServer = 0;
   // The server's answer on whether it recognises this document at all, taken from the
   // annotation exchange (which always runs); the sweep record reports it as booksMatched.
   bool documentUnmatched = false;
   std::vector<BookOrbitAnnotation> pendingAnnotations;
   uint32_t pendingAnnotationWatermark = 0;
+  // The store's watermark when the sync began: what is above it and sendable goes up.
+  uint32_t annotationWatermark = 0;
+  // Every highlight waiting to go, counted by prepareAnnotationBatch for the progress shown.
+  size_t annotationsToSend = 0;
   // Fixed-width rows rather than a container of strings, so the whole set is one allocation.
   std::vector<BookOrbitAnnotationKey> pendingAnnotationKeys;
   bool pendingKeysComplete = false;
@@ -196,9 +222,13 @@ class BookOrbitSyncActivity final : public Activity {
   bool annotationStoreUnmarked = false;
   // Asked of the server once per boot, before the batches are prepared (see acceptsSidecarState).
   bool serverAcceptsSidecar = false;
-  // Above this, the key set and its JSON stop fitting beside a TLS session, so it is not sent
-  // and the server is told the set is incomplete instead of being left to infer deletions.
+  // Bookmarks only: their exchange still builds its key set as JSON nodes, and above this the
+  // set and its JSON stop fitting beside a TLS session, so it is not sent and the server is told
+  // the set is incomplete instead of being left to infer deletions. The highlight key set is
+  // written straight into its request body and bounded by the heap instead.
   static constexpr size_t MAX_KEYS_PER_SYNC = 64;
+  // Left beside the highlight key set when it is built (see prepareAnnotationBatch).
+  static constexpr size_t KEY_SET_HEAP_MARGIN = 4096;
   // The title band, whose height differs on touch devices: content below it
   // starts from this rect, never from metrics.headerHeight.
   Rect headerBandRect() const;

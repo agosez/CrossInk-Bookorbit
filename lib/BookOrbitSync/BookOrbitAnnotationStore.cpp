@@ -19,7 +19,26 @@ constexpr size_t POS_MAX = 512;
 
 std::string storePath(const std::string& bookCachePath) { return bookCachePath + STORE_FILENAME; }
 
-bool readFile(const std::string& path, uint32_t& outWatermark, std::vector<BookOrbitAnnotationRecord>& out) {
+// The records ahead of f's position, counted by skipping their positions, so that reading them
+// allocates the vector once. Grown record by record it doubles, and doubling needs the old and
+// the new array at once: 23 KB, 15 KB of it in one block, past 128 records.
+size_t countRecords(FsFile& f) {
+  const size_t start = f.position();
+  constexpr int64_t FIXED_BYTES = 2 * sizeof(uint32_t) + 2 * sizeof(uint16_t);  // timestamp to paragraph
+  uint16_t lengths[2] = {};
+  size_t count = 0;
+  while (count < BookOrbitAnnotationStore::MAX_RECORDS && f.seekCur(FIXED_BYTES) &&
+         f.read(lengths, sizeof(lengths)) == static_cast<int>(sizeof(lengths)) &&
+         f.seekCur(static_cast<int64_t>(lengths[0]) + lengths[1])) {
+    count++;
+  }
+  f.seekSet(start);
+  return count;
+}
+
+// `spare`: room for that many more records, taken in the same allocation.
+bool readFile(const std::string& path, uint32_t& outWatermark, std::vector<BookOrbitAnnotationRecord>& out,
+              const size_t spare = 0) {
   outWatermark = 0;
   out.clear();
 
@@ -35,6 +54,7 @@ bool readFile(const std::string& path, uint32_t& outWatermark, std::vector<BookO
     return false;
   }
 
+  out.reserve(countRecords(f) + spare);
   while (out.size() < BookOrbitAnnotationStore::MAX_RECORDS) {
     BookOrbitAnnotationRecord record;
     uint16_t pos0Length = 0;
@@ -90,10 +110,11 @@ bool writeFile(const std::string& path, const uint32_t watermark,
 }  // namespace
 
 bool BookOrbitAnnotationStore::put(const std::string& bookCachePath, const BookOrbitAnnotationRecord& record) {
-  if (record.timestamp == 0 || record.identityEpoch == 0 || record.pos0.empty() || record.pos1.empty()) {
-    LOG_ERR("BOA", "Refusing to store an annotation record with no timestamp or position");
-    return false;
-  }
+  return putAll(bookCachePath, std::vector<BookOrbitAnnotationRecord>{record});
+}
+
+bool BookOrbitAnnotationStore::putAll(const std::string& bookCachePath,
+                                      const std::vector<BookOrbitAnnotationRecord>& added) {
   if (bookCachePath.empty()) {
     LOG_ERR("BOA", "No state directory for this book; the record is not stored");
     return false;
@@ -102,28 +123,42 @@ bool BookOrbitAnnotationStore::put(const std::string& bookCachePath, const BookO
   const std::string path = storePath(bookCachePath);
   uint32_t watermark = 0;
   std::vector<BookOrbitAnnotationRecord> records;
-  readFile(path, watermark, records);  // a missing or corrupt file simply starts a new one
+  readFile(path, watermark, records, added.size());  // a missing or corrupt file simply starts a new one
 
-  const BookOrbitClippingRef incomingRef{record.timestamp, record.spineIndex, record.paragraphIndex};
-  const auto existing = std::find_if(records.begin(), records.end(), [&](const BookOrbitAnnotationRecord& r) {
-    return BookOrbitClippingRef{r.timestamp, r.spineIndex, r.paragraphIndex} == incomingRef;
-  });
-  if (existing != records.end()) {
-    *existing = record;
-  } else {
-    if (records.size() >= MAX_RECORDS) {
-      LOG_ERR("BOA", "Annotation store full (%u records); highlight will not sync", (unsigned)records.size());
-      return false;
+  bool allStored = true;
+  bool changed = false;
+  for (const BookOrbitAnnotationRecord& record : added) {
+    if (record.timestamp == 0 || record.identityEpoch == 0 || record.pos0.empty() || record.pos1.empty()) {
+      LOG_ERR("BOA", "Refusing to store an annotation record with no timestamp or position");
+      allStored = false;
+      continue;
     }
-    records.push_back(record);
+    const BookOrbitClippingRef incomingRef{record.timestamp, record.spineIndex, record.paragraphIndex};
+    const auto existing = std::find_if(records.begin(), records.end(), [&](const BookOrbitAnnotationRecord& r) {
+      return BookOrbitClippingRef{r.timestamp, r.spineIndex, r.paragraphIndex} == incomingRef;
+    });
+    if (existing != records.end()) {
+      *existing = record;
+    } else if (records.size() >= MAX_RECORDS) {
+      LOG_ERR("BOA", "Annotation store full (%u records); highlight will not sync", (unsigned)records.size());
+      allStored = false;
+      continue;
+    } else {
+      records.push_back(record);
+    }
+    changed = true;
   }
 
-  return writeFile(path, watermark, records);
+  if (!changed) return false;
+  return writeFile(path, watermark, records) && allStored;
 }
 
-bool BookOrbitAnnotationStore::readAll(const std::string& bookCachePath, std::vector<BookOrbitAnnotationRecord>& out) {
+bool BookOrbitAnnotationStore::readAll(const std::string& bookCachePath, std::vector<BookOrbitAnnotationRecord>& out,
+                                       uint32_t* outWatermark) {
   uint32_t watermark = 0;
-  return readFile(storePath(bookCachePath), watermark, out);
+  const bool ok = readFile(storePath(bookCachePath), watermark, out);
+  if (outWatermark) *outWatermark = watermark;
+  return ok;
 }
 
 uint32_t BookOrbitAnnotationStore::readWatermark(const std::string& bookCachePath) {
@@ -146,22 +181,19 @@ bool BookOrbitAnnotationStore::markExchanged(const std::string& bookCachePath) {
   return advanceWatermark(bookCachePath, BOOKORBIT_EXCHANGED_WATERMARK);
 }
 
-bool BookOrbitAnnotationStore::retain(const std::string& bookCachePath, const std::vector<BookOrbitClippingRef>& keep) {
-  const std::string path = storePath(bookCachePath);
-  uint32_t watermark = 0;
-  std::vector<BookOrbitAnnotationRecord> records;
-  if (!readFile(path, watermark, records)) return false;
+bool BookOrbitAnnotationStore::retain(const std::string& bookCachePath, const uint32_t watermark,
+                                      std::vector<BookOrbitAnnotationRecord>& records,
+                                      const std::vector<BookOrbitClippingRef>& keep) {
+  const size_t before = records.size();
+  records.erase(std::remove_if(records.begin(), records.end(),
+                               [&](const BookOrbitAnnotationRecord& record) {
+                                 const BookOrbitClippingRef ref{record.timestamp, record.spineIndex,
+                                                                record.paragraphIndex};
+                                 return std::find(keep.begin(), keep.end(), ref) == keep.end();
+                               }),
+                records.end());
+  if (records.size() == before) return true;
 
-  std::vector<BookOrbitAnnotationRecord> kept;
-  kept.reserve(records.size());
-  for (BookOrbitAnnotationRecord& record : records) {
-    const BookOrbitClippingRef ref{record.timestamp, record.spineIndex, record.paragraphIndex};
-    if (std::find(keep.begin(), keep.end(), ref) != keep.end()) {
-      kept.push_back(std::move(record));
-    }
-  }
-  if (kept.size() == records.size()) return true;
-
-  LOG_INF("BOA", "Dropping %u annotation record(s) whose highlight is gone", (unsigned)(records.size() - kept.size()));
-  return writeFile(path, watermark, kept);
+  LOG_INF("BOA", "Dropping %u annotation record(s) whose highlight is gone", (unsigned)(before - records.size()));
+  return writeFile(storePath(bookCachePath), watermark, records);
 }

@@ -112,6 +112,9 @@ that spelling to the step's markers.
 | `sleep_sync_cancel` | A Power press during the sleep sync cancels it and boots the device the way a power-button wake does. |
 | `highlight_pull` | A highlight created by the peer device lands in the local clipping store, with a minted position record. |
 | `highlight_push` | A pre-seeded local highlight (clipping + position record, what the reader persists) reaches the server and is offered to a device that never saw it. |
+| `highlight_push_backlog` | Twenty local highlights, listed out of datetime order, reach the server in one sync (batches of 8 on one session), and the watermark ends on the newest. |
+| `highlight_pull_backlog` | Twenty highlights from the peer reach the device in one sync: each acknowledged batch of 8 makes room for the next pull. |
+| `highlight_delete_propagates_large` | On a book of 80 highlights, past the 64 a key set used to be held to, deleting two on the device deletes them on the server, and the summary counts them. |
 | `highlight_mint_outside_paragraph` | Highlights saved without a position (what the reader left before the #84 fix) in a heading, a list item and a control `<p>` are positioned by the reader itself, one per wake into their chapter, and reach the server at their exact text node. The heading precedes every `<p>`, so its paragraph hint is 0: the old resolver rejected it, and retrying it on every visit starved the other two. The `<p>` keeps the position the `<p>`-only resolver gave it. |
 | `highlight_delete_propagates` | Two runs on one SD: pull a highlight, delete its clipping locally, sync again — the complete key set deletes it server-side. |
 | `highlight_delete_guard` | Same, but with the sync-state store lost between runs: the guard reports no key set and the server keeps the highlight. |

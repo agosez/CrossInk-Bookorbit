@@ -70,7 +70,7 @@ struct BookOrbitAnnotationKey {
 /**
  * The device's key set, which the server diffs against its own per-device state to find what
  * was deleted here. Fixed-width rows rather than a container of strings, so the whole set is
- * one allocation -- it goes out in the same request as an annotation batch.
+ * one allocation -- it is held until the sync's first request carries it.
  *
  * When the set could not be built in full, send it empty with complete=false: the server then
  * skips deletion processing entirely rather than reading the gap as deletions. An empty set

@@ -14,6 +14,10 @@ struct JsonCallbacks {
   void (*onObjectEnd)(void* ctx);
   void (*onArrayStart)(void* ctx);
   void (*onArrayEnd)(void* ctx);
+  // Optional. Without it, a string value longer than the token buffer is dropped whole. With
+  // it, such a value arrives in pieces as the buffer fills, the last one flagged; shorter values
+  // still go to onString. A piece may end inside a UTF-8 sequence.
+  void (*onStringPart)(void* ctx, const char* part, size_t len, bool last);
 };
 
 class StreamingJsonParser {
@@ -62,6 +66,7 @@ class StreamingJsonParser {
   bool expectingValue;
   bool escaped;
   bool tokenOverflow;
+  bool partsEmitted;  // the string value under way has been handed to onStringPart already
   bool error;
 
   Container nestingStack[MAX_NESTING];

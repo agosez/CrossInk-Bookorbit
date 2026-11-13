@@ -121,14 +121,15 @@ server, in both directions:
   first time you jump to it.
 
 Nothing to enable: if an account is configured, both ride along with every sync, and
-the sync screen reports what each exchange did ("Highlights: 2 sent, 1 added, 0
-removed"). Book matching is the same binary hash as progress sync, so the same EPUB
+the sync screen reports what each exchange did: highlights received from the server
+and sent to it, each counted as added and deleted ("Received: 1 added, 0 removed"). Book matching is the same binary hash as progress sync, so the same EPUB
 file has to be on both sides.
 
 Details worth knowing:
 
-- New highlights upload in batches of 8 per sync — this hardware bounds what fits
-  beside an open TLS connection — so a large backlog drains over a few syncs.
+- Highlights travel 8 per request — this hardware bounds what fits beside an open TLS
+  connection — and a sync sends as many requests as the backlog needs, both ways: one
+  sync sends every new highlight and brings down every one added on the web.
 - Highlights and bookmarks made before this feature existed gain their sync identity
   progressively as you read, one chapter per visit, and start syncing from there.
 - A highlight's stored text is capped at 4 KB; an extremely long web highlight is drawn
@@ -136,8 +137,8 @@ Details worth knowing:
 - The device draws every highlight the same way. Notes, colors and styles added on the
   web stay on the server, and a highlight that came from the server is never sent back.
 - BookOrbit 3.5.0 tracks highlights per book file rather than per device, so after the
-  server is upgraded, the first syncs of each book receive back every highlight it
-  already had, 8 per sync. They are recognized and nothing is duplicated.
+  server is upgraded, the first sync of each book receives back every highlight it
+  already had. They are recognized and nothing is duplicated.
 - With BookOrbit 3.5.0 or later, a book that lost all its highlights or bookmarks on the
   device (a wiped card, say) gets them back from the server at its next sync.
 
