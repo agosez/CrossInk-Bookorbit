@@ -82,6 +82,22 @@ python3 test/integration/harness/run_scenarios.py --scenario sync_progress_pull 
 `docker compose ... down -v` resets the server completely; `seed.py` starts
 from a database it recognizes as already seeded without duplicating anything.
 
+### A real device against this server
+
+[device_kit.py](device_kit.py) builds an SD-card kit for one heavy sync: a
+generated 20-chapter book with 100 local highlights and 600 reading events to
+upload, and 60 highlights from another device on the server to pull. With
+`--start-caddy` it puts Caddy (internal TLS, the Go TLS stack behind #96) in
+front of the server on this Mac's LAN address. `--mac` also writes the
+`bookorbit.json` for that device; without it, enter the printed server, user
+and password on the device. Once a device has synced a book, take the next
+`--variant`.
+
+The simulator reaches Caddy only with its CA, since its HTTP goes through
+`curl`, which verifies certificates where the firmware does not:
+`docker cp crossink-kit-caddy:/data/caddy/pki/authorities/local/root.crt .`
+then `CURL_CA_BUNDLE=root.crt`.
+
 ## Continuous integration
 
 The `integration` job in [ci.yml](../../.github/workflows/ci.yml) runs the same
