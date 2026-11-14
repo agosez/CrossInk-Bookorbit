@@ -180,13 +180,20 @@ class BookOrbitSyncClient {
    *                    same vector can accumulate across pull rounds
    * @param outMorePending Set when the server holds more changes than this response carried,
    *                       or converted positions this round that ship on the next request
+   * @param skipServerIds Changes neither collected nor counted: the ones this sync already
+   *                      failed to apply, which the server offers again until acknowledged
+   * @param outOffered Receives how many changes the response offered, skipped ones aside,
+   *                   whether they fit in outIncoming or not
+   * @param outDeviceDeleted Receives how many highlights the server deleted because `keys` no
+   *                         longer named them (0 from a server that does not say)
    * @return OK on success, error code on failure
    */
   static Error exchangeAnnotations(const std::string& documentHash, const std::string& deviceModel,
                                    const BookOrbitAnnotationKeys& keys, const BookOrbitAnnotation* changes,
                                    size_t changeCount, bool& outUnmatched,
                                    std::vector<BookOrbitIncomingAnnotation>* outIncoming = nullptr,
-                                   bool* outMorePending = nullptr);
+                                   bool* outMorePending = nullptr, const std::vector<uint32_t>* skipServerIds = nullptr,
+                                   size_t* outOffered = nullptr, uint32_t* outDeviceDeleted = nullptr);
 
   /**
    * Acknowledge server-side annotation changes that landed on the device

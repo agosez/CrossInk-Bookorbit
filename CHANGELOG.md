@@ -27,6 +27,30 @@ Based on CrossInk v2.0.0.
 - Shortcuts set to BookOrbit Sync keep working after this update. CrossInk v2.0.0 gives the numbers they were saved under to Back Home and Home/Reader, so they are carried over the first time the device starts, on every button that offers BookOrbit Sync, the Home key and Quick Actions included.
 - BookOrbit Sync no longer sends a guessed position when the device cannot place the page within the book's structure: the sync stops with an error instead. A guessed position could send another reader to the wrong place, or to the start of the book.
 
+## [v1.6.1+bookorbit.8] - 2026-11-13
+
+Based on CrossInk v1.6.1.
+
+### Added
+
+- With the BookOrbit theme, the two shelves at the top of the Library page, Discover and Recently added, can each show something else: Discover, Recently added, Want to Read, one of your BookOrbit collections or one of your SmartScopes. Pick them in Settings > BookOrbit Sync > Home. Its Refresh lists row fetches your collections and SmartScopes from the server, so one created since is there to pick. Each shelf's header names what it shows, with an icon to match: a folder for a collection, an aperture for a SmartScope, a bookmark for Want to Read. A collection or SmartScope shelf shows its most recently added books. Leaving the screen after a change syncs Home, so the new shelves are there when it opens. After updating, Home shows only the device's own data until its next sync.
+- With the BookOrbit theme, "All (N) >" in the header of Home's Also Reading tile now opens the BookOrbit catalog's Continue Reading list, where every book you are reading shows, not only the few that fit on Home. On the X3 and X4, Up and Down select it after the BookOrbit tile; on touch devices, a tap anywhere on the tile's header opens it. Without a BookOrbit account, it opens the Library.
+
+### Changed
+
+- With the BookOrbit theme, the number in "All (N)" on Home's Also Reading tile is now how many books that Continue Reading list holds, counted on the server at each sync. It used to count the recent books on the device, so it could read "All (0)" above books being read elsewhere. Without a BookOrbit account, it still counts the recent books on the device. After updating, Home shows only the device's own data until its next sync.
+- The Home menu of the BookOrbit, Minimal and Dashboard themes is now a grid of tiles in the BookOrbit Home's style, each with an icon and its name, and the selected tile is circled as on Home. The grid starts right under the title, where Home's tiles start, and its size follows the number of entries; with the BookOrbit theme's two extra entries, the old list sat well below the middle of the screen, close to the button hints. The menu now reopens on the entry you last opened from it, until the reader restarts.
+- A BookOrbit sync now brings down every highlight added or deleted on the web, then sends every new highlight of the book, as it already did for reading sessions. It used to move 8 each way per sync, so a book highlighted offline, or on the web, took several syncs to catch up. The sync screen shows each direction on its own: "Receiving highlights from the server", then "Sending highlights to the server", each with a count ("16 / 100") above a progress bar.
+- The summary at the end of a BookOrbit sync now counts highlights both ways: those received from the server, added or deleted on the reader, and those sent, added or deleted on the server. A highlight deleted on the reader that the sync also deleted on the server was not counted before, and a deletion from the web counted even when the reader no longer had that highlight.
+
+### Fixed
+
+- Deleting a highlight on the reader now also deletes it in BookOrbit for a book with more than 64 highlights. Past that number the reader stopped telling the server which highlights it still held, for lack of memory, so deletions on such a book never left the reader. That list now takes about half the memory, and it is left out only when memory is short.
+- On the X3 and X4, a BookOrbit sync no longer restarts the reader when the server holds many highlights for the book that the reader has not received yet, as it does for every book after a BookOrbit upgrade. The server sends up to a hundred of them in each reply, and reading that reply whole could run out of memory. The reader now reads the reply as it arrives and keeps only the highlights it takes.
+- On the X3 and X4, a BookOrbit sync no longer restarts the reader for a book that holds many highlights, around a hundred. The sync read the book's highlight positions up to three times over while connected, and making room for the first highlight received doubled the book's list of highlights in memory; either could leave the reader out of memory. It now reads the positions once and sets room aside for what it receives when it opens the list, and if memory is still short it leaves the highlights on the server for the next sync instead of restarting.
+- With the BookOrbit theme and Sync on Sleep, the BookOrbit tile on Home no longer counts a failed sync as done. When the sync behind the sleep screen could not exchange the book's progress with the server, Home still refreshed from the server, and the tile showed that sync as having just happened. Home now stays as it was, and the tile keeps the time of the last sync that worked.
+- With the BookOrbit theme and Sync on Sleep, Home now also refreshes after a sleep sync that sent the book's progress to the server. Sending it turned Wi-Fi off, so Home could not reach the server afterwards and the tile kept the time of an earlier sync.
+
 ## [v1.6.1+bookorbit.7] - 2026-11-08
 
 Based on CrossInk v1.6.1.

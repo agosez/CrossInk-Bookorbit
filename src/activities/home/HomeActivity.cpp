@@ -40,8 +40,8 @@
 #include "SavedItemsHomeActivity.h"
 #include "SilentRestart.h"
 #include "activities/browser/BookOrbitCatalogLink.h"
-#include "components/BookOrbitHomeLayout.h"
 #include "components/UITheme.h"
+#include "components/themes/bookorbit/BookOrbitHomeLayout.h"
 #include "components/themes/dashboard/DashboardTheme.h"
 #include "components/themes/lyra/LyraCarouselTheme.h"
 #include "components/themes/minimal/MinimalTheme.h"
@@ -291,7 +291,8 @@ HomeMenuEntries buildMinimalMenuItems(bool hasPlugins, bool hasReadingStats, boo
     items.push({tr(STR_PLUGINS), UIIcon::Plugins, HomeMenuAction::Plugins});
   }
   if (BOOKORBIT_STORE.hasCredentials()) {
-    items.push({tr(STR_BOOKORBIT), Library, HomeMenuAction::BookOrbitCatalog});
+    // Its own icon: the menu's tiles show icons, and Library already has this one.
+    items.push({tr(STR_BOOKORBIT), UIIcon::BookOrbit, HomeMenuAction::BookOrbitCatalog});
   }
   if (hasBookmarks || hasClippings) {
     items.push({savedItemsLabel(hasBookmarks, hasClippings), BookmarkIcon, HomeMenuAction::Bookmarks});
@@ -343,6 +344,11 @@ int findMenuActionIndex(const HomeMenuEntries& items, HomeMenuAction action) {
   }
   return -1;
 }
+
+// The Minimal and BookOrbit menu reopens on the entry last opened from it, in RAM only: a
+// restart, such as the C3's into the BookOrbit catalog, starts it over on the first entry.
+// That menu never holds Continue Reading, which stands for "none yet".
+HomeMenuAction lastMinimalMenuAction = HomeMenuAction::ContinueReading;
 
 // The BookOrbit theme draws its own Home; should that UI fail to allocate, it is Minimal.
 bool isMinimalTheme() {
@@ -1122,6 +1128,13 @@ bool HomeActivity::waitingForInitialFrontRelease() {
   return false;
 }
 
+void HomeActivity::openMinimalMenu() {
+  const auto menuItems = buildMinimalMenuItems(hasPlugins, hasReadingStats, hasBookmarks, hasClippings);
+  minimalMenuOpen = true;
+  minimalMenuIndex = std::max(0, findMenuActionIndex(menuItems, lastMinimalMenuAction));
+  requestUpdate();
+}
+
 void HomeActivity::loopBookOrbitHome() {
   if (waitingForInitialFrontRelease()) return;
 
@@ -1129,11 +1142,7 @@ void HomeActivity::loopBookOrbitHome() {
     bookOrbitUi->movePage(delta);
     requestUpdate();
   };
-  const auto openMenu = [this] {
-    minimalMenuOpen = true;
-    minimalMenuIndex = 0;
-    requestUpdate();
-  };
+  const auto openMenu = [this] { openMinimalMenu(); };
 
   int tapped = -1;
   if (mappedInput.wasItemTapped(tapped)) {
@@ -1229,6 +1238,13 @@ void HomeActivity::activateBookOrbitStop(const BookOrbitHomeUi::Stop& stop) {
       BookOrbitCatalogLink link;
       link.sectionId = authors ? "authors" : "series";
       link.title = authors ? tr(STR_HOME_AUTHORS) : tr(STR_HOME_SERIES);
+      activityManager.goToBookOrbitCatalog(std::move(link));
+      break;
+    }
+    case BookOrbitHomeUi::Action::OpenContinueReading: {
+      BookOrbitCatalogLink link;
+      link.sectionId = "continue-reading";
+      link.title = tr(STR_CONTINUE_READING);
       activityManager.goToBookOrbitCatalog(std::move(link));
       break;
     }
@@ -1685,6 +1701,7 @@ void HomeActivity::loop() {
       }
 
       auto activateMinimalMenuAction = [this, &menuItems]() {
+        lastMinimalMenuAction = menuItems[minimalMenuIndex].action;
         switch (menuItems[minimalMenuIndex].action) {
           case HomeMenuAction::BrowseFiles:
             onFileBrowserOpen();
@@ -1770,9 +1787,7 @@ void HomeActivity::loop() {
         return;
       case MappedInputManager::SwipeDir::Up:
         minimalHomeNavIndex = 0;
-        minimalMenuOpen = true;
-        minimalMenuIndex = 0;
-        requestUpdate();
+        openMinimalMenu();
         return;
       case MappedInputManager::SwipeDir::Left:
         if (mappedInput.hasTouch() && canSwapHomeBook()) {
@@ -1817,9 +1832,7 @@ void HomeActivity::loop() {
     auto activateMinimalHomeNav = [this](int index) {
       switch (index) {
         case 0:
-          minimalMenuOpen = true;
-          minimalMenuIndex = 0;
-          requestUpdate();
+          openMinimalMenu();
           break;
         case 1:
           onMinimalBrowseOpen();

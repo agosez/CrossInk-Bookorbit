@@ -171,12 +171,18 @@ class ClippingStore {
 
   bool loadForBook(const std::string& filePath, const std::string& title, const std::string& author,
                    const std::string& bookType);
+  // loadForBook() for an EPUB, from a BookOrbit sync running beside Wi-Fi and TLS. Room for
+  // `spare` more clippings is taken in the load's one allocation, so adding that many never
+  // grows the array (doubling it needs the old and the new copy at once: 25 KB at 100
+  // clippings), and the load refuses, returning false, when the heap cannot hold the array.
+  bool loadForBookOrbitSync(const std::string& filePath, size_t spare);
   void unload();
 
   AddResult addClipping(uint16_t spineIndex, uint16_t startPage, uint16_t endPage, uint16_t pageCount,
                         uint16_t startWordIndex, uint16_t endWordIndex, uint16_t wordCount, const char* chapterTitle,
                         uint16_t paragraphIndex, const std::string& text, uint16_t tableSelection,
-                        uint32_t layoutSignature, uint32_t sourceStart = UINT32_MAX, uint32_t sourceEnd = UINT32_MAX);
+                        uint32_t layoutSignature, uint32_t sourceStart = UINT32_MAX, uint32_t sourceEnd = UINT32_MAX,
+                        uint32_t timestamp = 0);
   bool removeClippingAt(size_t index);
   // Replaces one clipping's stored text (capped at CLIPPING_TEXT_MAX), rewriting the file.
   // Used when the exact source text of a highlight becomes known after the clipping was built
@@ -245,10 +251,10 @@ class ClippingStore {
   bool readTextSpan(const Clipping& clipping, uint16_t length, std::string& out) const;
   bool readKey(const Clipping& clip, std::string& key) const;
   bool loadForBook(const std::string& filePath, const std::string& title, const std::string& author,
-                   const std::string& bookType, bool reserveImportSlot);
+                   const std::string& bookType, size_t spare, bool checkHeap = false);
   static bool loadForSync(const std::string& path, ClippingStore& store, bool reserveImportSlot = false);
-  bool readFromFile(const std::string& path, ClippingRecords& out, size_t onlyIndex = SIZE_MAX,
-                    bool reserveImportSlot = false);
+  bool readFromFile(const std::string& path, ClippingRecords& out, size_t onlyIndex = SIZE_MAX, size_t spare = 0,
+                    bool checkHeap = false);
   struct UploadBinding {
     const std::string& scope;
     std::vector<std::string> legacyIds;

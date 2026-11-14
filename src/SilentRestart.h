@@ -33,6 +33,9 @@ enum class NetworkBootTarget : uint32_t {
   BOOKORBIT_CATALOG = 35,
   // The BookOrbit Home's own sync: replaces its snapshot, then restarts to Home.
   BOOKORBIT_HOME_REFRESH = 36,
+  // BookOrbit Sync > Home, refreshing the collections and SmartScopes its shelves are
+  // picked from before it shows them.
+  BOOKORBIT_HOME_SHELVES = 37,
 };
 
 // BOOKORBIT_SYNC payload: bit 16 set means bits 0-15 carry the paragraph index of the
@@ -73,6 +76,7 @@ constexpr bool isNetworkBootTargetValue(const uint32_t value) {
     case NetworkBootTarget::BOOKORBIT_DOWNLOAD:
     case NetworkBootTarget::BOOKORBIT_CATALOG:
     case NetworkBootTarget::BOOKORBIT_HOME_REFRESH:
+    case NetworkBootTarget::BOOKORBIT_HOME_SHELVES:
       return true;
   }
   return false;
@@ -90,7 +94,8 @@ static_assert(isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SLEEP_SYNC)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_DOWNLOAD)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_CATALOG)) &&
-                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_HOME_REFRESH)),
+                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_HOME_REFRESH)) &&
+                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_HOME_SHELVES)),
               "Every network boot target must pass RTC target validation");
 
 void silentRestart();                                            // home screen

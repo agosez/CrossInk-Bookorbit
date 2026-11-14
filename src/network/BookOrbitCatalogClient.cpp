@@ -266,8 +266,9 @@ BookOrbitCatalogBook bookFromItem(JsonObjectConst item) {
   return book;
 }
 
-// The total of a books listing, read from a single-item page. -1 on failure.
-int fetchBookTotal(const BookOrbitBookQuery& query) {
+}  // namespace
+
+int BookOrbitCatalogClient::fetchBookTotal(const BookOrbitBookQuery& query) {
   JsonDocument filter;
   filter["total"] = true;
   JsonDocument doc;
@@ -278,7 +279,6 @@ int fetchBookTotal(const BookOrbitBookQuery& query) {
   }
   return doc["total"] | -1;
 }
-}  // namespace
 
 BookOrbitBookQuery BookOrbitCatalogClient::sectionBookQuery(const std::string& sectionId) {
   BookOrbitBookQuery query;
@@ -434,8 +434,11 @@ bool BookOrbitCatalogClient::fetchHomeDashboard(BookOrbitHomeSnapshot& out, HalF
   out.badgeProgress = nextBadge["currentProgress"] | 0;
   out.continueCount = static_cast<uint8_t>(readBooks(doc["continueReading"].as<JsonArrayConst>(), out.continueReading,
                                                      BookOrbitHomeSnapshot::CONTINUE_COUNT));
-  out.discoverCount = static_cast<uint8_t>(
-      readBooks(doc["discover"].as<JsonArrayConst>(), out.discover, BookOrbitHomeSnapshot::SHELF_COUNT));
+  for (BookOrbitHomeShelf& shelf : out.shelves) {
+    if (shelf.source.kind != BookOrbitHomeShelfKind::DISCOVER) continue;
+    shelf.count = static_cast<uint8_t>(
+        readBooks(doc["discover"].as<JsonArrayConst>(), shelf.books, BookOrbitHomeShelf::BOOK_COUNT));
+  }
 
   out.yearDayCount = 0;
   unsigned year = 0;

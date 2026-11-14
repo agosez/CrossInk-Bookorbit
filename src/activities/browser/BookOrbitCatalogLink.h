@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-/** Where the BookOrbit Home enters the catalog: one book to download, or a drill-down section. */
+/** Where the BookOrbit Home enters the catalog: one book to download, or a root section to open. */
 struct BookOrbitCatalogLink {
   int64_t bookId = 0;
   std::string sectionId;

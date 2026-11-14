@@ -68,6 +68,9 @@ class BookOrbitAnnotationStore {
   // Records the xpointers minted for a newly created highlight. Replaces the record of the same
   // highlight (see BookOrbitClippingRef) so re-stamping one does not accumulate duplicates.
   static bool put(const std::string& bookCachePath, const BookOrbitAnnotationRecord& record);
+  // put() for several records in one read and one write of the file. False when any of them
+  // was refused or the write failed.
+  static bool putAll(const std::string& bookCachePath, const std::vector<BookOrbitAnnotationRecord>& added);
 
   /**
    * Reads every record. Returns false on a missing or unreadable file, leaving out empty.
@@ -79,7 +82,8 @@ class BookOrbitAnnotationStore {
    * not report an empty-complete key set in that state, or the server reads the gap as
    * deletions and erases every highlight this device ever acked.
    */
-  static bool readAll(const std::string& bookCachePath, std::vector<BookOrbitAnnotationRecord>& out);
+  static bool readAll(const std::string& bookCachePath, std::vector<BookOrbitAnnotationRecord>& out,
+                      uint32_t* outWatermark = nullptr);
 
   // The newest identityEpoch the server has accepted, 0 until this store has been through an
   // exchange (see markExchanged).
@@ -107,8 +111,14 @@ class BookOrbitAnnotationStore {
    * describe. Orphans matter twice over: they would eventually fill the file and block new
    * highlights, and a key set built from them describes annotations the device no longer holds.
    *
+   * Works on the records the caller read (readAll, which gave `watermark`) rather than a second
+   * copy: two copies of a heavily-highlighted book's records, beside the clipping store and a
+   * TLS session, exhausted an X4's heap.
+   *
+   * @param records Filtered in place, whether or not the rewrite succeeds
    * @param keep The clippings that still exist
    * @return true when the file already matched or was rewritten successfully
    */
-  static bool retain(const std::string& bookCachePath, const std::vector<BookOrbitClippingRef>& keep);
+  static bool retain(const std::string& bookCachePath, uint32_t watermark,
+                     std::vector<BookOrbitAnnotationRecord>& records, const std::vector<BookOrbitClippingRef>& keep);
 };

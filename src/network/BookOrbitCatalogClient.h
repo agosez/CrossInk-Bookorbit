@@ -174,6 +174,9 @@ class BookOrbitCatalogClient {
    */
   static bool fetchBooks(const BookOrbitBookQuery& query, int page, BookOrbitBookPage& outPage);
 
+  /** The total of a books listing, read from a single-item page. -1 on failure. */
+  static int fetchBookTotal(const BookOrbitBookQuery& query);
+
   /**
    * Fetch a page of a drill-down facet listing ("authors" or "series").
    * @param sectionId The facet section id from the catalog root
@@ -188,6 +191,7 @@ class BookOrbitCatalogClient {
    * Fill the BookOrbit Home snapshot from the dashboard endpoint, the one BookOrbit's own
    * KOReader plugin draws from. The year's minutes per day go straight to yearOut, right
    * where the file's cursor is. Only EPUB books are kept: the catalog offers nothing else.
+   * The dashboard's Discover draw fills each shelf whose kind is already set to it.
    */
   static bool fetchHomeDashboard(BookOrbitHomeSnapshot& out, HalFile& yearOut);
 

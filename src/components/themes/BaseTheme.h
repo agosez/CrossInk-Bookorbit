@@ -182,7 +182,8 @@ enum UIIcon {
   Hotspot,
   Chart,
   BookCheck,
-  Plugins
+  Plugins,
+  BookOrbit
 };
 
 // Default theme implementation (Classic Theme)

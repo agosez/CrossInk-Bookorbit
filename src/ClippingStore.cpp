@@ -33,6 +33,10 @@ constexpr uint8_t VERSION = SOURCE_RANGE_VERSION;
 constexpr size_t SCOPE_BYTES = 16;
 constexpr size_t MAX_ID_BYTES = 64;
 constexpr size_t MAX_HEADER_FIELD_BYTES = 4096;
+// What a BookOrbit sync's load leaves beside its array (see loadForBookOrbitSync): the check
+// reads the largest free block, which the Wi-Fi and TCP tasks keep allocating from until the
+// array is in place.
+constexpr size_t SYNC_HEAP_MARGIN = 4096;
 constexpr char CLIPPINGS_DIR[] = "/.crosspoint/clippings";
 constexpr size_t TEXT_COPY_BUFFER_SIZE = 128;
 
@@ -50,6 +54,14 @@ uint32_t creationTimeUtc() {
     }
   }
   return 0;  // No clock: preserve an unknown date instead of inventing one.
+}
+
+// A BookOrbit sync runs beside Wi-Fi and TLS: refuse an array the largest free block cannot hold.
+bool syncHeapFits(const size_t capacity, const std::string& path) {
+  if (ESP.getMaxAllocHeap() >= capacity * sizeof(Clipping) + SYNC_HEAP_MARGIN) return true;
+  LOG_ERR("CLIP", "No heap for %u clippings (free=%u maxAlloc=%u): %s", static_cast<unsigned>(capacity),
+          static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()), path.c_str());
+  return false;
 }
 
 struct ClippingFileHeader {
@@ -242,11 +254,15 @@ ClippingStore ClippingStore::instance;
 
 bool ClippingStore::loadForBook(const std::string& filePath, const std::string& title, const std::string& author,
                                 const std::string& bookType) {
-  return loadForBook(filePath, title, author, bookType, false);
+  return loadForBook(filePath, title, author, bookType, 0, false);
+}
+
+bool ClippingStore::loadForBookOrbitSync(const std::string& filePath, const size_t spare) {
+  return loadForBook(filePath, "", "", "epub", spare, true);
 }
 
 bool ClippingStore::loadForBook(const std::string& filePath, const std::string& title, const std::string& author,
-                                const std::string& bookType, const bool reserveImportSlot) {
+                                const std::string& bookType, const size_t spare, const bool checkHeap) {
   loaded = false;
   dirty = false;
   clippings.release();
@@ -286,7 +302,15 @@ bool ClippingStore::loadForBook(const std::string& filePath, const std::string& 
     return false;
   }
   const bool hasStore = Storage.exists(storeFilePath.c_str());
-  loaded = !hasStore || readFromFile(storeFilePath, clippings, SIZE_MAX, reserveImportSlot);
+  if (!hasStore && spare > 0) {
+    // No store yet: take the room for the additions now, so they never grow the array.
+    const size_t capacity = std::min<size_t>(spare, CLIPPING_MAX_PER_BOOK);
+    if ((checkHeap && !syncHeapFits(capacity, storeFilePath)) || !clippings.reserve(capacity)) {
+      LOG_ERR("CLIP", "OOM: room for %u clippings", static_cast<unsigned>(capacity));
+      return false;
+    }
+  }
+  loaded = !hasStore || readFromFile(storeFilePath, clippings, SIZE_MAX, spare, checkHeap);
   if (!loaded) {
     clippings.release();
     return false;
@@ -313,13 +337,11 @@ void ClippingStore::unload() {
   loaded = false;
 }
 
-ClippingStore::AddResult ClippingStore::addClipping(const uint16_t spineIndex, const uint16_t startPage,
-                                                    const uint16_t endPage, const uint16_t pageCount,
-                                                    const uint16_t startWordIndex, const uint16_t endWordIndex,
-                                                    const uint16_t wordCount, const char* chapterTitle,
-                                                    const uint16_t paragraphIndex, const std::string& text,
-                                                    const uint16_t tableSelection, const uint32_t layoutSignature,
-                                                    const uint32_t sourceStart, const uint32_t sourceEnd) {
+ClippingStore::AddResult ClippingStore::addClipping(
+    const uint16_t spineIndex, const uint16_t startPage, const uint16_t endPage, const uint16_t pageCount,
+    const uint16_t startWordIndex, const uint16_t endWordIndex, const uint16_t wordCount, const char* chapterTitle,
+    const uint16_t paragraphIndex, const std::string& text, const uint16_t tableSelection,
+    const uint32_t layoutSignature, const uint32_t sourceStart, const uint32_t sourceEnd, const uint32_t timestamp) {
   if (!loaded) {
     LOG_ERR("CLIP", "Cannot add clipping after failed load");
     return AddResult::SaveFailed;
@@ -338,7 +360,8 @@ ClippingStore::AddResult ClippingStore::addClipping(const uint16_t spineIndex, c
   clipping.endWordIndex = endWordIndex;
   clipping.wordCount = wordCount;
   clipping.paragraphIndex = paragraphIndex;
-  clipping.timestamp = creationTimeUtc();
+  // A BookOrbit sync passes the time it minted, unique within its paragraph.
+  clipping.timestamp = timestamp != 0 ? timestamp : creationTimeUtc();
   clipping.layoutSignature = layoutSignature;
   if ((sourceStart < sourceEnd && sourceEnd != UINT32_MAX) || (sourceStart == UINT32_MAX && sourceEnd == 0)) {
     clipping.sourceStart = sourceStart;
@@ -571,7 +594,7 @@ void ClippingStore::clearAll() {
 }
 
 bool ClippingStore::readFromFile(const std::string& path, ClippingRecords& out, const size_t onlyIndex,
-                                 const bool reserveImportSlot) {
+                                 const size_t spare, const bool checkHeap) {
   out.clear();
   deletedIds.clear();
   bool complete = false;
@@ -640,9 +663,13 @@ bool ClippingStore::readFromFile(const std::string& path, ClippingRecords& out, 
     f.close();
     return true;
   }
-  // Import needs one additional slot. Reserve it with the initial index so
+  // Imports and BookOrbit syncs add records. Reserve their room with the initial index so
   // appending never holds two book-sized arrays at once (up to 256 records).
-  const size_t capacity = reserveImportSlot ? std::min<size_t>(count + 1, CLIPPING_MAX_PER_BOOK) : count;
+  const size_t capacity = std::min<size_t>(count + spare, CLIPPING_MAX_PER_BOOK);
+  if (onlyIndex == SIZE_MAX && checkHeap && !syncHeapFits(capacity, path)) {
+    f.close();
+    return false;
+  }
   if (!out.reserve(onlyIndex == SIZE_MAX ? capacity : 1)) {
     LOG_ERR("CLIP", "OOM: %u clipping records", count);
     f.close();
@@ -795,7 +822,7 @@ bool ClippingStore::loadForSync(const std::string& path, ClippingStore& store, c
   if (Storage.exists(source.c_str()) && !readClippingFileHeader(source, nullptr, header)) return false;
   if (!header.path.empty() && header.path != path) return false;
   const auto title = header.title.empty() ? path.substr(path.find_last_of('/') + 1) : header.title;
-  return store.loadForBook(path, title, header.author, "epub", reserveImportSlot);
+  return store.loadForBook(path, title, header.author, "epub", reserveImportSlot ? 1 : 0);
 }
 
 bool ClippingStore::readDeletionForUpload(const std::string& path, const size_t ordinal, std::string& id, bool& done) {
