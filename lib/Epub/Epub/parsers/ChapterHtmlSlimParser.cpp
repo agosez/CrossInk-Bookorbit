@@ -82,8 +82,8 @@ constexpr uint32_t MIN_FREE_HEAP_FOR_RICH_TABLE = 96U * 1024U;
 constexpr uint32_t MIN_MAX_ALLOC_FOR_RICH_TABLE = 56U * 1024U;
 
 static constexpr const char* const HEADER_TAGS[] = {"h1", "h2", "h3", "h4", "h5", "h6"};
-static constexpr const char* const BLOCK_TAGS[] = {"p",  "li", "div",    "br",      "blockquote",
-                                                   "ul", "ol", "figure", "fieldset"};
+static constexpr const char* const BLOCK_TAGS[] = {"p",  "li", "div",    "br",       "blockquote",
+                                                   "ul", "ol", "figure", "fieldset", "hgroup"};
 static constexpr const char* const BOLD_TAGS[] = {"b", "strong"};
 static constexpr const char* const ITALIC_TAGS[] = {"i", "em"};
 static constexpr const char* const UNDERLINE_TAGS[] = {"u", "ins"};
@@ -120,6 +120,7 @@ void ChapterHtmlSlimParser::consumeReferenceCharacters(const XML_Char* text, con
 }
 
 void ChapterHtmlSlimParser::clearReferenceExclusionIfClosed() {
+  if (sourceExcludedUntilDepth == depth) sourceExcludedUntilDepth = INT_MAX;
   if (trackReferenceCharacters && referenceExcludedUntilDepth == depth) {
     referenceExcludedUntilDepth = INT_MAX;
   }
@@ -308,6 +309,7 @@ class BodyFontProbe {
     uint32_t bytes = 0;
   };
   const CssParser& css;
+  const bool useTextFamily;
   CssStyle resolvedStyle;
   std::vector<CssAncestorEntry> ancestors;
   std::array<Frame, MAX_DEPTH> frames{};
@@ -365,15 +367,16 @@ class BodyFontProbe {
     auto& self = *static_cast<BodyFontProbe*>(context);
     if (self.depth == 0 || self.depth > MAX_DEPTH) return;
     const auto& frame = self.frames[self.depth - 1];
-    if (!frame.inBody || !frame.inParagraph || frame.ignored) return;
+    if (!frame.inBody || (!frame.inParagraph && !self.useTextFamily) || frame.ignored) return;
     uint32_t bytes = 0;
     for (int i = 0; i < length; ++i) {
       if (!isWhitespace(text[i])) ++bytes;
     }
     if (bytes == 0) return;
+    const uint32_t family = self.useTextFamily ? frame.family : frame.paragraphFamily;
     for (auto& candidate : self.usage) {
-      if (candidate.bytes == 0 || candidate.family == frame.paragraphFamily) {
-        candidate.family = frame.paragraphFamily;
+      if (candidate.bytes == 0 || candidate.family == family) {
+        candidate.family = family;
         candidate.bytes += bytes;
         return;
       }
@@ -385,7 +388,10 @@ class BodyFontProbe {
   }
 
  public:
-  explicit BodyFontProbe(const CssParser& css) : css(css) { ancestors.reserve(MAX_DEPTH); }
+  explicit BodyFontProbe(const CssParser& css, const bool useTextFamily = false)
+      : css(css), useTextFamily(useTextFamily) {
+    ancestors.reserve(MAX_DEPTH);
+  }
 
   void attach(XML_Parser parser) {
     XML_SetUserData(parser, this);
@@ -394,11 +400,11 @@ class BodyFontProbe {
     XML_SetDefaultHandlerExpand(parser, entity);
   }
 
-  uint32_t family() const {
-    if (rootFamily != 0) return rootFamily;
+  uint32_t family(const bool preferParagraph = false) const {
+    if (!preferParagraph && rootFamily != 0) return rootFamily;
     const auto best =
         std::max_element(usage.begin(), usage.end(), [](const Usage& a, const Usage& b) { return a.bytes < b.bytes; });
-    return best->family;
+    return best->bytes ? best->family : (preferParagraph ? 0 : rootFamily);
   }
 };
 
@@ -822,6 +828,7 @@ bool ChapterHtmlSlimParser::captureDropCapCodepoint(const char* bytes, const int
 void ChapterHtmlSlimParser::cancelDropCapToWord() {
   if (partWordBufferIndex) flushPartWordBuffer();
   partWordVisibleOffset = dropCap.visibleOffset;
+  partWordSourceOffset = dropCap.sourceOffset;
   partWordReferenceOffset = dropCap.referenceOffset;
   memcpy(partWordBuffer + partWordBufferIndex, dropCap.text, dropCap.length);
   partWordBufferIndex += dropCap.length;
@@ -1083,10 +1090,26 @@ void ChapterHtmlSlimParser::queueInlinePadding(const CssStyle& cssStyle) {
   nextWordContinues = true;
 }
 
+void ChapterHtmlSlimParser::recordPartWordSourceGap(const uint32_t length) {
+  if (partWordBufferIndex == 0 || length == 0) return;
+  uint16_t characters = 0;
+  for (int i = 0; i < partWordBufferIndex; ++i)
+    if ((static_cast<uint8_t>(partWordBuffer[i]) & 0xC0) != 0x80) ++characters;
+  if (!partWordSourceGaps.empty() && partWordSourceGaps.back().beforeCharacter == characters)
+    partWordSourceGaps.back().length += length;
+  else {
+    // At most one entry per boundary in the fixed 200-byte pending word.
+    if (partWordSourceGaps.size() == partWordSourceGaps.capacity())
+      partWordSourceGaps.reserve(std::max<size_t>(4, partWordSourceGaps.size() * 2));
+    partWordSourceGaps.push_back({characters, length});
+  }
+}
+
 // flush the contents of partWordBuffer to currentTextBlock
 void ChapterHtmlSlimParser::flushPartWordBuffer() {
   if (lowMemoryAbort) {
     partWordBufferIndex = 0;
+    partWordSourceGaps.clear();
     partWordInlinePadding = 0;
     nextWordContinues = false;
     return;
@@ -1122,10 +1145,10 @@ void ChapterHtmlSlimParser::flushPartWordBuffer() {
   }
 
   if (currentCompactTable && currentCompactTable->valid() && currentCompactTable->hasActiveCell()) {
-    if (!currentCompactTable->appendWord(std::string_view(partWordBuffer, static_cast<size_t>(partWordBufferIndex)),
-                                         fontStyle, nextWordContinues,
-                                         honorsPublisherDecorations() && effectiveBackgroundBlack,
-                                         insideFootnoteLink ? currentFootnote.linkId : 0)) {
+    if (!currentCompactTable->appendWord(
+            std::string_view(partWordBuffer, static_cast<size_t>(partWordBufferIndex)), fontStyle, nextWordContinues,
+            honorsPublisherDecorations() && effectiveBackgroundBlack, insideFootnoteLink ? currentFootnote.linkId : 0,
+            (syntheticCharacterData || !partWordSourceGaps.empty()) ? UINT32_MAX : partWordSourceOffset)) {
       // The row exceeded the compact model's fixed text/token budget. Degrade
       // this table to paragraphs the way the rich path does for its own limits,
       // rather than failing the whole section build.
@@ -1136,6 +1159,7 @@ void ChapterHtmlSlimParser::flushPartWordBuffer() {
     currentTextRunBytes = static_cast<uint16_t>(
         std::min<size_t>(currentTextRunBytes + static_cast<size_t>(partWordBufferIndex), UINT16_MAX));
     partWordBufferIndex = 0;
+    partWordSourceGaps.clear();
     partWordInlinePadding = 0;
     nextWordContinues = false;
     return;
@@ -1146,6 +1170,7 @@ void ChapterHtmlSlimParser::flushPartWordBuffer() {
     // table content rather than dereferencing a null paragraph block.
     LOG_ERR("EHP", "Discarding text without a paragraph or compact table cell");
     partWordBufferIndex = 0;
+    partWordSourceGaps.clear();
     partWordInlinePadding = 0;
     nextWordContinues = false;
     return;
@@ -1156,10 +1181,12 @@ void ChapterHtmlSlimParser::flushPartWordBuffer() {
   currentTextBlock->addWord(
       partWordBuffer, fontStyle, false, nextWordContinues, honorsPublisherDecorations() && effectiveBackgroundBlack,
       insideFootnoteLink ? currentFootnote.linkId : 0, partWordVisibleOffset, partWordReferenceOffset,
-      partWordInlinePadding, effectivePreserveWhitespace, effectiveInlineFontSize, effectiveFontFamily);
+      partWordInlinePadding, effectivePreserveWhitespace, effectiveInlineFontSize, effectiveFontFamily,
+      !syntheticCharacterData, partWordSourceOffset, partWordSourceGaps);
   currentTextRunBytes = static_cast<uint16_t>(
       std::min<size_t>(currentTextRunBytes + static_cast<size_t>(partWordBufferIndex), UINT16_MAX));
   partWordBufferIndex = 0;
+  partWordSourceGaps.clear();
   partWordInlinePadding = 0;
   nextWordContinues = false;
 
@@ -2228,6 +2255,15 @@ bool ChapterHtmlSlimParser::appendMalformedMarkupWarningPage() {
 
 void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char* name, const XML_Char** atts) {
   auto* self = static_cast<ChapterHtmlSlimParser*>(userData);
+  // Source coordinates count decoded body text even when CSS hides it. This
+  // keeps later words at the same position across reading modes and layouts.
+  if (strcmp(name, "body") == 0) self->sourceTextOffset = 0;
+  if (self->sourceExcludedUntilDepth == INT_MAX &&
+      (strcmp(name, "head") == 0 || strcmp(name, "style") == 0 || strcmp(name, "script") == 0 ||
+       strcmp(name, "title") == 0 || strcmp(name, "rp") == 0)) {
+    self->sourceExcludedUntilDepth = self->depth;
+  }
+
   if (self->isScanningForPreviewAnchor()) {
     if (self->handlePreviewScanStart(atts)) {
       return;
@@ -3246,6 +3282,20 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     userAlignmentBlockStyle.alignment = requestedAlign == CssTextAlign::None ? CssTextAlign::Justify : requestedAlign;
   }
 
+  // A heading group's subtitle follows the group's alignment even when prose has a reader override.
+  if (strcmp(name, "hgroup") == 0) {
+    self->headingGroupDepth = self->depth;
+  } else if (self->embeddedStyle && self->headingGroupDepth >= 0 && self->depth == self->headingGroupDepth + 1 &&
+             strcmp(name, "p") == 0) {
+    const auto alignment = cssStyle.hasTextAlign()
+                               ? cssStyle.textAlign
+                               : self->blockStyleBuf_[self->blockStyleCount_ - 1].publisherAlignment;
+    if (alignment != CssTextAlign::None) {
+      userAlignmentBlockStyle.alignment = alignment;
+      userAlignmentBlockStyle.textAlignDefined = true;
+    }
+  }
+
   // Figures lay out artwork and captions, independently of the reader's prose alignment.
   if (self->embeddedStyle && strcmp(name, "figure") == 0 && cssStyle.hasTextAlign()) {
     userAlignmentBlockStyle.alignment = cssStyle.textAlign;
@@ -3422,12 +3472,12 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
           if (list.nextValue < INT32_MAX) ++list.nextValue;
           self->currentTextBlock->addWord(marker, EpdFontFamily::REGULAR, false, false,
                                           self->honorsPublisherDecorations() && self->effectiveBackgroundBlack, 0,
-                                          self->visibleTextOffset, self->referenceTextOffset);
+                                          self->visibleTextOffset, self->referenceTextOffset, 0, false, 0, 0, false);
           markerAdded = true;
         } else {
           self->currentTextBlock->addWord("\xe2\x80\xa2", EpdFontFamily::REGULAR, false, false,
                                           self->honorsPublisherDecorations() && self->effectiveBackgroundBlack, 0,
-                                          self->visibleTextOffset, self->referenceTextOffset);
+                                          self->visibleTextOffset, self->referenceTextOffset, 0, false, 0, 0, false);
           markerAdded = true;
         }
         if (markerAdded) self->pendingListMarkerDepth = self->depth;
@@ -3689,6 +3739,16 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
 
 void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char* s, const int len) {
   auto* self = static_cast<ChapterHtmlSlimParser*>(userData);
+  const uint32_t callbackSourceOffset = self->sourceTextOffset;
+  const bool countSourceOffsets = !self->syntheticCharacterData && self->sourceExcludedUntilDepth >= self->depth;
+  if (countSourceOffsets) {
+    const auto* ptr = reinterpret_cast<const unsigned char*>(s);
+    const auto* const end = ptr + len;
+    while (ptr < end) {
+      utf8NextCodepoint(&ptr);
+      ++self->sourceTextOffset;
+    }
+  }
   if (self->isScanningForPreviewAnchor() || self->previewStopRequested) {
     return;
   }
@@ -3702,11 +3762,11 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
   if ((contentIsSkipped || self->collectingRubyText) && countReferenceCharacters) {
     self->consumeReferenceCharacters(s, len);
   }
+  if ((contentIsSkipped || self->collectingRubyText) && countSourceOffsets)
+    self->recordPartWordSourceGap(self->sourceTextOffset - callbackSourceOffset);
   if (contentIsSkipped) return;
-
-  // Keep the source coordinate independent of wrapping, fonts, and orientation.
-  // `head`/`rp` are skipped above; synthetic table labels and ruby annotations do
-  // not represent the document body position.
+  // Keep the established visible-text progress coordinate separate: hidden
+  // text and ruby annotations must not move previously saved reading positions.
   const uint32_t callbackVisibleOffset = self->visibleTextOffset;
   const bool countVisibleOffsets = !self->syntheticCharacterData && !self->collectingRubyText;
   if (countVisibleOffsets) {
@@ -3714,7 +3774,7 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
     const auto* const end = ptr + len;
     while (ptr < end) {
       utf8NextCodepoint(&ptr);
-      self->visibleTextOffset++;
+      ++self->visibleTextOffset;
     }
   }
 
@@ -3753,6 +3813,7 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
   }
 
   uint32_t codepointOffset = callbackVisibleOffset;
+  uint32_t codepointSourceOffset = callbackSourceOffset;
   uint32_t codepointReferenceOffset = self->referenceTextOffset;
   for (int i = 0; i < len; i++) {
     if (self->lowMemoryAbort || self->previewStopRequested) return;
@@ -3769,11 +3830,13 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       const int bytes = static_cast<int>(end - begin);
       if (self->dropCap.length == 0) {
         self->dropCap.visibleOffset = codepointOffset;
+        self->dropCap.sourceOffset = codepointSourceOffset;
         self->dropCap.referenceOffset = codepointReferenceOffset;
       }
       if (self->captureDropCapCodepoint(s + i, bytes)) {
         i += bytes - 1;
         if (countVisibleOffsets) ++codepointOffset;
+        if (countSourceOffsets) ++codepointSourceOffset;
         continue;
       }
     }
@@ -3803,10 +3866,12 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       } else if (self->currentTextBlock) {
         // A source space is a token with a legal wrap before it and no added gap.
         self->currentTextBlock->addWord(s[i] == '\t' ? "    " : " ", EpdFontFamily::REGULAR, false, false, false, 0,
-                                        codepointOffset, codepointReferenceOffset, 0, true);
+                                        codepointOffset, codepointReferenceOffset, 0, true, 0, 0, false,
+                                        codepointSourceOffset);
       }
       self->nextWordContinues = false;
       if (startsCodepoint && countVisibleOffsets) codepointOffset++;
+      if (startsCodepoint && countSourceOffsets) codepointSourceOffset++;
       continue;
     }
     if (isWhitespace(s[i])) {
@@ -3817,6 +3882,7 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       // Whitespace is a real word boundary — reset continuation state
       self->nextWordContinues = false;
       if (startsCodepoint && countVisibleOffsets) codepointOffset++;
+      if (startsCodepoint && countSourceOffsets) codepointSourceOffset++;
       // Skip the whitespace char
       continue;
     }
@@ -3850,6 +3916,7 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       self->partWordInlinePadding = self->pendingInlinePadding;
       self->pendingInlinePadding = 0;
       self->partWordVisibleOffset = codepointOffset;
+      self->partWordSourceOffset = codepointSourceOffset;
       self->partWordReferenceOffset = codepointReferenceOffset;
       self->nextWordContinues = true;  // Attach space to previous word (no break).
       self->flushPartWordBuffer();
@@ -3858,6 +3925,7 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
 
       i++;  // Skip the second byte (0xA0)
       if (countVisibleOffsets) codepointOffset++;
+      if (countSourceOffsets) codepointSourceOffset++;
       continue;
     }
 
@@ -3874,6 +3942,7 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       self->partWordInlinePadding = self->pendingInlinePadding;
       self->pendingInlinePadding = 0;
       self->partWordVisibleOffset = codepointOffset;
+      self->partWordSourceOffset = codepointSourceOffset;
       self->partWordReferenceOffset = codepointReferenceOffset;
       self->nextWordContinues = true;
       self->flushPartWordBuffer();
@@ -3882,6 +3951,7 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
 
       i += 2;  // Skip the remaining two bytes (0x80 0xAF)
       if (countVisibleOffsets) codepointOffset++;
+      if (countSourceOffsets) codepointSourceOffset++;
       continue;
     }
 
@@ -3894,6 +3964,10 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       // Check if the next two bytes complete the 3-byte sequence
       if ((i + 2 < len) && (s[i + 1] == FEFF_BYTE_2) && (s[i + 2] == FEFF_BYTE_3)) {
         // Sequence 0xEF 0xBB 0xBF found!
+        if (countSourceOffsets) {
+          self->recordPartWordSourceGap(1);
+          ++codepointSourceOffset;
+        }
         i += 2;    // Skip the next two bytes
         continue;  // Move to the next iteration
       }
@@ -3911,14 +3985,19 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
         // Incomplete UTF-8 sequence at the end — save it before flushing
         int overflow = self->partWordBufferIndex - safeLen;
         uint32_t overflowOffset = self->partWordVisibleOffset;
+        uint32_t overflowSourceOffset = self->partWordSourceOffset;
         uint32_t overflowReferenceOffset = self->partWordReferenceOffset;
         const auto* codepoint = reinterpret_cast<const unsigned char*>(self->partWordBuffer);
         const auto* const prefixEnd = codepoint + safeLen;
         while (codepoint < prefixEnd) {
           utf8NextCodepoint(&codepoint);
           overflowOffset++;
+          overflowSourceOffset++;
           overflowReferenceOffset++;
         }
+        const auto prefixCharacters = overflowSourceOffset - self->partWordSourceOffset;
+        for (const auto& gap : self->partWordSourceGaps)
+          if (gap.beforeCharacter <= prefixCharacters) overflowSourceOffset += gap.length;
         char saved[4];
         for (int j = 0; j < overflow; j++) {
           saved[j] = self->partWordBuffer[safeLen + j];
@@ -3931,6 +4010,7 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
         }
         self->partWordBufferIndex = overflow;
         self->partWordVisibleOffset = overflowOffset;
+        self->partWordSourceOffset = overflowSourceOffset;
         self->partWordReferenceOffset = overflowReferenceOffset;
       } else {
         self->flushPartWordBuffer();
@@ -3940,12 +4020,14 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
 
     if (self->partWordBufferIndex == 0) {
       self->partWordVisibleOffset = codepointOffset;
+      self->partWordSourceOffset = codepointSourceOffset;
       self->partWordReferenceOffset = codepointReferenceOffset;
       self->partWordInlinePadding = self->pendingInlinePadding;
       self->pendingInlinePadding = 0;
     }
     self->partWordBuffer[self->partWordBufferIndex++] = s[i];
     if (startsCodepoint && countVisibleOffsets) codepointOffset++;
+    if (startsCodepoint && countSourceOffsets) codepointSourceOffset++;
   }
 
   // If a paragraph keeps growing, perform the layout and consume all but the last line.
@@ -3956,7 +4038,7 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
 
 void XMLCALL ChapterHtmlSlimParser::defaultHandlerExpand(void* userData, const XML_Char* s, const int len) {
   auto* self = static_cast<ChapterHtmlSlimParser*>(userData);
-  if (self->isScanningForPreviewAnchor() || self->previewStopRequested) {
+  if (self->previewStopRequested) {
     return;
   }
   // Check if this looks like an entity reference (&...;)
@@ -3980,6 +4062,7 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
     if (self->depth > 0) {
       self->depth -= 1;
     }
+    self->clearReferenceExclusionIfClosed();
     return;
   }
   if (self->previewStopRequested) {
@@ -4237,6 +4320,18 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
       }
     } else {
       self->currentTextBlock->setBlockStyle(self->currentTextBlock->getBlockStyle().addBottom(closingStyle));
+      auto& pending = self->currentTextBlock->getBlockStyle();
+      const bool emptyBox = self->boxScopeCount && self->boxScopes[self->boxScopeCount - 1].depth == self->depth &&
+                            self->boxScopes[self->boxScopeCount - 1].top < 0 &&
+                            !self->boxScopes[self->boxScopeCount - 1].continued;
+      if (self->currentTextBlock->isEmpty() && self->wordsExtractedInBlock == 0 && pending.topInset() == 0 &&
+          !emptyBox) {
+        // A flushed child leaves an empty parent block. Spend its closing spacing
+        // before that placeholder is reused for the next paragraph. Empty border
+        // boxes keep their own spacing for closeBoxScope() to consume.
+        self->currentPageNextY += pending.bottomInset();
+        pending.marginBottom = pending.paddingBottom = 0;
+      }
     }
   }
 
@@ -4279,6 +4374,7 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
     self->currentTextRunBytes = 0;
     self->nextWordContinues = false;
   }
+  if (self->headingGroupDepth == self->depth) self->headingGroupDepth = -1;
   if (self->headingDepth == self->depth) {
     self->headingDepth = -1;
   }
@@ -4504,41 +4600,63 @@ void ChapterHtmlSlimParser::releaseInputFile() {
   parseFile_.close();
 }
 
-bool ChapterHtmlSlimParser::detectBodyFont() {
+bool ChapterHtmlSlimParser::scanBodyFont(XML_Parser parser, FsFile& file, const CssParser& css, uint32_t& family,
+                                         const bool preferParagraph) {
   // The bounded ancestor/usage tables exceed the task's small stack budget.
-  auto probe = makeUniqueNoThrow<BodyFontProbe>(*cssParser);
+  auto probe = makeUniqueNoThrow<BodyFontProbe>(css, preferParagraph);
   if (!probe) {
     LOG_ERR("EHP", "OOM: body font probe");
     return false;
   }
-  probe->attach(activeParser);
+  probe->attach(parser);
   size_t consumed = 0;
-  while (parseFile_.available() > 0 && consumed < BODY_FONT_SCAN_BYTES) {
-    void* const buffer = XML_GetBuffer(activeParser, PARSE_BUFFER_SIZE);
+  while (file.available() > 0 && consumed < BODY_FONT_SCAN_BYTES) {
+    void* const buffer = XML_GetBuffer(parser, PARSE_BUFFER_SIZE);
     if (!buffer) {
       LOG_ERR("EHP", "OOM: body font scan buffer");
       return false;
     }
-    const size_t length = parseFile_.read(buffer, PARSE_BUFFER_SIZE);
+    const size_t length = file.read(buffer, PARSE_BUFFER_SIZE);
     if (length == 0) {
       LOG_ERR("EHP", "Body font scan read failed");
       return false;
     }
     consumed += length;
-    if (XML_ParseBuffer(activeParser, static_cast<int>(length), parseFile_.available() == 0) == XML_STATUS_ERROR) {
+    if (XML_ParseBuffer(parser, static_cast<int>(length), file.available() == 0) == XML_STATUS_ERROR) {
       // The layout pass reports malformed XML and handles tolerated trailing data.
       break;
     }
     delay(1);
   }
-  bodyFontFamily = probe->family();
-  LOG_DBG("EHP", "Body font %08x from %u bytes (probe %u bytes)", static_cast<unsigned>(bodyFontFamily),
+  family = probe->family(preferParagraph);
+  LOG_DBG("EHP", "Body font %08x from %u bytes (probe %u bytes)", static_cast<unsigned>(family),
           static_cast<unsigned>(consumed), static_cast<unsigned>(sizeof(BodyFontProbe)));
+  return true;
+}
+
+bool ChapterHtmlSlimParser::detectBodyFont() {
+  if (!scanBodyFont(activeParser, parseFile_, *cssParser, bodyFontFamily, false)) return false;
   if (!XML_ParserReset(activeParser, nullptr) || !parseFile_.seek(0)) {
     LOG_ERR("EHP", "Failed to rewind after body font scan");
     return false;
   }
   return true;
+}
+
+uint32_t ChapterHtmlSlimParser::publisherBodyFontFamily(const std::string& path, const CssParser& css) {
+  FsFile file;
+  if (!Storage.openFileForRead("EHP", path, file)) return 0;
+  XML_Parser parser = XML_ParserCreate(nullptr);
+  if (!parser) {
+    LOG_ERR("EHP", "OOM: body font metadata parser");
+    file.close();
+    return 0;
+  }
+  uint32_t family = 0;
+  const bool ok = scanBodyFont(parser, file, css, family, true);
+  destroyXmlParser(parser);
+  file.close();
+  return ok ? family : 0;
 }
 
 bool ChapterHtmlSlimParser::beginParse() {

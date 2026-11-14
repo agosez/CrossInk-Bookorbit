@@ -40,6 +40,7 @@ class SleepActivity final : public Activity {
 #endif
   void renderDefaultSleepScreen() const;
   void renderCustomSleepScreen() const;
+  bool renderCustomSleepBmp(const std::string& path) const;
   void renderCoverSleepScreen() const;
   void renderReadingStatsSleepScreen() const;
   void renderMinimalSleepScreen() const;

@@ -19,6 +19,18 @@
 #error "CROSSINK_APP_CAP_USB_DRIVE must be 0 or 1"
 #endif
 
+// The OPDS browser, its server settings and its /api/opds web endpoints. On by default;
+// this fork's X3/X4 builds turn it off to fit the C3 app partition (platformio.ini).
+// Only the entry points are guarded: with them gone, the linker drops the OPDS code,
+// and saved servers stay on the card for a build that has OPDS again.
+#ifndef CROSSINK_APP_CAP_OPDS
+#define CROSSINK_APP_CAP_OPDS 1
+#endif
+
+#if CROSSINK_APP_CAP_OPDS != 0 && CROSSINK_APP_CAP_OPDS != 1
+#error "CROSSINK_APP_CAP_OPDS must be 0 or 1"
+#endif
+
 // Native simulator BoardConfig intentionally exposes only simulated runtime
 // profiles, so keep this firmware-image identity available at the app layer.
 #if defined(FREEINK_DEVICE_X4CLASSIC) && FREEINK_DEVICE_X4CLASSIC

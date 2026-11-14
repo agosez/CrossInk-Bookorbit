@@ -6,6 +6,7 @@
 #include <vector>
 
 inline int openBookmarkReaders = 0;
+inline void (*bookmarkReadHook)() = nullptr;
 inline int shortReadAfter = -1;
 inline bool bookmarkMockWriting = false;
 inline bool failBookmarkWriteOpen = false;
@@ -14,7 +15,7 @@ inline bool failBookmarkClose = false;
 inline int maxBookmarkWriteBytes = -1;
 inline std::string failBookmarkRenameFrom;
 
-constexpr int O_WRONLY = 1, O_CREAT = 2, O_TRUNC = 4;
+constexpr int O_WRONLY = 1, O_CREAT = 2, O_TRUNC = 4, O_APPEND = 8;
 class FsFile {
  public:
   bool attach(std::string* bytes, bool writing) {
@@ -28,12 +29,14 @@ class FsFile {
   }
   int available() const { return data ? static_cast<int>(data->size() - offset) : 0; }
   int read(void* bytes, size_t size) {
+    if (bookmarkReadHook) bookmarkReadHook();
     size = std::min(size, static_cast<size_t>(available()));
     if (shortReadAfter >= 0 && offset + size > static_cast<size_t>(shortReadAfter)) return 0;
     if (size) std::memcpy(bytes, data->data() + offset, size);
     offset += size;
     return static_cast<int>(size);
   }
+  size_t write(uint8_t byte) { return write(&byte, 1); }
   size_t write(const void* bytes, size_t size) { return write(static_cast<const uint8_t*>(bytes), size); }
   size_t write(const uint8_t* bytes, size_t size) {
     if (!data || !writer) return 0;
@@ -82,6 +85,7 @@ class HalStorage {
     const auto it = files.lower_bound(prefix);
     return it != files.end() && it->first.starts_with(prefix);
   }
+  bool ensureDirectoryExists(const char*) { return true; }
   bool mkdir(const char*, bool = true) { return true; }
   bool remove(const char* path) { return files.erase(path) != 0; }
   bool rename(const char* from, const char* to) {
@@ -94,11 +98,23 @@ class HalStorage {
   }
   FsFile open(const char* path, int mode = 0) {
     FsFile file;
-    if (mode)
+    if (mode & O_APPEND) {
+      if (!failBookmarkWriteOpen) file.attach(&files[path], true);
+    } else if (mode)
       openFileForWrite("test", path, file);
     else
       openFileForRead("test", path, file);
     return file;
+  }
+  bool removeDir(const char* directory) {
+    const std::string prefix = std::string(directory) + "/";
+    for (auto it = files.begin(); it != files.end();) {
+      if (it->first == directory || it->first.starts_with(prefix))
+        it = files.erase(it);
+      else
+        ++it;
+    }
+    return true;
   }
   bool openFileForRead(const char*, const std::string& path, FsFile& file) {
     auto it = files.find(path);

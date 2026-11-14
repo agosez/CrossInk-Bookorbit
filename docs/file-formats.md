@@ -123,6 +123,11 @@ layout may shift the destination page.
 
 ## `/.crosspoint/home_carousel_cache_<index>.bin`
 
+### Version 7
+
+Lift the carousel artwork to leave room for the reading details above the menu.
+Version 6 snapshots rebuild automatically; the binary layout is unchanged.
+
 ### Version 6
 
 The v1.6.1 release normalizes development version 8 to version 6, one step
@@ -150,6 +155,16 @@ and contains numeric hinting, raster, interpreter, weight, and slant choices plu
 the stem-darkening toggle. Missing families use automatic hinting, grayscale
 output, the default interpreter, and no outline adjustments. The file currently
 keeps at most 24 modified family profiles to bound RAM use while settings are open.
+
+## `/.crosspoint/sleep_<hash>.bmp`
+
+Custom sleep images are converted to native 1-bit or 2-bit BMPs using the selected
+Fit/Crop mode. The rebuildable cache key includes the source path, a streamed
+content fingerprint, runtime screen dimensions, sizing mode, tone profile and
+conversion version. The source is read once on each use to detect replacements
+even when FAT timestamps and file sizes are unchanged on devices without a clock. Conversion writes a temporary `.bmp.tmp` file and renames it
+only after a successful close. Removing these files forces conversion on next use.
+No EPUB cache reset is needed.
 
 ## `/.crosspoint/sleep-image-index/<directory-hash>-{bmp,all}.idx`
 
@@ -246,6 +261,16 @@ fresh deck. Deleting `/.crosspoint/sleep-image-index/` resets indexes and decks.
 
 ## `/.crosspoint/library.idx`
 
+### Version 9
+
+Version 9 keeps the release version 7 and development version 8 layout and
+rebuilds the Library index to exclude
+root resource folders (`fonts`, `dictionaries`, `plugins`, `sleep`, and
+`sleep-overlay`) case-insensitively. Nested folders with those names remain
+indexable. Versions 7 and 8 remain readable for reconciliation to preserve
+arrival order and reuse metadata; no source files are removed. Version 8 is
+reserved for the earlier development scan policy so those indexes also rebuild.
+
 ### Version 7 (2.0.0)
 
 The release normalizes development versions 7–8 to one step after v1.6.1's
@@ -254,7 +279,9 @@ and `System Volume Information` directories regardless of FAT name casing,
 and reparse EPUB3 series refinements by collection ID. Version 6 remains
 readable for reconciliation, preserving first-seen history. The metadata
 cache also advances from version 1 to 2 so stale series cannot be restored.
-Rebuilding never deletes source books or system directories.
+Development version 8 has the same layout and is also accepted for
+reconciliation only, preserving its first-seen history while rebuilding to
+release version 7. Rebuilding never deletes source books or system directories.
 
 ### Version 6
 
@@ -766,7 +793,7 @@ the replacement has the same file size. No binary format version changes.
 
 ## `/.crosspoint/clippings/<bookType>_<contentHash>.bin`
 
-### Versions 1-5
+### Versions 1-7
 
 Clipping files store the per-book EPUB clipping list used by the reader. A
 saved clipping is also what CrossInk renders as an in-reader highlight; there is
@@ -791,7 +818,7 @@ cannot be read. The same applies to bookmark files under
 
 Binary layout:
 
-- `[0]` version (`1`, `2`, `3`, `4`, `5`, or current version `6`)
+- `[0]` version (`1`, `2`, `3`, `4`, `5`, `6`, or current version `7`)
 - `[1-2]` clipping count (`uint16_t` LE, maximum `256`)
 - book title (`String`)
 - book author (`String`)
@@ -810,17 +837,20 @@ Binary layout:
   - `paragraphIndex` (`uint16_t` LE, `UINT16_MAX` when unavailable)
   - `timestamp` (`uint32_t` LE, Unix UTC seconds; `0` when no valid clock is
     available; older records may contain boot-relative seconds)
-  - versions 3–6: reader layout signature (`uint32_t` LE; font, spacing,
+  - versions 3–7: reader layout signature (`uint32_t` LE; font, spacing,
     viewport, and other section-layout inputs)
-  - versions 4–6: table selection (`uint16_t` LE; `UINT16_MAX` for non-table text)
+  - versions 4–7: table selection (`uint16_t` LE; `UINT16_MAX` for non-table text)
+  - version 7: `sourceStart`, `sourceEnd` (`uint32_t` LE each), a half-open
+    source character range; both `UINT32_MAX` when not yet known. The pair
+    `UINT32_MAX, 0` blocks whole-word migration for an ambiguous subword range
   - version 5: server clipping ID (`String`, maximum 64 bytes; empty for a
     local selection that has never been prepared for upload), then a local
     upload marker (`uint8_t`, `0` or `1`; imported records retain `0`)
-  - version 6 uses the same ID and flag fields. Bit 0 marks a local upload and bit 1 indicates a 16-byte scope prefix on the stored ID.
+  - versions 6–7 use the same ID and flag fields. Bit 0 marks a local upload and bit 1 indicates a 16-byte scope prefix on the stored ID.
   - `chapterTitle` (`char[48]`, null-terminated/truncated)
   - version 1: selected text (`String`; legacy files were written with a
     `512`-byte in-app limit)
-  - versions 2–6: selected-text length (`uint16_t` LE) followed by that many
+  - versions 2–7: selected-text length (`uint16_t` LE) followed by that many
     UTF-8 bytes (the current in-app limit is `4096` bytes, defined by
     `CLIPPING_TEXT_MAX`; builds with a smaller historical cap treat a longer
     record as corrupt on read, so downgrading loses long highlights)
@@ -830,18 +860,34 @@ The clipping selector has a separate navigation bound: it exposes at most
 selection window for low-memory devices, not a character-count limit. The
 selected text is still stored separately and is limited to `4096` UTF-8 bytes.
 
-CrossInk uses the stored spine/page/paragraph fields as anchors, then searches
-near that location for the stored clipping text after relayout. This is similar
-to keeping both a DOM position and a text quote in a web app: the numeric
-position gives a fast starting point, while the text makes jumps and highlights
-survive font, layout, or page-count changes when possible.
+Version 7 adds stable source ranges: zero-based Unicode codepoint positions in
+that spine item's decoded body text. Head/style/script/title and ruby fallback
+`rp` text do not count; CSS-hidden body text and ruby annotations do count.
+Synthetic list markers and layout-inserted hyphens do not consume source
+positions. NFC composition, removed soft hyphens/BOMs, and hidden inline runs
+retain their original source character counts. Compact low-memory table tokens
+with hidden inline gaps keep unknown coordinates rather than guessing them.
+Rendered words retain these ranges through wrapping, bidi reordering, reading
+aids, and both complete and partial page caches. Highlight rendering checks
+source-range overlap, so matching phrases elsewhere cannot acquire a marker.
+Clipping jumps verify source ranges in a bounded neighborhood of the estimated
+page. The older visible-text progress coordinate remains separate and unchanged.
 
-Version 3 records which reader layout produced the numeric page/word anchor.
-When that signature differs, CrossInk ignores the stale numeric range and
-matches the saved text instead, including when both layouts happen to have the
-same total page count. Legacy records without a layout signature use text
-matching rather than trusting ambiguous numeric ranges. Version 4 adds the
-table selection field; versions 1-3 remain readable.
+Versions 1–6 remain readable and rewrite as version 7 without discarding text,
+IDs, or deletion scopes. An old clipping can gain source endpoints when its
+saved page/word coordinates and layout signature are still verifiable, and
+streamed comparisons confirm that the saved quote contains the complete outer
+words. Simple dictionary subword selections use their exact character bounds;
+interior bounds in a composed/stripped token without an exact map remain
+unresolved instead of expanding onto neighboring text. Endpoints
+are collected in memory and saved at the existing store save/unload boundary.
+Ambiguous old layouts do not trigger text-based highlight guessing; restoring
+the original layout and visiting the selected pages enables this migration.
+Legacy clipping jumps can still use nearby quote searches.
+
+The two new fields cost eight bytes per clipping record (up to 2 KiB for 256
+records). Word source ranges share each rendered line's existing arena, at eight
+bytes per word, and selection metadata carries the same two integers.
 
 Version 6 binds each selection to its server, account and document when first
 prepared for upload or imported. A new local selection gets a random 128-bit
@@ -856,6 +902,10 @@ multiple old selections share that ID, the first keeps it and the others get
 new IDs. An unscoped v5 import can be bound by a matching live ID and passage.
 V5 deletion records contain no destination, so upgrading skips these entries.
 A remote highlight deleted offline before the upgrade may reappear on replay.
+
+Version 7 exchanges stable ranges through the existing optional `start_offset`
+and `end_offset` API fields, preserving source positions across devices without
+trusting another device's page layout. Missing offsets remain unknown.
 
 Two-way sync exchanges these per-book records, including tombstones, through
 `/api/v1/clippings/:document?cursor=…&limit=1&format=reader`. The v2 revision
@@ -921,22 +971,103 @@ save writes both homes (each skips an unchanged position); on read, the further 
 two positions wins, so the content-keyed copy follows the book through moves and renames
 while the path-keyed one keeps stock CrossInk working after a firmware swap.
 
+## Reading-stat device ownership
+
+Reading stats now use device-qualified paths. The qualifier is the same hardware
+identity used by stats uploads: `crossink-` followed by the twelve lowercase hex
+MAC digits. Only the current reader's paths are read, updated, reset, or uploaded:
+
+- `/.crosspoint/global_stats_<reader>.bin` (and `.bak`/`.tmp`).
+- Per-book `stats_v7_<reader>.bin`, older versioned variants, and
+  `stats_<reader>.bin` inside the book cache directory.
+- `/.crosspoint/daily_reading_<reader>/` for daily counters.
+- `/.crosspoint/reading_sessions_<reader>/` for the session outbox.
+
+Ownership is carried by the path, including when just one device-qualified file is copied.
+Copied files remain stored for their original reader; the receiving reader starts
+its own local counters. This prevents stale copied totals from replacing or
+adding to the original reader's totals on the server. Foreign pending sessions
+are retained rather than uploaded under the receiving reader's identity.
+
+For pre-ownership firmware, `stats_origin.bin` records the legacy owner at the
+`.crosspoint` root, and in a book cache when its legacy stats are encountered.
+Its SyncFiles payload is version 1 (`uint8_t`) followed by the zero-padded
+32-byte reader ID and the standard trailing CRC32. The root claim protects legacy
+books not opened yet; the per-book claim also survives a cache-folder-only copy.
+Claims are committed before moving legacy files. The owner migrates primary,
+backup, and temporary files by rename, or the whole daily/outbox directory.
+An incomplete initial claim can retry before any legacy file has moved; read
+errors and corrupt published claims remain protected. A failed or conflicting
+migration blocks further stats writes until restart so
+an empty failed load cannot overwrite recovered history. Cache cleanup preserves
+all device-qualified stats and origin records; if the bounded preservation list
+is full, cleanup fails before removing files.
+
+Upgrade and open a book on the original reader before copying its card to another
+reader. Old files copied before ownership was recorded cannot be attributed
+reliably; their first upgraded reader claims them. This migration does not repair
+existing duplicated server totals. Keep both slots and origin files in backups.
+No EPUB layout-cache reset is required. Reset-aware uploads described below
+require an updated Sync server.
+
 ## Reading-stat save slots
 
-Local `global_stats.bin` and per-book `stats_v6.bin` use the same alternating
-primary/`.bak` policy. Their existing payloads remain 159 and 75 bytes,
+Local `global_stats.bin` (version 4) and per-book `stats_v7.bin` use the same alternating
+primary/`.bak` policy. Their payloads are 175 and 91 bytes,
 respectively; each slot appends a 4-byte sequence and a 4-byte IEEE CRC-32 of
-the payload plus sequence. Thus stored records are 167 and 83 bytes. Readers
+the payload plus sequence. Thus stored records are 183 and 99 bytes. Readers
 validate the entire record before choosing its sequence. The first migration
 preserves the legacy primary. Previous per-book versions and recoverable
 legacy `.tmp` files are still accepted by the migration loader.
 
-Nearby sharing and stats backups export the original payload without the slot
-trailer, preserving their wire/file contracts. Both local slots must be included
-in raw SD backups. Older firmware may not understand the new local envelopes;
-use exported stats backups when transferring to an older version. Reset deletes
+Nearby sharing and stats backups export the payload without the slot trailer.
+Updated readers can read older global payloads, including version 3; older readers
+cannot read the new version 4 payload. Both local slots must be included
+in raw SD backups. Reset deletes
 older per-book fallback files before deleting the newest slot. Global reset
 writes an empty newest snapshot through the same interruption-safe save path.
+
+### Counter identities
+
+Global version 4 appends a 16-byte opaque counter identity at offsets 159–174
+to the version 3 layout. Per-book version 7 appends the same field at offsets
+75–90 to version 6. Older supported payloads use sixteen zero bytes, the reserved
+legacy identity. Upgrading a populated snapshot keeps that identity; a missing
+snapshot or explicit local reset creates a fresh random identity. The ID and
+counters are committed in the same checksum-protected slot. Keep the ID when
+copying/restoring a snapshot; do not assign a fresh ID to existing totals.
+
+Daily counters have their own identity because global/book resets do not reset
+daily history. `daily_reading_<reader>/counter_id.bin` has SyncFiles payload
+`u8 version=1`, 16 identity bytes and CRC32 (21 bytes total). It is immutable and
+published before daily records. Existing nonempty directories without an ID
+adopt the zero legacy identity. Unreadable, corrupt or newer markers block daily
+recording/upload rather than inventing another identity for the same history.
+Monthly counter payloads remain version 2 and their sequence field is unrelated
+to the counter identity. Include this marker in daily-directory backups.
+
+Uploads retain the hardware `device_id` and send `counter_id` as 32 lowercase
+hex digits on each snapshot and each daily item. New firmware writes through
+`/api/v1/stats/counters/global` and `/api/v1/stats/counters/books`, requiring
+`counter_ids: 1` in acknowledgments. There is no fallback to legacy write URLs:
+an old server cannot silently overwrite history after dropping an unknown ID.
+The server combines lifetimes within each hardware reader, protects counters
+against stale retries, and preserves separate daily lifetimes across card resets.
+It does not download these combined totals into local upload counters.
+
+Each book/global stats instance grows by 16 bytes. Daily identity caching uses
+16 bytes plus a readiness flag; the two-slot scratch buffers grow by 32 bytes
+in total. Upload buffers remain fixed at 1536 bytes, with a 33-byte stack buffer
+for hex serialization and no new device heap allocation for identities.
+The optional nearby-sharing activity also grows by 144 bytes (eight queued
+snapshots and its local export); its existing activity allocation gate is unchanged.
+
+## `stats_v7.bin`
+
+Version 7 is version 6 plus the 16-byte counter ID at offsets 75–90. Its total
+payload size is 91 bytes. Reads retain version 6 checksum slots and all supported
+older migration sources. Saves write version 7; reset publishes an empty version
+7 snapshot with a new ID after removing fallback sources. EPUB caches are unchanged.
 
 ## `stats_v6.bin`
 
@@ -1313,6 +1444,50 @@ Images regenerate as needed; this does not change book paths, bookmarks,
 clippings, progress or statistics. The PXC byte layout itself is unchanged.
 
 ## `section.bin`
+
+### Version 108 (current development)
+
+Complete caches use `108` and suspended partial caches use `0xDD`. Both rebuild
+automatically because runtime TrueType/OpenType advances no longer round up
+before the final pixel snap, which can change line breaks and word positions.
+The scalable-font adapter revision advances to `10` so built-in and SD outline
+font identities also reflect the changed metrics. Kerning, bitmap fonts and
+`.cpfont` metrics are unchanged. The binary payload, book metadata and saved
+reading progress are preserved.
+
+### Version 107
+
+Complete caches use `107` and suspended partial caches use `0xDC`. Both rebuild
+to apply publisher spacing and subtitle alignment in chapter heading groups.
+The binary payload is unchanged.
+
+### Version 106
+
+The post-RC development cache revisions are retained when merging the release
+branch, so the first 2.0.0 RC's `84` / `0xC5` caches cannot bypass the newer
+layout fixes below. CSS rules use the release-normalized revision `21`.
+
+Complete caches use `106`; suspended partial caches use `0xDB`. Each TextBlock
+header adds `u8 sourceRangesPresent` after `wordSizesPresent`, before
+`characterSpacing`. When present, the existing arena starts with one pair of
+`u32 sourceStart, sourceEnd` per word, before its 16-bit arrays. Equal endpoints
+represent synthetic text; both `UINT32_MAX` represent unavailable coordinates.
+Old complete and partial caches rebuild automatically to supply stable clipping
+anchors; saved clippings live separately and are retained.
+
+### Version 105
+
+Complete caches use `105`; suspended partial caches use `0xDA`. CSS rules now
+remain active below 48 KiB free heap. Both cache types rebuild automatically
+so layouts previously cached without styles are corrected. The binary payload
+is unchanged and reading progress is preserved.
+
+### Version 104
+
+Complete caches use `104`; suspended partial caches use `0xD9`. Chapter-wrapper
+closing spacing now stays above the first body paragraph instead of leaking
+below it. Both cache types rebuild automatically; the binary payload is
+unchanged and reading progress is preserved.
 
 ### Version 84 (2.0.0)
 
@@ -2050,6 +2225,10 @@ buffer; it marks that counter uploaded only after `accepted_daily: 1`. Old serve
 can still accept aggregate stats, but cannot silently discard daily history and
 acknowledge it. Failed requests remain eligible for retry, including recovered
 `.tmp`/`.bak` records. Nearby-device snapshots are never uploaded as local history.
+The global `history_b64` bitmap carries read-day flags only: it must not replace
+existing page estimates or measured daily time on the server. A missing `daily`
+field means no daily measurements in that request, not zero time for its flagged
+dates. Old aggregate totals cannot recover unknown historical daily durations.
 
 ## Internal language cache (v1)
 
@@ -2264,3 +2443,28 @@ Existing v1/v2 files are preserved as `/battery_log_v1.csv` or
 `/battery_log_v2.csv`, adding a numbered suffix if needed. Unknown headers are
 left untouched. Appending stops at the existing 128 KiB cap. RTC estimate state
 is versioned and validated in retained RAM; it adds no SD/NVS file format.
+
+### Temporary bulk-sync preparation
+
+`/.crosspoint/sync-prepared/` holds disposable version-1 records for one explicit Sync Books/Folder run. It is cleared before preparation and when the activity finishes. A path-CRC filename is checked against the full stored book path. Each record uses the SyncFiles trailing CRC, starts with a version byte and path string16, then the saved spine/page/page-count (u16), visible offset (u32), offset-present byte, document/XPath strings16, percentage (float), device string16, and optional metadata. Metadata has a presence byte, filename/title/authors/ISBN/ASIN/series strings16, and optional series index (presence byte plus float). Reading validates the saved-position fields against current progress; these files never replace pending flags or acknowledge an upload.
+
+Clipping uploads use `/.crosspoint/clipping-sync/upload.tmp` as a disposable JSON body. It is fully written and closed before TLS, read in bounded chunks, and removed on every exit. Existing persistent progress and clipping formats are unchanged.
+
+## Sync diagnostic logs
+
+`/.crossink/sync.log` on the SD card records foreground sync request outcomes. Each line contains Unix UTC seconds, uptime in milliseconds, the HTTP method, a redacted API route, the HTTP status (0 before a response; negative for transport errors), and a fixed outcome label. UTC may be unset before the reader synchronizes its clock; uptime still orders the events within that boot. Credentials, server addresses, request/response bodies, book names, document IDs, and reading content are excluded.
+
+The current log rotates before exceeding 64 KiB to `/.crossink/sync.previous.log`, replacing the older backup. Both files can be copied from the card, or downloaded in the File Transfer web portal after enabling Show Hidden Files and opening `.crossink`. There is no cache format change or cache reset requirement. A missing/full/read-only SD card can prevent logging; this does not change the sync result.
+
+## Device screen calibration (NVS)
+
+Namespace `screen-cal`, key `bounds`, stored on the device rather than SD.
+Version 2 is ten bytes: `S`, `C`, version (`2`), four portrait edge insets
+(top/right/bottom/left, 0–32 pixels), top and bottom portrait corner clearances
+(0–96 pixels each), then XOR of the preceding nine bytes. Corner clearances
+set horizontal bounds for status bars and headers; they do not move the bars
+vertically or shrink the reading viewport. They rotate with the physical corners.
+Save writes all six values together; Reset and Cancel only affect the working
+copy until Save. Eight-byte version 1 records retain their four edges and inherit
+the device's default corner clearances; the next saved adjustment writes version 2.
+Older firmware does not understand version 2 and falls back to its defaults.

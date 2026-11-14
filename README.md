@@ -2,7 +2,7 @@
 
 Everything else — fonts, themes, reader features, reading stats, controls, the web server — comes from CrossInk unchanged, with one exception: KOReader Sync is removed to make room (see below). See the [upstream README](https://github.com/uxjulia/CrossInk#readme) for those, and the [docs](./docs/) folder in this repository for the detailed guides.
 
-**Note**: this fork publishes releases for the Xteink X3, X4, X4 Pro and X4 Classic, the Seeed reTerminal Sticky and the BOOX Picco.
+**Note**: this fork publishes releases for the Xteink X3, X4, X4 Pro and X4 Classic, the Seeed reTerminal Sticky, the BOOX Picco and the EEGO Reader A4.
 
 ---
 
@@ -16,6 +16,7 @@ Everything else — fonts, themes, reader features, reading stats, controls, the
 - **Reading statistics pushed to BookOrbit** — your reading time, streaks and pace on the server's dashboard, fed by the pages you turn on the device.
 - **A working clock on the X4** — the status-bar clock, which upstream can only show on hardware that has a clock chip, plus an opt-in mode that keeps the time running through sleep.
 - **KOReader Sync is removed** — CrossInk v2.0.0 renamed it Sync Server and added reading-stats and clippings sync to it; its screens, settings, shortcut and sync actions (Sync Book, Sync Folder, Sync Books) are gone. The X3/X4 firmware gets a 6.5 MB partition, and this fork's BookOrbit layer plus CrossInk's own growth stopped fitting in it; dropping the second sync provider is what buys the room. Credentials already saved on the SD card are left alone: an account set up before the removal keeps the sync actions, but cannot be changed on the device.
+- **No OPDS browser on the X3 and X4** — CrossInk v2.0.0's later changes no longer fit in that same partition alongside BookOrbit, so the X3/X4 firmware leaves out the OPDS browser, its settings and its web settings section; the BookOrbit catalog covers the same need. Saved OPDS servers stay on the SD card. The X4 Pro, X4 Classic, Sticky, Picco and EEGO A4 keep OPDS.
 
 BookOrbit exposes a KOReader-compatible sync API, so this fork talks to it the same way the official BookOrbit KOReader plugin does. Your BookOrbit server must be recent enough to serve the KOReader plugin endpoints under `{server}/api/v1/koreader` — including `plugin/catalog/*` for the catalog browser and `plugin/annotations/*` / `plugin/bookmarks/*` for highlight and bookmark sync (servers without those are detected, and the missing steps are simply skipped).
 

@@ -15,7 +15,8 @@ enum class NetworkBootTarget : uint32_t {
   FILE_TRANSFER = 6,
   MANAGE_FONTS = 7,
   DOWNLOAD_ASSETS = 8,
-  // This fork's targets start at 32 so that upstream's next targets (9, 10, ...)
+  PLUGINS = 9,
+  // This fork's targets start at 32 so that upstream's next targets (10, 11, ...)
   // never take their numbers. A target only lives in RTC memory across one
   // restart, never on the SD card, so the numbers can move between versions.
   BOOKORBIT_SYNC = 32,
@@ -66,6 +67,7 @@ constexpr bool isNetworkBootTargetValue(const uint32_t value) {
     case NetworkBootTarget::FILE_TRANSFER:
     case NetworkBootTarget::MANAGE_FONTS:
     case NetworkBootTarget::DOWNLOAD_ASSETS:
+    case NetworkBootTarget::PLUGINS:
     case NetworkBootTarget::BOOKORBIT_SYNC:
     case NetworkBootTarget::BOOKORBIT_SLEEP_SYNC:
     case NetworkBootTarget::BOOKORBIT_DOWNLOAD:
@@ -83,6 +85,7 @@ static_assert(isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::FILE_TRANSFER)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::MANAGE_FONTS)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::DOWNLOAD_ASSETS)) &&
+                  isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::PLUGINS)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SYNC)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_SLEEP_SYNC)) &&
                   isNetworkBootTargetValue(static_cast<uint32_t>(NetworkBootTarget::BOOKORBIT_DOWNLOAD)) &&

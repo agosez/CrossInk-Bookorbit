@@ -23,14 +23,23 @@ class SdCardFontSystem {
   SdCardFontSystem() = default;
   SdCardFontSystem(const SdCardFontSystem&) = delete;
   SdCardFontSystem& operator=(const SdCardFontSystem&) = delete;
-  /// Register the font resolver. On scalable-font devices, defer all reader
-  /// font loading until the reader or a font preview requests it.
-  void begin(GfxRenderer& renderer);
+  /// Register the font resolver even on minimal network boots. Set
+  /// loadReaderFont=false to skip font loading and discovery on every device.
+  /// Scalable-font devices always defer loading until the reader requests it.
+  void begin(GfxRenderer& renderer, bool loadReaderFont = true);
 
   /// Ensure the correct SD font family is loaded for the current settings.
   /// Call before entering the reader or after settings change.
   /// Also re-discovers if the registry has been marked dirty (e.g. by web upload).
   void ensureLoaded(GfxRenderer& renderer);
+
+  // Book-level bitmap size preferences, in 1/256 em. Font loading and cache
+  // identities are settled before layout; dictionary return reuses these hints.
+  void setContentSizeScales(std::array<uint16_t, 2> scales) {
+    if (manager_.setContentSizeScales(scales) &&
+        !manager_.hasResidentScalableFamily(manager_.currentFamilyName().c_str()))
+      fontReloadPending_ = true;
+  }
 
   /// Prepare the selected built-in family before using it as a reader fallback.
   int ensureBuiltInReaderFont(GfxRenderer& renderer);

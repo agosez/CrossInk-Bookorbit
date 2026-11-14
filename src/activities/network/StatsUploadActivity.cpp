@@ -5,6 +5,7 @@
 #include <I18n.h>
 #include <KOReaderCredentialStore.h>
 #include <Memory.h>
+#include <SyncLog.h>
 #include <TrustedTime.h>
 #include <WiFi.h>
 #include <Xtc.h>
@@ -29,6 +30,7 @@
 #include "network/ReadingSyncUpload.h"
 #include "network/WifiUtils.h"
 #include "sync/BookSyncFile.h"
+#include "sync/PreparedProgress.h"
 #include "sync/SyncIds.h"
 #include "sync/SyncParked.h"
 #include "sync/SyncState.h"
@@ -53,19 +55,27 @@ void StatsUploadActivity::onEnter() {
 }
 
 void StatsUploadActivity::closeTransfer() {
+  if (preparationOwned) {
+    PreparedProgress::clear();
+    preparationOwned = false;
+  }
   folderBooks.reset();
   // Unsent positions keep their pending bits for the next sync.
-  std::vector<KOReaderProgress>().swap(progressBatch);
-  std::vector<std::string>().swap(progressBatchPaths);
-  batch = StatsUploadPayload::BookBatch{nullptr, 0};
-  batchBuffer.reset();
-  batchPaths.clear();
+  releaseBatchBuffers();
   pending.end();
   if (ownsWifi) {
     WiFi.disconnect(false);
     WiFi.mode(WIFI_OFF);
     ownsWifi = false;
   }
+}
+
+void StatsUploadActivity::releaseBatchBuffers() {
+  std::vector<KOReaderProgress>().swap(progressBatch);
+  std::vector<std::string>().swap(progressBatchPaths);
+  batch = StatsUploadPayload::BookBatch{nullptr, 0};
+  batchBuffer.reset();
+  std::vector<std::string>().swap(batchPaths);
 }
 
 void StatsUploadActivity::onExit() {
@@ -131,6 +141,7 @@ const char* StatsUploadActivity::title() const {
 }
 
 void StatsUploadActivity::fail(const char* text) {
+  SyncLog::record("SYNC", "sync", 0, "sync-stopped");
   LOG_ERR("StatsSync", "Upload stopped: %s", text);
   {
     RenderLock lock(*this);
@@ -143,13 +154,35 @@ void StatsUploadActivity::fail(const char* text) {
 
 void StatsUploadActivity::failBook(const std::string& bookPath, const uint8_t failedParts, std::string reason,
                                    std::string title) {
+  SyncLog::record("SYNC", "sync", 0, "book-incomplete");
   LOG_ERR("StatsSync", "Book sync failed (parts 0x%x): %s %s", failedParts, bookPath.c_str(), reason.c_str());
   RenderLock lock(*this);
   ++failed;
-  // Reserved at start; past the cap the book is only counted.
-  if (failures.size() >= MAX_FAILURE_DETAILS) return;
-  failures.push_back(
-      {title.empty() ? ReadingSyncUpload::displayName(bookPath) : std::move(title), failedParts, std::move(reason)});
+  // FNV-1a over the full path: identical titles in different folders stay separate.
+  uint64_t pathKey = 14695981039346656037ULL;
+  for (const unsigned char byte : bookPath) {
+    pathKey ^= byte;
+    pathKey *= 1099511628211ULL;
+  }
+  for (auto& failure : failures) {
+    if (failure.pathKey != pathKey) continue;
+    failure.parts |= failedParts;
+    // Keep distinct reasons from later steps, with a bounded summary string.
+    // Full request outcomes remain in the rotated sync log.
+    if (!reason.empty() && failure.reason.find(reason) == std::string::npos &&
+        failure.reason.size() + reason.size() + 2 <= 256) {
+      if (!failure.reason.empty()) failure.reason += "; ";
+      failure.reason += reason;
+    }
+    return;
+  }
+  // Only these bounded rows retain identities; the scalar counts attempts.
+  if (failures.size() >= MAX_FAILURE_DETAILS) {
+    ++omittedFailureDetails;
+    return;
+  }
+  failures.push_back({pathKey, title.empty() ? ReadingSyncUpload::displayName(bookPath) : std::move(title), failedParts,
+                      std::move(reason)});
 }
 
 void StatsUploadActivity::setCurrentBook(const std::string& bookPath) {
@@ -204,6 +237,86 @@ bool StatsUploadActivity::startTargeted(const bool stats) {
 }
 
 void StatsUploadActivity::start() {
+  if (scope != Scope::Library && scope != Scope::Folder) {
+    startTransfer();
+    return;
+  }
+  // The explicit sync owns the radio while preparing, including entry from File Transfer.
+  WiFi.disconnect(false);
+  WiFi.mode(WIFI_OFF);
+  ownsWifi = true;
+  if (!PreparedProgress::begin()) {
+    fail(tr(STR_SYNC_FAILED_MSG));
+    return;
+  }
+  preparationOwned = true;
+  SyncScope known;
+  preparationPendingOnly = KOREADER_STORE.getServerSupport() == SyncServerSupport::SUPPORTED &&
+                           SyncState::findPreparedCovering(scopePath(), known);
+  if (preparationPendingOnly) {
+    if (!pending.begin()) {
+      fail(tr(STR_SYNC_FAILED_MSG));
+      return;
+    }
+  } else {
+    folderBooks = makeUniqueNoThrow<FolderBookIterator>(scopePath());
+    if (!folderBooks) {
+      fail(tr(STR_KOREADER_SYNC_LOW_MEMORY));
+      return;
+    }
+  }
+  {
+    RenderLock lock(*this);
+    state = State::Preparing;
+  }
+  LOG_INF("SyncPrep", "Preparing %s before WiFi", scopePath().c_str());
+  requestUpdate();
+}
+
+void StatsUploadActivity::prepareNext() {
+  std::string book;
+  bool done = false, error = false;
+  if (preparationPendingOnly) {
+    uint8_t mask = 0;
+    const auto step = pending.next(book, mask);
+    done = step == SyncPending::Cursor::Step::Done;
+    error = step == SyncPending::Cursor::Step::Error;
+    if (!done && !error && (!(mask & SyncPending::PROGRESS_BIT) || !SyncScope{scopePath()}.covers(book))) return;
+  } else {
+    const auto step = folderBooks->next(book);
+    if (step == FolderBookIterator::Result::Entry) return;
+    done = step == FolderBookIterator::Result::Done;
+    error = step == FolderBookIterator::Result::Error;
+  }
+  if (error) {
+    fail(tr(STR_SYNC_FAILED_MSG));
+    return;
+  }
+  if (done) {
+    folderBooks.reset();
+    pending.end();
+    {
+      RenderLock lock(*this);
+      currentBook.clear();
+    }
+    startTransfer();
+    return;
+  }
+  if (!FsHelpers::hasEpubExtension(book) || !hasUsableSavedPosition(book)) return;
+  setCurrentBook(book);
+  if (requestUpdateAndWait() != RequestUpdateResult::Rendered) {
+    fail(tr(STR_SYNC_FAILED_MSG));
+    return;
+  }
+  {
+    RenderLock lock(*this);
+    GfxRenderer::FrameBufferLoan loan(renderer);
+    if (!ReadingSyncUpload::stageProgress(book)) LOG_ERR("SyncPrep", "Preparation failed: %s", book.c_str());
+  }
+  requestUpdate(true);
+}
+
+void StatsUploadActivity::startTransfer() {
   // Created before any catch-up can be recorded as done (see SyncPending::ensureExists).
   SyncPending::ensureExists();
   // Small and bounded, reserved now so a failure late in a low-memory run
@@ -232,18 +345,7 @@ void StatsUploadActivity::start() {
     }
   } else if (scope == Scope::Folder || scope == Scope::Library) {
     // Planned once connected (reading a scope's starting cursor is a request).
-    // Stats batching is shared by scope catch-ups and the push.
-    batchBuffer = makeUniqueNoThrow<char[]>(STATS_BATCH_CAPACITY);
-    if (!batchBuffer) {
-      fail(tr(STR_KOREADER_SYNC_LOW_MEMORY));
-      return;
-    }
-    batchPaths.reserve(StatsUploadPayload::BookBatch::MAX_ITEMS);
-    batch = StatsUploadPayload::BookBatch{batchBuffer.get(), STATS_BATCH_CAPACITY};
-    if (!StatsUploadClient::deviceId(deviceId, sizeof(deviceId)) || !batch.begin(deviceId)) {
-      fail(tr(STR_SYNC_FAILED_MSG));
-      return;
-    }
+    // Allocate the stats batch only when an actual batched stats phase needs it.
     flow = Flow::Unplanned;
   }
   if (!hasActiveStationWifiConnection()) {
@@ -328,11 +430,13 @@ void StatsUploadActivity::finishUpload() {
     }
     if (stats || clippings) syncState.save();
   }
+  const bool incomplete = failed || statsFailed || clippingsFailed || StatsUploadClient::failed(globalResult);
+  SyncLog::record("SYNC", "sync", 0, incomplete ? "incomplete" : "complete");
   closeTransfer();
   {
     RenderLock lock(*this);
     state = State::Done;
-    message = tr(STR_DONE);
+    message = incomplete ? tr(STR_SYNC_FAILED_MSG) : tr(STR_DONE);
   }
   requestUpdate();
 }
@@ -491,6 +595,16 @@ void StatsUploadActivity::advanceFlow() {
     phase = Phase::Pending;
     progressTotal = countPendingInScope();
     if (!pending.begin()) fail(tr(STR_SYNC_FAILED_MSG));
+  } else if (flow < Flow::PushClippings && KOREADER_STORE.getSyncClippings()) {
+    // Pending clippings need their own TLS connections and may load a full
+    // book index. Finish the other uploads before releasing their buffers.
+    flushBookStats();
+    releaseBatchBuffers();
+    flow = Flow::PushClippings;
+    phase = Phase::Pending;
+    progressTotal = countPendingInScope();
+    LOG_INF("StatsSync", "Pending clippings: free=%u maxAlloc=%u", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    if (!pending.begin()) fail(tr(STR_SYNC_FAILED_MSG));
   } else {
     flushBookStats();
     flow = Flow::Done;
@@ -534,7 +648,7 @@ void StatsUploadActivity::finishFirstWalk() {
     // the rest. A book that fails again (corrupt, needs re-optimizing) must
     // not hold the scope back forever; one whose remote position was fetched
     // has it parked, so the push still compares instead of overwriting.
-    LOG_INF("StatsSync", "First walk of %s left %u book(s) unsynced; resuming next time", syncScope.path.c_str(),
+    LOG_INF("StatsSync", "First walk of %s had %u failed attempt(s); resuming next time", syncScope.path.c_str(),
             static_cast<unsigned>(failed));
     return;
   }
@@ -613,7 +727,7 @@ void StatsUploadActivity::walkStep() {
     // XTC has no KOReader position: its saved stats are the whole sync.
     bool sent = false;
     if (!uploadBookExtras(bookPath, &sent)) {
-      failBook(bookPath, extrasFailedParts, extrasFailureReason ? extrasFailureReason : "");
+      failBook(bookPath, extrasFailedParts, extrasFailureReason);
       requestUpdate();
       return;
     }
@@ -809,7 +923,7 @@ bool StatsUploadActivity::pushProgress(const std::string& bookPath) {
     return true;
   }
   KOReaderProgress progress;
-  if (!ReadingSyncUpload::prepareProgress(bookPath, progress)) {
+  if (!ReadingSyncUpload::loadPreparedProgress(bookPath, progress)) {
     if (hasUsableSavedPosition(bookPath)) {
       // Allocation, load or mapping failed: keep the bit for the next sync.
       failBook(bookPath, SyncPending::PROGRESS_BIT);
@@ -850,7 +964,7 @@ void StatsUploadActivity::flushProgressBatch() {
       KOReaderProgress progress;
       if (i < progressBatch.size()) {
         progress = std::move(progressBatch[i]);
-      } else if (!ReadingSyncUpload::prepareProgress(bookPath, progress)) {
+      } else if (!ReadingSyncUpload::loadPreparedProgress(bookPath, progress)) {
         failBook(bookPath, SyncPending::PROGRESS_BIT);
         continue;
       }
@@ -900,6 +1014,7 @@ void StatsUploadActivity::pushStep() {
     RenderLock lock(*this);
     ++progressDone;
   }
+  if (flow == Flow::PushClippings && !(mask & SyncPending::CLIPPINGS_BIT)) return;
   if (!Storage.exists(bookPath.c_str())) {
     // Renamed or deleted on a computer. The book's next local change re-adds it.
     LOG_INF("StatsSync", "Dropping pending entry for missing book: %s", bookPath.c_str());
@@ -908,10 +1023,13 @@ void StatsUploadActivity::pushStep() {
   }
   setCurrentBook(bookPath);
   if (requestUpdateAndWait() != RequestUpdateResult::Rendered) LOG_ERR("StatsSync", "Cannot render push screen");
-  // Stats and clippings first: a parked comparison continues in a child activity.
+  if (flow == Flow::PushClippings) {
+    uploadClippings(bookPath);
+    return;
+  }
+  // Stats first: a parked comparison continues in a child activity.
   if ((mask & SyncPending::STATS_BIT) && KOREADER_STORE.getSyncStats()) addBookStats(bookPath);
-  if ((mask & SyncPending::CLIPPINGS_BIT) && KOREADER_STORE.getSyncClippings()) uploadClippings(bookPath);
-  if (clippingCancelled) return;
+  if (state == State::Failed) return;
   if ((mask & SyncPending::PROGRESS_BIT) && FsHelpers::hasEpubExtension(bookPath) && pushProgress(bookPath)) return;
   requestUpdate();
 }
@@ -990,9 +1108,16 @@ void StatsUploadActivity::uploadNext() {
       std::string deletion;
       bool noDeletions = false;
       const bool readable = ClippingStore::readDeletionForUpload(bookPath, 0, deletion, noDeletions);
+      StatsUploadClient::lastHttpCode = 0;
       const auto result = document.empty() || !readable ? StatsUploadClient::Result::InvalidResponse
                           : noDeletions ? ClippingsUpload::download(bookPath, document, cancelClippings, this)
                                         : ClippingsUpload::sync(bookPath, document, cancelClippings, this);
+      if (StatsUploadClient::failed(result)) {
+        char detail[128];
+        failBook(bookPath, SyncPending::CLIPPINGS_BIT,
+                 StatsUploadClient::formatResult(detail, sizeof(detail), result,
+                                                 document.empty() ? 0 : StatsUploadClient::lastHttpCode));
+      }
       recordExtras(false, result == StatsUploadClient::Result::Ok, false, StatsUploadClient::failed(result));
       requestUpdate();
     }
@@ -1027,6 +1152,7 @@ void StatsUploadActivity::uploadNext() {
     {
       RenderLock lock(*this);
       globalResult = result;
+      globalHttpCode = StatsUploadClient::lastHttpCode;
       globalFailedStep = failedStep;
     }
     requestUpdate();
@@ -1079,6 +1205,7 @@ void StatsUploadActivity::uploadNext() {
         pullStep();
         return;
       case Flow::Push:
+      case Flow::PushClippings:
         pushStep();
         return;
       case Flow::Done:
@@ -1114,7 +1241,7 @@ void StatsUploadActivity::uploadNext() {
     // XTC has no KOReader position: its saved stats are the whole sync.
     bool sent = false;
     if (!uploadBookExtras(bookPath, &sent)) {
-      failBook(bookPath, extrasFailedParts, extrasFailureReason ? extrasFailureReason : "");
+      failBook(bookPath, extrasFailedParts, extrasFailureReason);
       requestUpdate();
       return;
     }
@@ -1143,7 +1270,7 @@ void StatsUploadActivity::recordExtras(const bool statsOk, const bool clippingsO
 bool StatsUploadActivity::uploadBookExtras(const std::string& bookPath, bool* sentAny) {
   if (sentAny) *sentAny = false;
   extrasFailedParts = 0;
-  extrasFailureReason = nullptr;
+  extrasFailureReason.clear();
   if (!KOREADER_STORE.getSyncStats() && !KOREADER_STORE.getSyncClippings()) return true;
   // Untouched books are skipped before hashing: a walk of a large card only
   // computes ids for (and records in sync_ids.bin) books with saved data.
@@ -1158,9 +1285,13 @@ bool StatsUploadActivity::uploadBookExtras(const std::string& bookPath, bool* se
   const auto result = ReadingSyncUpload::extras(bookPath, document, cancelClippings, this);
   extrasFailedParts = (StatsUploadClient::failed(result.stats) ? SyncPending::STATS_BIT : 0) |
                       (StatsUploadClient::failed(result.clippings) ? SyncPending::CLIPPINGS_BIT : 0);
-  if (extrasFailedParts)
+  if (extrasFailedParts) {
+    char detail[128];
+    const bool statsFailed = StatsUploadClient::failed(result.stats);
     extrasFailureReason =
-        StatsUploadClient::errorString(StatsUploadClient::failed(result.stats) ? result.stats : result.clippings);
+        StatsUploadClient::formatResult(detail, sizeof(detail), statsFailed ? result.stats : result.clippings,
+                                        statsFailed ? result.statsHttpCode : result.clippingsHttpCode);
+  }
   const uint8_t settled = (StatsUploadClient::settled(result.stats) ? SyncPending::STATS_BIT : 0) |
                           (StatsUploadClient::settled(result.clippings) ? SyncPending::CLIPPINGS_BIT : 0);
   if (settled) SyncPending::clear(bookPath, settled);
@@ -1188,6 +1319,19 @@ void StatsUploadActivity::addBookStats(const std::string& bookPath) {
     requestUpdate();
     return;
   }
+  if (!batchBuffer) {
+    batchBuffer = makeUniqueNoThrow<char[]>(STATS_BATCH_CAPACITY);
+    if (!batchBuffer) {
+      fail(tr(STR_KOREADER_SYNC_LOW_MEMORY));
+      return;
+    }
+    batchPaths.reserve(StatsUploadPayload::BookBatch::MAX_ITEMS);
+    batch = StatsUploadPayload::BookBatch{batchBuffer.get(), STATS_BATCH_CAPACITY};
+    if (!StatsUploadClient::deviceId(deviceId, sizeof(deviceId)) || !batch.begin(deviceId)) {
+      fail(tr(STR_SYNC_FAILED_MSG));
+      return;
+    }
+  }
   if (!batch.add(document.c_str(), stats)) {
     // Full: send what is queued and start a new request with this book.
     if (batch.count() == 0 || !flushBookStats() || !batch.add(document.c_str(), stats)) {
@@ -1204,16 +1348,23 @@ void StatsUploadActivity::addBookStats(const std::string& bookPath) {
 bool StatsUploadActivity::flushBookStats() {
   const auto count = static_cast<uint32_t>(batch.count());
   if (count == 0) return true;
+  StatsUploadClient::lastHttpCode = 0;
   auto result = StatsUploadClient::Result::InvalidResponse;
   if (batch.finish()) {
     StatsUploadClient client;
-    result = client.put("/api/v1/stats/books", batch.payload(), true);
+    result = client.put("/api/v1/stats/counters/books", batch.payload(), count);
   }
   LOG_INF("StatsSync", "Stats batch of %u books: %d", static_cast<unsigned>(count), static_cast<int>(result));
   if (result == StatsUploadClient::Result::Ok) {
     SyncPending::clearPaths(batchPaths, SyncPending::STATS_BIT);
     if (phase == Phase::CatchUp)
       for (const auto& bookPath : batchPaths) BookSyncFile::stamp(bookPath, true, catchupStamp);
+  }
+  if (StatsUploadClient::failed(result)) {
+    char detail[128];
+    const char* reason =
+        StatsUploadClient::formatResult(detail, sizeof(detail), result, StatsUploadClient::lastHttpCode);
+    for (const auto& bookPath : batchPaths) failBook(bookPath, SyncPending::STATS_BIT, reason);
   }
   batchPaths.clear();
   {
@@ -1241,6 +1392,12 @@ void StatsUploadActivity::uploadClippings(const std::string& bookPath) {
   if (StatsUploadClient::settled(result)) {
     SyncPending::clear(bookPath, SyncPending::CLIPPINGS_BIT);
     if (phase == Phase::CatchUp && catchupStamp) BookSyncFile::stamp(bookPath, false, catchupStamp);
+  }
+  if (StatsUploadClient::failed(result)) {
+    char detail[128];
+    failBook(bookPath, SyncPending::CLIPPINGS_BIT,
+             StatsUploadClient::formatResult(detail, sizeof(detail), result,
+                                             document.empty() ? 0 : StatsUploadClient::lastHttpCode));
   }
   recordExtras(false, result == StatsUploadClient::Result::Ok, false, StatsUploadClient::failed(result));
   requestUpdate();
@@ -1294,7 +1451,7 @@ void StatsUploadActivity::syncEpub(std::string&& bookPath, const KOReaderProgres
         return;
       }
       if (!uploadBookExtras(bookPath)) {
-        failBook(bookPath, extrasFailedParts, extrasFailureReason ? extrasFailureReason : "");
+        failBook(bookPath, extrasFailedParts, extrasFailureReason);
         requestUpdate();
         return;
       }
@@ -1312,21 +1469,8 @@ void StatsUploadActivity::syncEpub(std::string&& bookPath, const KOReaderProgres
       fail(tr(STR_SYNC_FAILED_MSG));
       return;
     }
-    if (!epub->load(true, true, Epub::XLocationLoadMode::Skip, true) || saved.spineIndex < 0 ||
-        saved.spineIndex >= epub->getSpineItemsCount()) {
-      epub.reset();
-      extrasFailedParts = 0;
-      if (remote) {
-        if (!keepRemote(*remote)) return;  // the cursor moves on: keep it for a later comparison
-      } else {
-        uploadBookExtras(bookPath);
-      }
-      // The EPUB could not be read, so its position could not sync.
-      failBook(bookPath, SyncPending::PROGRESS_BIT | extrasFailedParts, tr(STR_SYNC_REOPTIMIZE_REQUIRED));
-      requestUpdate();
-      return;
-    }
   }
+
   auto sync = makeUniqueNoThrow<KOReaderSyncActivity>(renderer, mappedInput, bookPath, KOREADER_STORE.getMatchMethod(),
                                                       SETTINGS.orientation, true, false);
   if (!sync) {
@@ -1506,6 +1650,8 @@ void StatsUploadActivity::loop() {
         start();
       }
     }
+  } else if (state == State::Preparing) {
+    prepareNext();
   } else if (state == State::Uploading) {
     // One book per loop permits cancellation between books. No background
     // task or persistent upload queue can start networking outside this action.
@@ -1524,30 +1670,42 @@ void StatsUploadActivity::render(RenderLock&&) {
   const auto area = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   const bool listFailures = state == State::Done && !failures.empty();
   // A failure list needs the room below the results.
-  const int y = area.y + (listFailures ? area.height / 6 : area.height / 3);
+  const int y = std::max(area.y + (listFailures ? area.height / 6 : area.height / 3),
+                         header.y + header.height + UITheme::getInstance().getMetrics().verticalSpacing);
   const bool asking = state == State::Ready && !autoStart;
-  const bool running = !singleBook() && (state == State::Uploading || state == State::SyncingBook);
+  const bool running =
+      !singleBook() && (state == State::Preparing || state == State::Uploading || state == State::SyncingBook);
   const char* confirmText = scope == Scope::Library        ? tr(STR_SYNC_ALL_CONFIRM)
                             : scope == Scope::ReadingStats ? tr(STR_SYNC_READING_STATS_CONFIRM)
                                                            : tr(STR_FOLDER_SYNC_CONFIRM);
   const char* flowText = flow == Flow::FirstWalk || flow == Flow::Legacy
                              ? (scope == Scope::Library ? tr(STR_SYNCING_CARD_BOOKS) : tr(STR_SYNCING_FOLDER_BOOKS))
-                         : flow == Flow::CatchUpStats     ? tr(STR_SCANNING_READING_STATS)
-                         : flow == Flow::CatchUpClippings ? tr(STR_CHECKING_CLIPPINGS)
-                         : flow == Flow::Pull             ? tr(STR_CHECKING_FOR_UPDATES)
-                         : flow == Flow::Push             ? tr(STR_UPLOADING_CHANGES)
-                                                          : tr(STR_LOADING);
+                         : flow == Flow::CatchUpStats ? tr(STR_SCANNING_READING_STATS)
+                         : flow == Flow::CatchUpClippings || flow == Flow::PushClippings ? tr(STR_CHECKING_CLIPPINGS)
+                         : flow == Flow::Pull                                            ? tr(STR_CHECKING_FOR_UPDATES)
+                         : flow == Flow::Push                                            ? tr(STR_UPLOADING_CHANGES)
+                                                                                         : tr(STR_LOADING);
   const char* workingText = scope == Scope::ReadingStats ? tr(STR_SCANNING_READING_STATS)
                             : scope == Scope::Clippings  ? tr(STR_CHECKING_CLIPPINGS)
                             : scope == Scope::Book       ? tr(STR_LOADING)
                                                          : flowText;
-  const char* text = asking ? confirmText
-                     : state == State::Ready || state == State::Uploading || state == State::SyncingBook
-                         ? workingText
-                         : message.c_str();
+  const bool incomplete =
+      state == State::Failed ||
+      (state == State::Done && (failed || statsFailed || clippingsFailed || StatsUploadClient::failed(globalResult)));
+  const char* text =
+      state == State::Preparing ? tr(STR_LOADING)
+      : asking                  ? confirmText
+      : state == State::Ready || state == State::Preparing || state == State::Uploading || state == State::SyncingBook
+          ? workingText
+          : message.c_str();
+  char failureStatus[160];
+  if (incomplete && listFailures) {
+    snprintf(failureStatus, sizeof(failureStatus), "%s · %s", text, SyncLog::PATH);
+    text = failureStatus;
+  }
   int detailY =
       y + UITheme::drawCenteredWrappedText(renderer, area, UI_10_FONT_ID, y, text, 3, true, EpdFontFamily::REGULAR, 4) +
-      (running ? 8 : 24);
+      (running || listFailures ? 8 : 24);
   if (running) {
     // One screen for the whole run: the book being synced and how far along.
     if (!currentBook.empty()) {
@@ -1561,6 +1719,11 @@ void StatsUploadActivity::render(RenderLock&&) {
                           std::min(progressDone, progressTotal), progressTotal);
       detailY += barHeight + 15 + renderer.getLineHeight(UI_10_FONT_ID) + 8;  // the bar's percent line
     }
+  }
+  if (incomplete && !listFailures) {
+    detailY += UITheme::drawCenteredWrappedText(renderer, area, UI_10_FONT_ID, detailY, SyncLog::PATH, 1, true,
+                                                EpdFontFamily::REGULAR, 4) +
+               8;
   }
   if (state == State::Ready && autoStart) {
     // About to connect; there are no results to show yet.
@@ -1581,7 +1744,9 @@ void StatsUploadActivity::render(RenderLock&&) {
                static_cast<unsigned>(skipped), static_cast<unsigned>(failed));
       detailY += UITheme::drawCenteredWrappedText(renderer, area, UI_10_FONT_ID, detailY, counts, 3, true,
                                                   EpdFontFamily::REGULAR, 4) +
-                 (deferredBooks.empty() || state == State::Done ? 24 : 8);
+                 (listFailures                                    ? 8
+                  : deferredBooks.empty() || state == State::Done ? 24
+                                                                  : 8);
       if (!deferredBooks.empty() && state != State::Done) {
         char review[64];
         snprintf(review, sizeof(review), tr(STR_SYNC_TO_REVIEW_FORMAT), static_cast<unsigned>(deferredBooks.size()));
@@ -1599,9 +1764,10 @@ void StatsUploadActivity::render(RenderLock&&) {
     int rowY = detailY;
     if (scope != Scope::Clippings) {
       char globalStatus[128];
-      rowY += UITheme::drawCenteredStatusRow(renderer, area, UI_10_FONT_ID, rowY, tr(STR_ALL_TIME_STATS),
-                                             ReadingSyncUpload::globalStatusLabel(globalStatus, sizeof(globalStatus),
-                                                                                  globalResult, globalFailedStep)) +
+      rowY += UITheme::drawCenteredStatusRow(
+                  renderer, area, UI_10_FONT_ID, rowY, tr(STR_ALL_TIME_STATS),
+                  ReadingSyncUpload::globalStatusLabel(globalStatus, sizeof(globalStatus), globalResult,
+                                                       globalFailedStep, globalHttpCode)) +
               8;
       rowY += UITheme::drawCenteredStatusRow(renderer, area, UI_10_FONT_ID, rowY, tr(STR_READING_STATS), statsText) + 8;
     }
@@ -1613,14 +1779,17 @@ void StatsUploadActivity::render(RenderLock&&) {
       const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
       const int padding = UITheme::getInstance().getMetrics().contentSidePadding;
       const Rect listArea{area.x + padding, area.y, area.width - padding * 2, area.height};
-      rowY += 16;
+      rowY += 8;
       rowY += UITheme::drawCenteredWrappedText(renderer, area, UI_10_FONT_ID, rowY, tr(STR_FAILED_BOOKS), 1, true,
                                                EpdFontFamily::BOLD, 4) +
               8;
       // Scrolled one failure at a time; the hints show which way there is more.
       failuresBelow = false;
       for (size_t i = failureScroll; i < failures.size(); ++i) {
-        if (rowY + lineHeight * 3 > bottom) {
+        // Budget the actual remaining height, including wrapping gaps. Touch
+        // landscape may fit a title plus one detail line, rather than four.
+        const int detailLines = std::min(3, (bottom - rowY - lineHeight - 4) / (lineHeight + 4));
+        if (detailLines < 1) {
           failuresBelow = true;
           break;
         }
@@ -1631,14 +1800,14 @@ void StatsUploadActivity::render(RenderLock&&) {
                                                                failure.parts & SyncPending::STATS_BIT,
                                                                failure.parts & SyncPending::CLIPPINGS_BIT);
         if (!failure.reason.empty()) detail += ": " + failure.reason;
-        rowY += UITheme::drawCenteredWrappedText(renderer, listArea, UI_10_FONT_ID, rowY, detail.c_str(), 2, true,
-                                                 EpdFontFamily::REGULAR, 4) +
+        rowY += UITheme::drawCenteredWrappedText(renderer, listArea, UI_10_FONT_ID, rowY, detail.c_str(), detailLines,
+                                                 true, EpdFontFamily::REGULAR, 4) +
                 8;
       }
-      // Past the detail cap, failed books are only counted.
-      if (!failuresBelow && failed > failures.size()) {
-        char more[32];
-        snprintf(more, sizeof(more), tr(STR_MORE_ITEMS_FORMAT), static_cast<unsigned>(failed - failures.size()));
+      // Omitted attempts are separate from the merged book rows.
+      if (!failuresBelow && omittedFailureDetails > 0) {
+        char more[96];
+        snprintf(more, sizeof(more), tr(STR_SYNC_MORE_FAILURES_FORMAT), static_cast<unsigned>(omittedFailureDetails));
         UITheme::drawCenteredWrappedText(renderer, area, UI_10_FONT_ID, rowY, more, 1, true, EpdFontFamily::REGULAR, 4);
       }
     }

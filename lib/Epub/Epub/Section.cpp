@@ -35,13 +35,20 @@ constexpr uint32_t SECTION_CACHE_MAGIC = 0x535843FF;  // bytes: 0xFF, "CXS"
 // v81: HTML and body text indents now inherit into descendant blocks.
 // v82: Scalable headings and blocks serialize point size and line height.
 // v83: Nested blocks inherit bold and italic styles, changing glyphs and wrapping.
-// v84 (2.0.0): normalize development revisions 84-103 into one release bump.
+// v84 (2.0.0 RC): normalize development revisions 84-103 into one release bump.
 // Publisher decorations/fonts, spacing, hyphenation identity, GIFs, and reference
-// text offsets change both the payload and generated layout. Unicode space
-// advances also change wrapping and scaled text placement.
-constexpr uint8_t SECTION_FILE_VERSION = 84;
-// Suspended builds share the same layout contract and rebuild with full caches.
-constexpr uint8_t SECTION_FILE_PARTIAL_VERSION = 0xC5;
+// text offsets change both the payload and generated layout.
+// Keep the post-RC development revisions so cached layouts rebuild on upgrade.
+// v104: Spend chapter-wrapper closing spacing before the following paragraph.
+// v105: Keep CSS active below 48 KiB free heap; rebuild previously unstyled pages.
+// v106: Persist per-word source ranges for stable clipping anchors.
+// v107: Lay out chapter heading groups with their publisher spacing and alignment.
+// v108: Runtime outline advances defer rounding until pixel placement.
+constexpr uint8_t SECTION_FILE_VERSION = 108;
+// Suspended incremental build: valid pages plus LUTs and a parse-watermark trailer.
+// Change this with layout or payload changes so stale partial pages cannot resume
+// under a different layout contract.
+constexpr uint8_t SECTION_FILE_PARTIAL_VERSION = 0xDD;
 constexpr uint32_t HEADER_SIZE =
     4 * sizeof(uint32_t) + sizeof(PublisherFonts) + sizeof(SECTION_CACHE_MAGIC) + sizeof(uint8_t) + sizeof(int) +
     sizeof(float) + sizeof(bool) + sizeof(bool) + sizeof(uint8_t) + sizeof(uint16_t) + sizeof(uint16_t) + sizeof(bool) +
@@ -216,6 +223,27 @@ void Section::releaseBuildFile() {
     build_->parser->releaseInputFile();
   }
 }
+
+#if CROSSINK_SCALABLE_FONTS
+uint32_t Section::publisherBodyFontFamily() {
+  // The incremental parser may own this HTML reader. Release it before probing;
+  // it resumes from its saved offset on the next build step.
+  releaseBuildFile();
+  auto* css = epub->getCssParser();
+  if (!css) return 0;
+  const bool ownsCss = !build_ || !build_->cssParser;
+  if (ownsCss && !css->loadFromCache()) {
+    LOG_ERR("SCT", "Cannot load CSS for publisher body font");
+    css->clear();
+    return 0;
+  }
+  const std::string path =
+      build_ ? build_->parsePath : epub->getCachePath() + "/html/" + std::to_string(spineIndex) + ".html";
+  const auto family = ChapterHtmlSlimParser::publisherBodyFontFamily(path, *css);
+  if (ownsCss) css->clear();
+  return family;
+}
+#endif
 
 bool Section::writePublisherFontState() {
   return file.seek(HEADER_SIZE - sizeof(uint32_t) * 9 - sizeof(pageCount)) &&

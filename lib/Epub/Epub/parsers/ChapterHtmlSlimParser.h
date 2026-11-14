@@ -55,6 +55,7 @@ class ChapterHtmlSlimParser {
   int underlineUntilDepth = INT_MAX;
   int strikethroughUntilDepth = INT_MAX;
   int headingDepth = -1;
+  int headingGroupDepth = -1;
   bool headingOpenerActive = false;
   // buffer for building up words from characters, will auto break if longer than this
   // leave one char at end for null pointer
@@ -62,6 +63,11 @@ class ChapterHtmlSlimParser {
   int partWordBufferIndex = 0;
   uint32_t partWordVisibleOffset = 0;
   uint32_t visibleTextOffset = 0;
+  uint32_t sourceTextOffset = 0;
+  uint32_t partWordSourceOffset = 0;
+  // Allocated only when hidden source text interrupts one pending visible word.
+  std::vector<ParsedText::SourceGap> partWordSourceGaps;
+  void recordPartWordSourceGap(uint32_t length);
   uint32_t partWordReferenceOffset = 0;
   int16_t partWordInlinePadding = 0;
   int16_t pendingInlinePadding = 0;
@@ -70,6 +76,7 @@ class ChapterHtmlSlimParser {
   bool referenceWhitespacePending = false;
   bool trackReferenceCharacters = false;
   int referenceExcludedUntilDepth = INT_MAX;
+  int sourceExcludedUntilDepth = INT_MAX;
   uint16_t currentTextRunBytes = 0;
   bool nextWordContinues = false;  // true when next flushed word attaches to previous (inline element boundary)
   std::unique_ptr<ParsedText> currentTextBlock = nullptr;
@@ -106,6 +113,8 @@ class ChapterHtmlSlimParser {
   uint32_t effectiveFontFamily = 0;
   uint32_t bodyFontFamily = 0;
   bool detectBodyFont();
+  static bool scanBodyFont(XML_Parser parser, FsFile& file, const CssParser& css, uint32_t& family,
+                           bool preferParagraph);
   uint8_t imageRendering;
   std::string contentBase;
   std::string imageBasePath;
@@ -205,7 +214,7 @@ class ChapterHtmlSlimParser {
     uint8_t length = 0, codepoints = 0, lines = 0;
     bool bold = false, firstLetterPending = false;
     int spanDepth = -1;
-    uint32_t visibleOffset = 0, referenceOffset = 0;
+    uint32_t visibleOffset = 0, referenceOffset = 0, sourceOffset = 0;
     uint32_t fontFamily = 0;
   } dropCap;
   static uint8_t dropCapLines(const CssStyle& style);
@@ -434,6 +443,7 @@ class ChapterHtmlSlimParser {
   uint32_t getVisibleTextLength() const { return visibleTextOffset; }
   uint32_t getReferenceTextLength() const { return referenceTextOffset; }
   bool parseAndBuildPages();
+  static uint32_t publisherBodyFontFamily(const std::string& path, const CssParser& css);
   void setPublisherFonts(PublisherFonts mode) { publisherFonts = mode; }
   void setDeferAdvancePrewarm(bool defer) { deferAdvancePrewarm_ = defer; }
   bool prewarmSectionAdvanceStep();

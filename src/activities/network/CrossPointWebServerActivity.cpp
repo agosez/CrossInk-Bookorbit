@@ -10,6 +10,7 @@
 
 #include <cstddef>
 
+#include "AppCapabilities.h"
 #include "CrossPointState.h"
 #include "FilenameFontSystem.h"
 #include "MappedInputManager.h"
@@ -205,10 +206,12 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
     activityManager.replaceActivity(std::move(sync));
     return;
   }
+#if CROSSINK_APP_CAP_OPDS
   if (mode == NetworkMode::OPDS_BROWSER) {
     activityManager.goToBrowser();
     return;
   }
+#endif
 
   networkMode = mode;
   isApMode = (mode == NetworkMode::CREATE_HOTSPOT);

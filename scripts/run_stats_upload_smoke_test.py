@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCUMENT = "01b729228ded144417191bebc5a17445"
 
 
-def run(program, server, credentials, error=None, empty_library=False, step=None):
+def run(program, server, credentials, error=None, empty_library=False, step=None, batch=None):
     with tempfile.TemporaryDirectory(prefix="crossink-stats-smoke-") as directory:
         (Path(directory) / "fs_").mkdir()
         env = os.environ.copy()
@@ -29,6 +29,9 @@ def run(program, server, credentials, error=None, empty_library=False, step=None
                    CROSSINK_STATS_TEST_USER=credentials["username"],
                    CROSSINK_STATS_TEST_PASSWORD=credentials["password"])
         env.pop("CROSSINK_STATS_TEST_EMPTY_LIBRARY", None)
+        env.pop("CROSSINK_STATS_TEST_BATCH", None)
+        if batch is not None:
+            env["CROSSINK_STATS_TEST_BATCH"] = str(batch)
         if empty_library:
             env["CROSSINK_STATS_TEST_EMPTY_LIBRARY"] = "1"
         if step is not None:
@@ -45,6 +48,17 @@ def run(program, server, credentials, error=None, empty_library=False, step=None
             # Log only diagnostics; never dump request headers or credentials.
             lines = [line for line in (result.stdout + result.stderr).splitlines() if "StatsSync" in line or "SMOKE" in line]
             raise RuntimeError(f"Simulator upload failed (exit {result.returncode}):\n" + "\n".join(lines) + result.stderr[-1000:])
+
+        log_path = Path(directory) / "fs_/.crossink/sync.log"
+        if not log_path.is_file():
+            raise RuntimeError("Sync diagnostic log was not exported to /.crossink/sync.log")
+        log = log_path.read_text()
+        if not all(field in log for field in ("utc=", "uptime_ms=", "http=", "result=")):
+            raise RuntimeError("Sync log lacks request diagnostics")
+        for secret in (credentials["username"], credentials["password"],
+                       hashlib.md5(credentials["password"].encode()).hexdigest()):
+            if secret and secret in log:
+                raise RuntimeError("Sync log contains credentials")
 
 
 def local_tests(program):
@@ -77,7 +91,17 @@ def local_tests(program):
             status = {"auth": 401, "unsupported": 404, "server": 500}.get(mode, 200)
             if mode == "totals":
                 status = 500
-            reply = {"until": 1, "accepted": 1, "accepted_daily": 1}
+            if mode.startswith("missing-counters-") and self.path.startswith("/api/v1/stats/counters/"):
+                status = int(mode.rsplit("-", 1)[1])
+            reply = {"until": 1, "accepted": 1, "accepted_daily": 1, "counter_ids": 1}
+            if self.path == "/api/v1/stats/books":
+                reply["accepted"] = len(body["items"])
+                if mode == "partial-batch":
+                    reply["accepted"] -= 1
+                elif mode == "extra-batch":
+                    reply["accepted"] += 1
+                elif mode == "missing-batch":
+                    reply.pop("accepted")
             if "daily" in body and mode == "daily":
                 reply.pop("accepted_daily")
             if self.path == "/api/v1/stats/sessions" and mode != "sessions":
@@ -106,16 +130,21 @@ def local_tests(program):
         assert len(base64.b64decode(requests[0][1]["history_b64"])) == 92
         assert requests[2][1]["items"][0]["document"] == DOCUMENT
         print("PASS: production payloads, headers, global/book uploads, identical retries")
+        for mode, error in [("ok", None), ("partial-batch", 4), ("extra-batch", 4), ("missing-batch", 4)]:
+            for count in (1, 2, 10):
+                run(program, url, {"username": "smoke", "password": "smoke-password"}, error, batch=count)
+                assert len(requests[-1][1]["items"]) == count
+            print(f"PASS: {mode} acknowledgment for batches of 1, 2 and 10 books")
         for mode, error in [("auth", 2), ("unsupported", 3), ("invalid", 4), ("oversize", 4), ("server", 6)]:
             run(program, url, {"username": "smoke", "password": "smoke-password"}, error)
             print(f"PASS: {mode} response")
         mode = "ok"
         requests.clear()
         run(program, url, {"username": "smoke", "password": "smoke-password"}, empty_library=True)
-        assert len(requests) == 1 and requests[0][0] == "/api/v1/stats/global"
+        assert len(requests) == 1 and requests[0][0] == "/api/v1/stats/counters/global"
         print("PASS: confirmed activity uploads overall stats with an empty Library")
         for mode in ("totals", "daily", "sessions", "corrupt-session", "streak", "empty-streak",
-                     "old-streak-404", "old-streak-405", "ok"):
+                     "old-streak-404", "old-streak-405", "missing-counters-404", "missing-counters-405", "ok"):
             run(program, url, {"username": "smoke", "password": "smoke-password"}, step=mode)
             print(f"PASS: all-time failed-step attribution: {mode}")
     finally:

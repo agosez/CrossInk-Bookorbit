@@ -25,6 +25,7 @@
 #include "GlobalActions.h"
 #include "MappedInputManager.h"
 #include "QuickActions.h"
+#include "ReaderRefreshScope.h"
 #include "ReaderUtils.h"
 #include "ReadingDailyMinutes.h"
 #include "ReadingSessionStats.h"
@@ -813,7 +814,8 @@ void XtcReaderActivity::applyBookStatsEditsFromDisk() {
 
 void XtcReaderActivity::resetCurrentBookStatsAfterDelete() {
   readingSessionJournal.flush();
-  stats = BookReadingStats{};
+  // Continue the reset snapshot's identity when reading resumes without reopening.
+  stats = xtc ? BookReadingStats::load(xtc->getCachePath()) : BookReadingStats{};
   sessionReadingSeconds = 0;
   statsCheckpointRevision = 0;
   dailyReadingSession.reset();
@@ -1397,6 +1399,8 @@ void XtcReaderActivity::renderStatusBarOverlay(const StatusBarOverlayPosition po
 }
 
 void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
+  // Pre-rendered XTCH shades need the image waveform, not the text-only AA mode.
+  const ReaderUtils::ReaderRefreshScope readerRefresh(renderer, true, false);
   const uint16_t pageWidth = xtc->getPageWidth();
   const uint16_t pageHeight = xtc->getPageHeight();
   const uint8_t bitDepth = xtc->getBitDepth();

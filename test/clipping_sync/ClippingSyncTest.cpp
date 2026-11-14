@@ -7,6 +7,7 @@
 #include <map>
 #include <string>
 
+#include "ArrayHeap.h"
 #include "ClippingStore.h"
 #include "activities/reader/ReadingStatsUtils.h"
 #include "clippings/ClippingIdentity.h"
@@ -82,13 +83,17 @@ class ClippingSync : public ::testing::Test {
     revision = putCount = getCount = 0;
     lastCursor = 0;
     testCredentials = {};
+    maxClippingTestArrayAllocation = SIZE_MAX;
     offline = false;
     forcedReply.clear();
     Storage.files["/My Clippings.txt"] = "local export\n";
   }
   void TearDown() override {
     CLIPPINGS.unload();
+    maxClippingTestArrayAllocation = SIZE_MAX;
     EXPECT_EQ(openBookmarkReaders, 0);
+    EXPECT_FALSE(Storage.files.contains("/.crosspoint/clipping-sync/download.tmp"));
+    EXPECT_FALSE(Storage.files.contains("/.crosspoint/clipping-sync/upload.tmp"));
     EXPECT_EQ(Storage.files.at("/My Clippings.txt"), "local export\n");
   }
   void load() { ASSERT_TRUE(CLIPPINGS.loadForBook(BOOK, "Title", "Author", "epub")); }
@@ -107,11 +112,12 @@ void SyncPending::SessionMarker::mark(const std::string&, uint8_t) {}
 
 // In-memory transport exercises the production serializer, pagination parser,
 // store and retry flow; no test code substitutes the merge implementation.
+int StatsUploadClient::lastHttpCode = 0;
 struct StatsUploadClient::Impl {};
 StatsUploadClient::StatsUploadClient() = default;
 StatsUploadClient::~StatsUploadClient() = default;
 void StatsUploadClient::close() {}
-Result StatsUploadClient::put(const char*, const char* payload, bool, bool, const char*) {
+Result StatsUploadClient::put(const char*, const char* payload, unsigned, bool, const char*) {
   if (offline) return Result::Network;
   ++putCount;
   JsonDocument request;
@@ -128,7 +134,13 @@ Result StatsUploadClient::put(const char*, const char* payload, bool, bool, cons
   remote[id] = row;
   return Result::Ok;
 }
-Result StatsUploadClient::get(const char* endpoint, char* response, size_t capacity) {
+Result StatsUploadClient::putFile(const char* endpoint, const char* path, unsigned count) {
+  auto found = Storage.files.find(path);
+  if (found == Storage.files.end()) return Result::InvalidResponse;
+  EXPECT_EQ(found->second.find('\x01'), std::string::npos);
+  return put(endpoint, found->second.c_str(), count);
+}
+Result StatsUploadClient::get(const char* endpoint, const char* responsePath, size_t maxBytes) {
   ++getCount;
   if (offline) return Result::Network;
   std::string body = forcedReply;
@@ -155,9 +167,12 @@ Result StatsUploadClient::get(const char* endpoint, char* response, size_t capac
            "\",\"sync_version\":2,\"cursor\":" + std::to_string(matches ? firstRevision : cursor) +
            ",\"more\":" + (matches > 1 ? "true" : "false") + ",\"items\":[" + first + "]}";
   }
-  if (body.size() >= capacity) return Result::InvalidResponse;
-  memcpy(response, body.c_str(), body.size() + 1);
-  return Result::Ok;
+  if (body.size() > maxBytes) return Result::InvalidResponse;
+  FsFile file;
+  if (!Storage.openFileForWrite("test", responsePath, file)) return Result::InvalidResponse;
+  const bool written = file.write(body.data(), body.size()) == body.size() && file.sync();
+  const bool closed = file.close();
+  return written && closed ? Result::Ok : Result::InvalidResponse;
 }
 
 TEST_F(ClippingSync, ImportsFullTextWithoutDuplicatesOrReuploadingForeignAnchors) {
@@ -341,6 +356,12 @@ TEST_F(ClippingSync, ReadsLegacyVersionsAndKeepsExistingServerIdentity) {
       const std::string id = version == 5 ? "original-id" : "00dd471ed33eb756";
       if (pullFirst) {
         addRemote(id, "hello");
+        JsonDocument incoming;
+        ASSERT_FALSE(deserializeJson(incoming, remote.at(id)));
+        incoming["start_offset"] = 100;
+        incoming["end_offset"] = 105;
+        remote[id].clear();
+        serializeJson(incoming, remote[id]);
         ASSERT_EQ(ClippingsUpload::download(BOOK, DOCUMENT), Result::Ok);
         EXPECT_EQ(savedKey(0), scope() + id);
       }
@@ -350,10 +371,14 @@ TEST_F(ClippingSync, ReadsLegacyVersionsAndKeepsExistingServerIdentity) {
       load();
       ASSERT_EQ(CLIPPINGS.clippingCount(), 1U);
       EXPECT_EQ(CLIPPINGS.clippingAt(0)->layoutSignature, version >= 3 ? 42U : 0U);
+      if (pullFirst) {
+        EXPECT_EQ(CLIPPINGS.clippingAt(0)->sourceStart, 100U);
+        EXPECT_EQ(CLIPPINGS.clippingAt(0)->sourceEnd, 105U);
+      }
       EXPECT_EQ(CLIPPINGS.clippingAt(0)->tableSelection, version >= 4 ? 7 : UINT16_MAX);
       ASSERT_TRUE(CLIPPINGS.removeClippingAt(0));
       CLIPPINGS.unload();
-      EXPECT_EQ(static_cast<uint8_t>(Storage.files.at(storePath())[0]), 6);
+      EXPECT_EQ(static_cast<uint8_t>(Storage.files.at(storePath())[0]), 7);
       ASSERT_EQ(ClippingsUpload::sync(BOOK, DOCUMENT), Result::Ok);
       load();
       EXPECT_FALSE(CLIPPINGS.hasClippings());
@@ -521,4 +546,161 @@ TEST_F(ClippingSync, DeletionsWaitForTheirOriginalAccountEvenWhenIdsMatch) {
   std::string passage;
   ASSERT_TRUE(CLIPPINGS.readClippingText(0, passage));
   EXPECT_EQ(passage, "B's passage");
+}
+
+TEST_F(ClippingSync, DownloadsWorstCaseEscapedSelectionWithFragmentedHeap) {
+  // A full passage can expand to six times its size on the wire.
+  const std::string text(CLIPPING_TEXT_MAX, '\x01');
+  addRemote("escaped", text);
+  // Match a server serializer that emits control bytes as Unicode escapes.
+  std::string wire;
+  wire.reserve(CLIPPING_TEXT_MAX * 6 + 1024);
+  for (const char value : remote.at("escaped")) {
+    if (value == '\x01')
+      wire += "\\u0001";
+    else
+      wire += value;
+  }
+  remote["escaped"] = std::move(wire);
+  ASSERT_GT(remote.at("escaped").size(), CLIPPING_TEXT_MAX * 6);
+  maxClippingTestArrayAllocation = 16 * 1024;
+  ASSERT_EQ(ClippingsUpload::sync(BOOK, DOCUMENT), Result::Ok);
+  load();
+  std::string saved;
+  ASSERT_TRUE(CLIPPINGS.readClippingText(0, saved));
+  EXPECT_EQ(saved, text);
+  EXPECT_EQ(ClippingsUpload::download(BOOK, DOCUMENT), Result::Skipped);
+}
+
+TEST_F(ClippingSync, DownloadFileFailuresDoNotAdvanceCursor) {
+  addRemote("remote", "selection");
+  failBookmarkWriteOpen = true;
+  EXPECT_EQ(ClippingsUpload::download(BOOK, DOCUMENT), Result::InvalidResponse);
+  failBookmarkWriteOpen = false;
+  maxBookmarkWriteBytes = 8;
+  EXPECT_EQ(ClippingsUpload::download(BOOK, DOCUMENT), Result::InvalidResponse);
+  maxBookmarkWriteBytes = -1;
+  failBookmarkSync = true;
+  EXPECT_EQ(ClippingsUpload::download(BOOK, DOCUMENT), Result::InvalidResponse);
+  failBookmarkSync = false;
+  failBookmarkClose = true;
+  EXPECT_EQ(ClippingsUpload::download(BOOK, DOCUMENT), Result::InvalidResponse);
+  failBookmarkClose = false;
+  ASSERT_EQ(ClippingsUpload::download(BOOK, DOCUMENT), Result::Ok);
+  EXPECT_EQ(lastCursor, 0U);
+  EXPECT_EQ(ClippingsUpload::download(BOOK, DOCUMENT), Result::Skipped);
+}
+
+TEST_F(ClippingSync, FailedPullAfterSuccessfulUploadStillReportsFailureAndRetries) {
+  addLocal();
+  forcedReply = "{broken";
+  EXPECT_EQ(ClippingsUpload::sync(BOOK, DOCUMENT), Result::InvalidResponse);
+  EXPECT_EQ(remote.size(), 1U);
+  forcedReply.clear();
+  EXPECT_EQ(ClippingsUpload::sync(BOOK, DOCUMENT), Result::Ok);
+  load();
+  EXPECT_EQ(CLIPPINGS.clippingCount(), 1U);
+}
+
+TEST_F(ClippingSync, OversizedReplyCannotAdvanceCursorOrImportData) {
+  forcedReply.assign(CLIPPING_TEXT_MAX * 6 + 2049, ' ');
+  EXPECT_EQ(ClippingsUpload::download(BOOK, DOCUMENT), Result::InvalidResponse);
+  forcedReply.clear();
+  addRemote("remote", "selection");
+  EXPECT_EQ(ClippingsUpload::download(BOOK, DOCUMENT), Result::Ok);
+  EXPECT_EQ(lastCursor, 0U);
+}
+
+TEST_F(ClippingSync, UploadThenDownloadCompletesWithoutWorstCaseResponseAllocation) {
+  addLocal();
+  maxClippingTestArrayAllocation = 16 * 1024;
+  EXPECT_EQ(ClippingsUpload::sync(BOOK, DOCUMENT), Result::Ok);
+  EXPECT_EQ(putCount, 1U);
+  EXPECT_GT(getCount, 0U);
+}
+
+TEST_F(ClippingSync, ImportsNearIndexLimitsWithoutHoldingTwoBookIndexes) {
+  for (const unsigned count : {127, 128, 254, 255, 256}) {
+    SCOPED_TRACE(count);
+    Storage.files.clear();
+    Storage.files["/My Clippings.txt"] = "local export\n";
+    load();
+    for (unsigned i = 0; i < count; ++i) {
+      ASSERT_EQ(CLIPPINGS.addClipping(0, i, i, 300, 0, 1, 2, "Chapter", UINT16_MAX, "local-" + std::to_string(i),
+                                      UINT16_MAX, 42),
+                ClippingStore::AddResult::Added);
+    }
+    CLIPPINGS.unload();
+    arrayHeap::live = arrayHeap::peak = 0;
+    const size_t slots = std::min<size_t>(count + 1, CLIPPING_MAX_PER_BOOK);
+    arrayHeap::limit = slots * (sizeof(Clipping) + sizeof(uint32_t) + sizeof(uint8_t)) + 256;
+    arrayHeap::tracking = true;
+    Clipping clip;
+    bool full = false;
+    const bool merged = ClippingStore::mergeFromSync(BOOK, clip, "incoming", scope() + "incoming", false, &full);
+    arrayHeap::tracking = false;
+    EXPECT_EQ(merged, count < CLIPPING_MAX_PER_BOOK);
+    EXPECT_EQ(full, count == CLIPPING_MAX_PER_BOOK);
+    EXPECT_EQ(arrayHeap::live, 0U);
+    EXPECT_LE(arrayHeap::peak, arrayHeap::limit);
+    load();
+    EXPECT_EQ(CLIPPINGS.clippingCount(), slots);
+    CLIPPINGS.unload();
+  }
+}
+
+TEST_F(ClippingSync, FailedImportAllocationPreservesStoreAndRetry) {
+  addLocal();
+  const auto before = Storage.files.at(storePath());
+  arrayHeap::live = arrayHeap::peak = 0;
+  arrayHeap::limit = 1;
+  arrayHeap::tracking = true;
+  Clipping clip;
+  bool full = false;
+  const bool merged = ClippingStore::mergeFromSync(BOOK, clip, "incoming", scope() + "incoming", false, &full);
+  arrayHeap::tracking = false;
+  EXPECT_FALSE(merged);
+  EXPECT_FALSE(full);
+  EXPECT_EQ(arrayHeap::live, 0U);
+  EXPECT_EQ(Storage.files.at(storePath()), before);
+  EXPECT_TRUE(ClippingStore::mergeFromSync(BOOK, clip, "incoming", scope() + "incoming", false, &full));
+}
+
+TEST_F(ClippingSync, UploadsWorstCaseEscapingWithoutLargeArrayAllocation) {
+  load();
+  const std::string text(4096, '\x01');
+  ASSERT_EQ(CLIPPINGS.addClipping(2, 3, 4, 20, 5, 6, 7, "Chapter", 12, text, UINT16_MAX, 42),
+            ClippingStore::AddResult::Added);
+  CLIPPINGS.unload();
+  maxClippingTestArrayAllocation = 8192;
+  ASSERT_EQ(ClippingsUpload::upload(BOOK, DOCUMENT), Result::Ok);
+  ASSERT_EQ(remote.size(), 1U);
+  JsonDocument json;
+  ASSERT_FALSE(deserializeJson(json, remote.begin()->second));
+  EXPECT_EQ(json["text"].as<std::string>(), text);
+}
+
+TEST_F(ClippingSync, SourceRangesRoundTripWithoutSharingLayoutCoordinates) {
+  load();
+  ASSERT_EQ(CLIPPINGS.addClipping(2, 3, 3, 20, 0, 1, 2, "Chapter", 12, "same phrase", UINT16_MAX, 42, 100, 111),
+            ClippingStore::AddResult::Added);
+  CLIPPINGS.unload();
+  ASSERT_EQ(ClippingsUpload::upload(BOOK, DOCUMENT), Result::Ok);
+  ASSERT_EQ(remote.size(), 1U);
+  JsonDocument uploaded;
+  ASSERT_FALSE(deserializeJson(uploaded, remote.begin()->second));
+  EXPECT_EQ(uploaded["start_offset"].as<uint32_t>(), 100U);
+  EXPECT_EQ(uploaded["end_offset"].as<uint32_t>(), 111U);
+  addRemote("anchored", "other phrase");
+  JsonDocument incoming;
+  ASSERT_FALSE(deserializeJson(incoming, remote.at("anchored")));
+  incoming["start_offset"] = 300;
+  incoming["end_offset"] = 312;
+  serializeJson(incoming, remote["anchored"] = "");
+  ASSERT_EQ(ClippingsUpload::download(BOOK, DOCUMENT), Result::Ok);
+  load();
+  ASSERT_EQ(CLIPPINGS.clippingCount(), 2U);
+  EXPECT_EQ(CLIPPINGS.clippingAt(1)->sourceStart, 300U);
+  EXPECT_EQ(CLIPPINGS.clippingAt(1)->sourceEnd, 312U);
+  EXPECT_EQ(CLIPPINGS.clippingAt(1)->layoutSignature, 0U);
 }

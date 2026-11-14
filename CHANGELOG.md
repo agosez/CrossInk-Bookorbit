@@ -16,8 +16,9 @@ Based on CrossInk v2.0.0.
 ### Changed
 
 - Interface languages other than English are no longer built into the firmware: CrossInk v2.0.0 moved them out to make room. This fork publishes its own language packs, so **Settings > System > Device > Download Languages** installs them over Wi-Fi, and after the update What's New offers to download the language you were using. Upstream's packs cannot be used here: they lack this fork's screens. Each release also carries `crossink-languages-<version>.zip` for installing them from the SD card instead.
-- The BookOrbit screens, sync messages and Home theme are now translated into all 27 languages besides English, not only the 8 this fork covered before.
+- The BookOrbit screens, sync messages and Home theme are now translated into all 28 languages besides English, Estonian included, not only the 8 this fork covered before.
 - The OPDS browser moves from Home to File Transfer, as in CrossInk v2.0.0, to make room for Plugins. The BookOrbit catalog stays on Home; on the Cover Grid home screen its tab now sits next to Plugins.
+- The Xteink X3 and X4 no longer have an OPDS browser: CrossInk v2.0.0's latest changes no longer fit on them alongside BookOrbit, and the BookOrbit catalog covers the same need. Its File Transfer entry, its settings and its section of the web settings page are gone on these two readers; saved OPDS servers stay on the SD card. The X4 Pro, X4 Classic, Sticky, Picco and EEGO A4 keep it.
 - A book download from the BookOrbit catalog now reserves room for the largest piece of secure data the way CrossInk v2.0.0 does for OPDS books: once the request is sent, while memory is still in one piece. A server that agrees to small pieces, as most nginx and Apache setups do, no longer costs that reservation at all ([#96](https://github.com/agosez/CrossInk-Bookorbit/issues/96)).
 - KOReader Sync, which CrossInk v2.0.0 renames Sync Server and extends to reading stats and clippings, stays out of this fork, and so do its new Sync Book, Sync Folder and Sync Books actions. A KOReader account saved before this fork removed it keeps them.
 

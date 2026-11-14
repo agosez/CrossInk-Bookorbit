@@ -3,7 +3,7 @@ project(UiFontErrorTests C CXX)
 enable_testing()
 set(SDK ${CMAKE_CURRENT_SOURCE_DIR}/../../freeink-sdk/libs/font/FreeInkFont)
 file(GLOB FONT_SOURCES ${SDK}/src/*.c ${SDK}/src/*.cpp ${SDK}/src/freetype/*.c)
-add_executable(ui_font_errors UiFontErrorTest.cpp ../../src/FilenameFontSystem.cpp ../fork_stubs/DefaultIndexingMethod.cpp
+add_executable(ui_font_errors UiFontErrorTest.cpp ../../src/FilenameFontSystem.cpp
   ../../lib/ScalableFont/HalScalableFont.cpp ${FONT_SOURCES})
 target_compile_features(ui_font_errors PRIVATE cxx_std_20)
 target_compile_options(ui_font_errors PRIVATE -UNDEBUG -fsanitize=address,undefined -fno-omit-frame-pointer)

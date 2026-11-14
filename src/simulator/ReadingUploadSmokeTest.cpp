@@ -21,6 +21,7 @@
 #include "network/ClippingsUpload.h"
 #include "network/ReadingSyncUpload.h"
 #include "util/FolderBookIterator.h"
+#include "util/StatsStorage.h"
 
 namespace {
 void require(bool ok, const char* what) {
@@ -216,6 +217,9 @@ bool prepareReadingUploadSmokeTest() {
         require(EpubReaderUtils::saveProgress(epub, 0, 2, std::strcmp(variant, "zero") == 0 ? 0 : 2),
                 "unusable saved page count fixture");
       } else if (std::strcmp(variant, "legacy4") == 0) {
+        const std::string backup = primary + ".bak";
+        if (Storage.exists(backup.c_str()))
+          require(Storage.remove(backup.c_str()), "remove recoverable progress backup");
         auto file = Storage.open(primary.c_str(), O_WRONLY | O_TRUNC);
         const uint8_t data[4] = {0, 0, 2, 0};
         require(file && file.write(data, sizeof(data)) == sizeof(data), "legacy progress fixture");
@@ -231,8 +235,8 @@ bool prepareReadingUploadSmokeTest() {
       Epub epub(path, "/.crosspoint");
       require(BookReadingStats::remove(epub.getCachePath()), "remove stats fixture");
     }
-    Storage.remove("/.crosspoint/global_stats.bin");
-    Storage.remove("/.crosspoint/global_stats.bin.bak");
+    Storage.remove(StatsStorage::localPath("/.crosspoint/global_stats.bin").c_str());
+    Storage.remove((StatsStorage::localPath("/.crosspoint/global_stats.bin") + ".bak").c_str());
   }
   if (std::getenv("CROSSINK_READING_TEST_TRACKING_DISABLED")) SETTINGS.trackReadingStats = 0;
   if (std::getenv("CROSSINK_READING_TEST_EMPTY_FOLDER")) {

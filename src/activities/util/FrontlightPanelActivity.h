@@ -38,6 +38,7 @@ class FrontlightPanelActivity final : public Activity {
   OptionPopup optionPopup;
   bool initialInversion = false;
   bool initialTouchscreenDisabled = false;
+  bool previousTouchscreenRecoveryOverride = false;
   bool ttfRenderingChanged = false;
   // Swallow the swipe/tap fallout of a slider drag so its release can't
   // trigger the back gesture and close the panel mid-adjustment.
@@ -108,6 +109,8 @@ class FrontlightPanelActivity final : public Activity {
   freeink::ui::Rect simulatorQuickActionRect(int index) const;
   freeink::ui::Rect simulatorHandleRect() const { return drawerHandleRect; }
   bool simulatorShowsChapterLine() const { return showChapterLine; }
+  bool simulatorShowsReaderDetails() const { return context.showReaderDetails; }
+  Rect simulatorHomeButtonRect() const { return homeButtonRect(); }
   Rect simulatorSyncOptionRect(const int index) const { return optionPopup.simulatorOptionRect(index); }
   bool simulatorSyncOptionDisabled(const int index) const { return optionPopup.simulatorOptionDisabled(index); }
   int simulatorContentBottom = 0;

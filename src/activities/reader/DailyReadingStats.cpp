@@ -9,6 +9,8 @@
 #include <cstring>
 #include <iterator>
 
+#include "util/StatsStorage.h"
+
 namespace DailyReadingStats {
 namespace {
 struct Cache {
@@ -17,6 +19,15 @@ struct Cache {
   uint32_t dirty = 0;
 };
 Cache cache[2];
+std::string localDirectory;
+StatsCounterId directoryId;
+bool directoryReady = false;
+bool prepareDirectory() {
+  if (localDirectory.empty()) localDirectory = StatsStorage::localPath(DIRECTORY, true);
+  if (!localDirectory.empty() && !directoryReady)
+    directoryReady = StatsStorage::directoryCounterId(localDirectory, directoryId);
+  return directoryReady;
+}
 uint32_t migratedMonths[2] = {UINT32_MAX, UINT32_MAX};
 constexpr size_t MONTH_BYTES = 12 + 31 * 8 + 4;
 // One bounded 256-byte month on the stack avoids heap churn at each checkpoint.
@@ -37,12 +48,12 @@ uint32_t hashBytes(uint32_t hash, const uint8_t* bytes, size_t size) {
   return hash;
 }
 void legacyPath(char* path, uint32_t day, const char* suffix) {
-  snprintf(path, 64, "%s/%05lu.bin%s", DIRECTORY, static_cast<unsigned long>(day), suffix);
+  snprintf(path, 64, "%s/%05lu.bin%s", localDirectory.c_str(), static_cast<unsigned long>(day), suffix);
 }
 void monthPath(char* path, uint32_t first, int slot) {
   ReadingStatsDate date;
   readingStatsDateFromDayIndex(first, date);
-  snprintf(path, 64, "%s/%04u-%02u.%c.bin", DIRECTORY, date.year, date.month, slot ? 'b' : 'a');
+  snprintf(path, 64, "%s/%04u-%02u.%c.bin", localDirectory.c_str(), date.year, date.month, slot ? 'b' : 'a');
 }
 bool monthFor(uint32_t day, uint32_t& first, uint8_t& count) {
   ReadingStatsDate date;
@@ -143,7 +154,7 @@ bool loadMonth(uint32_t first, uint8_t count, Month& month, bool convertingLegac
   return true;
 }
 bool saveMonth(uint32_t first, uint8_t count, Month& month) {
-  if (!Storage.exists(DIRECTORY) && !Storage.mkdir(DIRECTORY)) {
+  if (!Storage.exists(localDirectory.c_str()) && !Storage.mkdir(localDirectory.c_str())) {
     LOG_ERR("DailyStats", "Cannot create daily stats directory");
     return false;
   }
@@ -248,8 +259,8 @@ bool fileMonth(const char* name, uint32_t& first) {
 // keeps memory bounded and avoids invalidating a directory cursor during conversion.
 bool nextMonth(uint32_t after, uint32_t& first) {
   first = UINT32_MAX;
-  if (!Storage.exists(DIRECTORY)) return true;
-  FsFile dir = Storage.open(DIRECTORY);
+  if (!Storage.exists(localDirectory.c_str())) return true;
+  FsFile dir = Storage.open(localDirectory.c_str());
   if (!dir || !dir.isDirectory()) {
     dir.close();
     LOG_ERR("DailyStats", "Cannot open daily stats directory");
@@ -368,6 +379,9 @@ bool save(Cache& c) {
 
 #ifdef DAILY_READING_STATS_TEST
 void resetForTest() {
+  localDirectory.clear();
+  directoryId = {};
+  directoryReady = false;
   for (auto& c : cache) c = {};
   migratedMonths[0] = migratedMonths[1] = UINT32_MAX;
 }
@@ -375,6 +389,7 @@ void resetForTest() {
 
 bool read(uint32_t day, Counter& counter) {
   counter = {};
+  if (!prepareDirectory()) return false;
   uint32_t first;
   uint8_t count;
   if (!monthFor(day, first, count) || !migrateMonth(first, count)) return false;
@@ -385,6 +400,7 @@ bool read(uint32_t day, Counter& counter) {
 }
 
 bool write(uint32_t day, const Counter& counter) {
+  if (!prepareDirectory()) return false;
   uint32_t first;
   uint8_t count;
   if (!monthFor(day, first, count) || !migrateMonth(first, count)) return false;
@@ -413,7 +429,7 @@ bool write(uint32_t day, const Counter& counter) {
 }
 
 bool uploadPending(bool (*upload)(void*, uint32_t, uint32_t), void* context) {
-  if (!flush()) return false;
+  if (!prepareDirectory() || !flush()) return false;
   uint32_t after = UINT32_MAX;
   for (;;) {
     uint32_t first;
@@ -449,7 +465,7 @@ bool pruneSyncedMonths(const ReadingStatsDate& today) {
   }
   const uint32_t keepFrom = readingStatsDayIndex(previous);
   // Accepted but uncheckpointed time must participate in the retention decision.
-  if (!flush()) return false;
+  if (!prepareDirectory() || !flush()) return false;
   bool ok = true;
   uint32_t after = UINT32_MAX;
   for (;;) {
@@ -498,6 +514,12 @@ bool flush() {
   for (auto& c : cache)
     if (!save(c)) ok = false;
   return ok;
+}
+
+bool counterId(StatsCounterId& id) {
+  if (!prepareDirectory()) return false;
+  id = directoryId;
+  return true;
 }
 
 bool secondsFor(uint32_t day, uint32_t& seconds) {

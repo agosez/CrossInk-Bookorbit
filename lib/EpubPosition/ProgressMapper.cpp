@@ -1033,7 +1033,12 @@ CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epu
   bool resolvedIntra = false;
   if (useAncestry) {
     ParagraphStreamer s(xpathSteps, xpathStepCount, xpathChar, xpathTextNode);
-    if (streamSpine(epub, result.spineIndex, s) && s.found()) {
+    if (!streamSpine(epub, result.spineIndex, s)) {
+      LOG_ERR("PM", "Cannot read chapter for remote progress mapping");
+      result.valid = false;
+      return result;
+    }
+    if (s.found()) {
       intra = s.progress();
       resolvedIntra = true;
       if (s.getTargetVisChars() > 0 && s.getTargetVisChars() <= UINT32_MAX) {
@@ -1063,7 +1068,12 @@ CrossPointPosition ProgressMapper::toCrossPoint(const std::shared_ptr<Epub>& epu
     }
   } else if (xpathP > 0) {
     ParagraphStreamer s(xpathP, xpathChar, xpathTextNode);
-    if (streamSpine(epub, result.spineIndex, s) && s.found()) {
+    if (!streamSpine(epub, result.spineIndex, s)) {
+      LOG_ERR("PM", "Cannot read chapter for remote progress mapping");
+      result.valid = false;
+      return result;
+    }
+    if (s.found()) {
       intra = s.progress();
       resolvedIntra = true;
       if (s.getTargetVisChars() > 0 && s.getTargetVisChars() <= UINT32_MAX) {

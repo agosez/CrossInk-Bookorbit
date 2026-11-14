@@ -86,12 +86,14 @@ add_subdirectory(stable_page_navigation)
 add_subdirectory(xtc_navigation)
 add_subdirectory(touch_reader_preview)
 add_subdirectory(dictionary_word_parts)
+add_subdirectory(dictionary_lookup)
 add_subdirectory(ligature_guard)
 add_subdirectory(chapter_html_slim_parser)
 add_subdirectory(korean_line_breaking)
 add_subdirectory(input_release_guard)
 add_subdirectory(release_suppression)
 add_subdirectory(bitmap_resample)
+add_subdirectory(bmp_to_bmp)
 add_subdirectory(bookorbit_device_path)
 add_subdirectory(bookorbit_smart_sync)
 add_subdirectory(bookorbit_sidecar_state)
@@ -123,6 +125,7 @@ add_subdirectory(library_recent_order)
 add_subdirectory(scalable_fonts)
 add_subdirectory(glyph_bitmap)
 add_subdirectory(daily_reading_stats)
+add_subdirectory(stats_storage)
 add_subdirectory(sync_files)
 add_subdirectory(sync_pending)
 add_subdirectory(sync_ids)
@@ -132,8 +135,10 @@ add_subdirectory(support_info)
 add_subdirectory(log_retention)
 add_subdirectory(screen_calibration)
 add_subdirectory(keyboard_tips)
+add_subdirectory(interval_selection_layout)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_subdirectory(frontlight_settings_boot)
+add_subdirectory(eego_frontlight)
 add_test(NAME TransferReliabilityRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_transfer_reliability.py)
 add_test(NAME WebDavGetRegression
@@ -157,63 +162,70 @@ add_test(NAME WifiAutoConnectRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_wifi_auto_connect.py)
 add_subdirectory(book_loading_feedback)
 add_subdirectory(otf_fonts)
-
 add_subdirectory(asset_catalog)
 add_subdirectory(asset_download)
 add_subdirectory(asset_companion_index)
 add_subdirectory(asset_companion_store)
-
 add_subdirectory(http_header)
-
 add_subdirectory(swipe_delete)
 add_subdirectory(touch_action_buttons)
-
 add_test(NAME LanguageAssetPublicationRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_language_asset_publication.py)
 add_test(NAME ReleaseDownloadPreparationRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_release_download_preparation.py)
+add_test(NAME SleepChargeOverlayRegression
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_sleep_charge_overlay.py)
+add_test(NAME DisplaySdkCompatibilityRegression
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_display_sdk_compatibility.py)
 
 add_subdirectory(reading_session_journal)
-
 add_subdirectory(reading_session_checkpoint)
-
 add_subdirectory(protected_paths)
 add_subdirectory(plugin_manifest_classification)
 add_subdirectory(plugin_catalog_paging)
 add_subdirectory(plugin_http_policy)
 add_subdirectory(plugin_bundle)
-
+add_test(NAME PluginDownloadLifecycleRegression
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_plugin_download_lifecycle.py)
 add_subdirectory(plugin_picker_layout)
-
 add_subdirectory(plugin_details)
-
 add_subdirectory(reader_session)
 add_subdirectory(reader_plugin_events)
-
+add_subdirectory(ipc_task_stack)
 add_subdirectory(hal_power_manager)
 add_subdirectory(hal_frontlight)
 add_subdirectory(picco_slide_switch)
 add_subdirectory(input_wake)
 add_subdirectory(button_navigation)
 add_subdirectory(button_capture)
-
 add_test(NAME ReaderRestartStatsRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/scripts/test_reader_restart_stats.py)
-
 add_test(NAME ReaderStatsLatencyRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/scripts/test_reader_stats_latency.py)
-
 add_test(NAME BookmarkListMemoryRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_bookmark_list_memory.py)
-
 add_subdirectory(bookmark_store)
-
 add_test(NAME UpstreamPortRegressions
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_upstream_ports.py)
-
 add_subdirectory(gif_support)
-
 add_subdirectory(clipping_sync)
 add_subdirectory(progress_slots)
 add_test(NAME PiccoDisplayIdleRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_picco_display_idle.py)
+add_test(NAME PluginNetworkBootRegression
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_plugin_network_boot.py)
+FetchContent_GetProperties(arduinojson)
+add_test(NAME PluginJobHeapRegression
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_plugin_job_heap.py
+    --json-include ${arduinojson_SOURCE_DIR}/src)
+find_program(NODE_EXECUTABLE node)
+if(NODE_EXECUTABLE)
+  add_test(NAME TransferWebSocketRegression
+    COMMAND ${NODE_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_transfer_websocket.cjs)
+endif()
+add_subdirectory(progress_sync)
+
+add_test(NAME WebDavCredentialsRegression
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_webdav_credentials.py)
+add_test(NAME TlsFragmentConfigRegression
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/scripts/test_tls_fragment_config.py)

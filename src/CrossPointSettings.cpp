@@ -29,6 +29,16 @@
 #include "util/ReaderStatusBarJson.h"
 #include "util/TwoFingerSwipe.h"
 
+bool CrossPointSettings::fadingFixSupported() {
+  const auto board = BoardConfig::ACTIVE.board;
+  if (board == BoardConfig::Board::XteinkX4 || board == BoardConfig::Board::XteinkX3) return true;
+#ifndef SIMULATOR
+  return board == BoardConfig::Board::XteinkX3Uc8279;
+#else
+  return false;
+#endif
+}
+
 void readAndValidate(FsFile& file, uint8_t& member, const uint8_t maxValue) {
   uint8_t tempValue;
   serialization::readPod(file, tempValue);
@@ -332,6 +342,8 @@ uint8_t migrateTiltDirectionValue(const uint8_t direction) {
 const char* CrossPointSettings::getDefaultDeviceName() {
 #if (defined(FREEINK_DEVICE_X4CLASSIC) && FREEINK_DEVICE_X4CLASSIC) || defined(SIMULATOR_DEVICE_X4_CLASSIC)
   return "X4 Classic";
+#elif defined(FREEINK_DEVICE_EEGO_A4) && FREEINK_DEVICE_EEGO_A4
+  return "Crossink EEGO A4";
 #endif
   if (BoardConfig::isSticky()) return "Sticky";
   if (BoardConfig::isX4Pro()) return "CrossInk X4 Pro";
@@ -538,8 +550,8 @@ uint16_t CrossPointSettings::getReadingIdleTimeThresholdSeconds() const {
 
 void CrossPointSettings::toJson(JsonDocument& doc) const {
   std::lock_guard<std::mutex> lock(_mutex);
-  for (const auto& info : getBaseSettingsList()) {
-    if (!info.key || (!info.valuePtr && !info.value16Ptr && !info.stringOffset)) continue;
+  forEachBaseSetting([&](const SettingInfo& info) {
+    if (!info.key || (!info.valuePtr && !info.value16Ptr && !info.stringOffset)) return;
     if (info.stringOffset) {
       const char* value = reinterpret_cast<const char*>(this) + info.stringOffset;
       if (info.obfuscated) {
@@ -556,7 +568,7 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
       if (isSleepScreenSetting(info)) value = sleepScreenModeToStorage(value);
       doc[info.key] = value;
     }
-  }
+  });
 
   // Images is a combined UI choice; retain the original persisted pair for compatibility.
   doc["imageRendering"] = imageRendering;
@@ -573,7 +585,7 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   bars["xtcMode"] = xtcStatusBarMode;
   bars["legacyXtcTopUsesBottom"] = legacyXtcTopUsesBottom != 0;
 
-  // Library-local choices stay out of the resident settings catalog and Web Settings.
+  // Library-local choices stay out of the settings catalog and Web Settings.
   doc["librarySortMethod"] = librarySortMethod;
   doc["librarySortDescending"] = librarySortDescending;
   doc["libraryListExpanded"] = libraryListExpanded;
@@ -635,15 +647,15 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
   const BookOrbitShortcutNumbers* const savedBookOrbitNumbers = savedBookOrbitShortcutNumbers(doc, importingCrossPoint);
   bool bookOrbitShortcutsCarried = false;
 
-  for (const auto& info : getBaseSettingsList()) {
-    if (!info.key || (!info.valuePtr && !info.value16Ptr && !info.stringOffset)) continue;
+  forEachBaseSetting([&](const SettingInfo& info) {
+    if (!info.key || (!info.valuePtr && !info.value16Ptr && !info.stringOffset)) return;
     if (info.stringOffset) {
       char* destination = reinterpret_cast<char*>(this) + info.stringOffset;
       if (info.stringMaxLen == 0) {
         LOG_ERR("CPS", "Misconfigured SettingInfo: stringMaxLen is 0 for key '%s'", info.key);
         destination[0] = '\0';
         needsResave = true;
-        continue;
+        return;
       }
       const std::string fieldDefault = destination;
       std::string value;
@@ -678,7 +690,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
         destination[0] = '\0';
         needsResave = true;
       }
-      continue;
+      return;
     }
 
     if (info.value16Ptr) {
@@ -688,16 +700,20 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
         value = std::clamp(value, info.valueRange.min, info.valueRange.max);
       }
       this->*(info.value16Ptr) = value;
-      continue;
+      return;
     }
 
     // Missing keys in older exports restore the original status font size and
     // bidirectional tilt behavior, even if this session changed them.
+    // Sensitivity also restores Normal for older exports and invalid values.
     const uint8_t fieldDefault = info.valuePtr == &CrossPointSettings::displayStatusBarTextSize ||
                                          info.valuePtr == &CrossPointSettings::tiltNextPageOnly
                                      ? 0
                                      : this->*(info.valuePtr);
-    uint8_t value = doc[info.key] | fieldDefault;
+    const uint8_t importDefault = info.valuePtr == &CrossPointSettings::tiltSensitivity
+                                      ? static_cast<uint8_t>(TiltSensitivity::NORMAL)
+                                      : fieldDefault;
+    uint8_t value = doc[info.key] | importDefault;
     if (!doc[info.key].isNull()) {
       value = carryBookOrbitShortcut(info.key, value, savedBookOrbitNumbers, bookOrbitShortcutsCarried);
     }
@@ -717,7 +733,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
       value = sleepScreenStorageToMode(storedValue);
       if (sleepScreenModeToStorage(value) != storedValue) needsResave = true;
       this->*(info.valuePtr) = value;
-      continue;
+      return;
     }
     if (strcmp(info.key, "fontSize") == 0 && !doc["fontSize"].isNull() && value < MIN_READER_FONT_POINT_SIZE) {
       if (doc["sdFontFamilyName"].is<const char*>() && doc["sdFontFamilyName"].as<const char*>()[0] != '\0') {
@@ -730,7 +746,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
                !(strcmp(info.key, "fontSize") == 0 && doc["sdFontFamilyName"].is<const char*>() &&
                  doc["sdFontFamilyName"].as<const char*>()[0] != '\0' && value >= MIN_READER_FONT_POINT_SIZE) &&
                !isEnumRawValueAllowed(info, value)) {
-      value = defaultEnumRawValue(info, fieldDefault);
+      value = defaultEnumRawValue(info, importDefault);
       needsResave = true;
     } else if (info.type == SettingType::TOGGLE) {
       value = clamp(value, 2, fieldDefault);
@@ -738,7 +754,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
       value = std::clamp(value, static_cast<uint8_t>(info.valueRange.min), static_cast<uint8_t>(info.valueRange.max));
     }
     this->*(info.valuePtr) = value;
-  }
+  });
 
   // The dynamic Images setting is intentionally absent from the generic field loop.
   imageRendering = clamp(doc["imageRendering"] | imageRendering, IMAGE_RENDERING_COUNT, imageRendering);
@@ -1490,12 +1506,14 @@ bool CrossPointSettings::verifySleepScreenMigrationContract() {
 #endif
 
 bool CrossPointSettings::isRefreshNeverAvailable() {
-#if defined(FREEINK_DEVICE_PICCO) && FREEINK_DEVICE_PICCO
-  // Keep periodic cleanup on Picco until its panels are validated without it.
-  return false;
-#else
-  return Frontlight.present();
-#endif
+  // Never is opt-in per device. A frontlight does not establish that a panel
+  // can run without periodic cleanup; validate new devices before adding them.
+  switch (BoardConfig::ACTIVE.board) {
+    case BoardConfig::Board::XteinkX4Pro:
+      return Frontlight.present();
+    default:
+      return false;
+  }
 }
 
 int CrossPointSettings::getRefreshFrequency() const {

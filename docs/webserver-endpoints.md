@@ -317,6 +317,8 @@ Successful response:
 
 ## OPDS Server API
 
+This fork's Xteink X3/X4 firmware has no OPDS browser, so these endpoints answer 404 there and the web settings page leaves its OPDS section out.
+
 ### `GET /api/opds`
 
 Lists saved OPDS servers. Passwords are never returned.

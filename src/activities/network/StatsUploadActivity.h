@@ -66,16 +66,29 @@ class StatsUploadActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
-  bool preventAutoSleep() override { return state == State::Uploading; }
+  bool preventAutoSleep() override { return state == State::Uploading || state == State::Preparing; }
 
  private:
-  enum class State { Ready, Wifi, Uploading, SyncingBook, Done, Failed };
+#ifdef SIMULATOR
+  friend struct SyncDiagnosticsSmokeTest;
+#endif
+  enum class State { Ready, Preparing, Wifi, Uploading, SyncingBook, Done, Failed };
   enum class NextBook { Book, Skip, Done, Error };
   // Reading Stats / Clippings: catch-up walk first when needed, then pending books.
   enum class Phase : uint8_t { CatchUp, Pending, Done };
   // Sync Books / Sync Folder. Legacy: the per-book walk (stock KOSync, or no
   // change feed). Otherwise a scope's first walk, or catch-ups, pull, push.
-  enum class Flow : uint8_t { Unplanned, Legacy, FirstWalk, CatchUpStats, CatchUpClippings, Pull, Push, Done };
+  enum class Flow : uint8_t {
+    Unplanned,
+    Legacy,
+    FirstWalk,
+    CatchUpStats,
+    CatchUpClippings,
+    Pull,
+    Push,
+    PushClippings,
+    Done
+  };
   struct PullItem {
     uint8_t change;  // index into pageChanges
     std::string path;
@@ -92,9 +105,11 @@ class StatsUploadActivity final : public Activity {
   bool restartOnLeave = false;
   uint32_t uploaded = 0;
   uint32_t skipped = 0;
-  uint32_t failed = 0;
+  uint32_t failed = 0;  // Failed attempts, not unique books: phases can revisit the same book.
+  uint32_t omittedFailureDetails = 0;
   // A book that failed, for the summary: what failed (SyncPending bits) and why.
   struct BookFailure {
+    uint64_t pathKey;  // Bounded path identity without retaining another full path per row.
     std::string name;
     uint8_t parts;
     std::string reason;
@@ -118,7 +133,7 @@ class StatsUploadActivity final : public Activity {
   std::string currentBook;  // shown under the progress text
   // What the last uploadBookExtras() call failed to send (SyncPending bits).
   uint8_t extrasFailedParts = 0;
-  const char* extrasFailureReason = nullptr;  // and why (a translated message)
+  std::string extrasFailureReason;  // and why (a translated message)
   uint32_t statsUploaded = 0;
   uint32_t clippingsUploaded = 0;
   uint32_t statsFailed = 0;
@@ -155,6 +170,7 @@ class StatsUploadActivity final : public Activity {
   uint32_t pulledApplied = 0;
   uint32_t pulledParked = 0;
   ReadingSyncUpload::GlobalStatsStep globalFailedStep = ReadingSyncUpload::GlobalStatsStep::None;
+  int globalHttpCode = 0;
   StatsUploadClient::Result globalResult = StatsUploadClient::Result::Skipped;
   std::unique_ptr<FolderBookIterator> folderBooks;
   bool globalAttempted = false;
@@ -171,6 +187,10 @@ class StatsUploadActivity final : public Activity {
   bool singleBook() const { return scope == Scope::Book; }
   bool targeted() const { return scope == Scope::ReadingStats || scope == Scope::Clippings; }
   void start();
+  void prepareNext();
+  void startTransfer();
+  bool preparationPendingOnly = false;
+  bool preparationOwned = false;
   void uploadNext();
   // `remote`: a pulled change to apply instead of fetching (incremental pull).
   void syncEpub(std::string&& bookPath, const KOReaderProgressChange* remote = nullptr);
@@ -214,4 +234,5 @@ class StatsUploadActivity final : public Activity {
   uint32_t countPendingInScope() const;
   void finishUpload();
   void closeTransfer();
+  void releaseBatchBuffers();
 };

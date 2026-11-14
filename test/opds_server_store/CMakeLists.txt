@@ -3,10 +3,10 @@ add_executable(OpdsServerStoreTest
   ${REPO_ROOT}/src/OpdsServerStore.cpp
   ${REPO_ROOT}/lib/Serialization/PersistableStore.cpp
   ${REPO_ROOT}/lib/Serialization/AtomicFile.cpp
-  ${REPO_ROOT}/test/fork_stubs/DefaultIndexingMethod.cpp
 )
 target_include_directories(OpdsServerStoreTest PRIVATE
   stubs
+  ${REPO_ROOT}/include
   ${REPO_ROOT}/test/persistable_store_atomic/stubs
   ${REPO_ROOT}/src
   ${REPO_ROOT}/lib/Serialization
