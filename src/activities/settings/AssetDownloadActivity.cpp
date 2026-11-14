@@ -5,6 +5,7 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <WiFi.h>
+#include <mbedtls/sha256.h>
 
 #include <cstdio>
 #include <cstring>
@@ -15,6 +16,7 @@
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/TouchHeaderBackButton.h"
+#include "network/AssetCatalogSignature.h"
 #include "network/HttpDownloader.h"
 #include "util/StringUtils.h"
 
@@ -200,6 +202,54 @@ void AssetDownloadActivity::showError(StrId error, Pending next) {
   popup_.setCancelCallback([this, next, decision, cancelledNext] { pending_ = decision ? cancelledNext : next; });
   requestUpdate();
 }
+bool AssetDownloadActivity::verifySignature(const char* catalogRelative, const uint8_t (&digest)[32],
+                                            bool& incompatible) {
+  char relative[AssetCatalog::MAX_CATALOG_PATH + sizeof(AssetCatalogSignature::SUFFIX)];
+  const int n = std::snprintf(relative, sizeof(relative), "%s%s", catalogRelative, AssetCatalogSignature::SUFFIX);
+  if (n <= 0 || static_cast<size_t>(n) >= sizeof(relative) ||
+      !AssetDownloadService::buildUrl(catalogEndpoints_, relative, url_, sizeof(url_)))
+    return false;
+  // Short-lived and larger than the preferred stack budget.
+  auto text = makeUniqueNoThrow<char[]>(AssetCatalogSignature::MAX_ENVELOPE_BYTES);
+  if (!text) {
+    LOG_ERR("ASSET", "OOM: catalog signature");
+    return false;
+  }
+  size_t length = 0;
+  HttpDownloader::DownloadOptions options;
+  options.maxBytes = AssetCatalogSignature::MAX_ENVELOPE_BYTES;
+  options.maxRedirects = 2;
+  options.allowUrl = AssetDownloadService::allowUrl;
+  options.urlContext = &catalogEndpoints_;
+  options.transport = AssetDownloadService::transport();
+  options.shouldCancel = [this] { return pollCancel(); };
+  const auto result = HttpDownloader::streamUrl(
+      url_,
+      [&text, &length](const uint8_t* bytes, size_t count) {
+        if (count > AssetCatalogSignature::MAX_ENVELOPE_BYTES - length) return false;
+        std::memcpy(text.get() + length, bytes, count);
+        length += count;
+        return true;
+      },
+      nullptr, "", "", options);
+  if (result != HttpDownloader::OK) {
+    LOG_ERR("ASSET", "Catalog signature unavailable: error=%d", static_cast<int>(result));
+    return false;
+  }
+  AssetCatalogSignature::Envelope envelope;
+  const char* error = AssetCatalogSignature::verify(text.get(), length, kind_, envelope);
+  char catalogHash[65];
+  for (size_t i = 0; i < sizeof(digest); ++i) std::snprintf(catalogHash + 2 * i, 3, "%02x", digest[i]);
+  if (!error && std::strcmp(envelope.catalog, catalogHash) != 0) error = "catalog does not match its signature";
+  if (error) {
+    LOG_ERR("ASSET", "Catalog rejected: %s", error);
+    incompatible = true;
+    return false;
+  }
+  std::memcpy(catalog_->noticesSha256, envelope.notices, sizeof(catalog_->noticesSha256));
+  std::memcpy(catalog_->sourcesSha256, envelope.sources, sizeof(catalog_->sourcesSha256));
+  return true;
+}
 void AssetDownloadActivity::fetch() {
   catalogReady_ = false;
   step_ = 1;
@@ -221,6 +271,10 @@ void AssetDownloadActivity::fetch() {
   char relative[AssetCatalog::MAX_CATALOG_PATH];
   bool valid = AssetCatalog::catalogPath(parserOptions, relative, sizeof(relative)) &&
                AssetDownloadService::buildUrl(catalogEndpoints_, relative, url_, sizeof(url_));
+  mbedtls_sha256_context hash;
+  mbedtls_sha256_init(&hash);
+  bool hashed = mbedtls_sha256_starts(&hash, 0) == 0;
+  uint8_t digest[32] = {};
   if (valid) {
     LOG_DBG("ASSET", "Fetching catalog: %s", url_);
     HttpDownloader::DownloadOptions options;
@@ -228,19 +282,24 @@ void AssetDownloadActivity::fetch() {
     options.maxRedirects = 2;
     options.allowUrl = AssetDownloadService::allowUrl;
     options.urlContext = &catalogEndpoints_;
-    options.transport = HttpDownloader::Transport::ESP_HTTP;
+    options.transport = AssetDownloadService::transport();
     options.shouldCancel = [this] { return pollCancel(); };
     const auto result = HttpDownloader::streamUrl(
         url_,
-        [&parser](const uint8_t* bytes, size_t count) {
+        [&parser, &hash, &hashed](const uint8_t* bytes, size_t count) {
+          hashed = hashed && mbedtls_sha256_update(&hash, bytes, count) == 0;
           return parser->feed(reinterpret_cast<const char*>(bytes), count);
         },
         [this](size_t received, size_t total) { progress(received, total); }, "", "", options);
     valid = result == HttpDownloader::OK && parser->finish();
   }
+  hashed = hashed && mbedtls_sha256_finish(&hash, digest) == 0;
+  mbedtls_sha256_free(&hash);
   if (!valid) LOG_ERR("ASSET", "Catalog rejected: %s", parser->error() ? parser->error() : "transport");
-  const bool incompatible = parser->error() != nullptr;
+  bool incompatible = parser->error() != nullptr;
   parser.reset();
+  // Nothing in the catalog is trusted until its signature holds.
+  if (valid && !cancelled_) valid = hashed && verifySignature(relative, digest, incompatible);
   busy_ = false;
   if (cancelled_) {
     pending_ = Pending::Exit;

@@ -120,7 +120,17 @@ void fixture() {
   responses[base + prefix + "source/LICENSE"] = "license";
   responses[base + prefix + "source/archive.zip"] = "archive";
 }
-Result run() {
+// The catalog's signed envelope vouches for both indexes; by default it covers what is served.
+void signIndexes() {
+  const std::pair<char*, const char*> fields[] = {{catalog.noticesSha256, "notices.json"},
+                                                  {catalog.sourcesSha256, "sources.json"}};
+  for (const auto& [field, name] : fields) {
+    const auto served = responses.find(base + prefix + name);
+    std::strcpy(field, served == responses.end() ? "" : digest(served->second).c_str());
+  }
+}
+Result run(bool sign = true) {
+  if (sign) signIndexes();
   auto r = AssetCompanionStore::prepare(catalog, catalog.entries[0], endpoints, callbacks);
   for (const auto& v : readers) assert(v.second == 0);
   return r;
@@ -165,6 +175,24 @@ int main() {
   responses[base + prefix + "sources.json"] = "{\"hyphenation\":{}}";
   assert(run() == Result::Invalid);
   assertPrior();
+  // An index other than the one the catalog's signature names is refused before any
+  // companion it lists is fetched, and so is an index of an unsigned catalog.
+  for (const bool unsigned_ : {false, true}) {
+    reset();
+    fixture();
+    prior();
+    if (unsigned_) {
+      catalog.noticesSha256[0] = catalog.sourcesSha256[0] = '\0';
+    } else {
+      signIndexes();
+      responses[base + prefix + "sources.json"] =
+          index(reference(prefix + "source/LICENSE", "license") + "," + reference(prefix + "source/evil", "evil"));
+      responses[base + prefix + "source/evil"] = "evil";
+    }
+    assert(run(false) == Result::Invalid);
+    assert(files.find(root() + ".part/source/evil") == files.end());
+    assertPrior();
+  }
   reset();
   fixture();
   prior();

@@ -164,10 +164,22 @@ jobs:
           touch "$PAGES_DIR/.nojekyll"
 
       # Versions ending in -rc1 are not -RC builds: the firmware reads the stable channel.
+      # Readers refuse an unsigned catalog (src/network/AssetCatalogSignature.h), so a
+      # missing or wrong key fails the job before gh-pages changes.
       - name: Export language and hyphenation downloads
+        env:
+          ASSET_CATALOG_SIGNING_KEY: ${{ secrets.ASSET_CATALOG_SIGNING_KEY }}
         run: |
+          if [ -z "$ASSET_CATALOG_SIGNING_KEY" ]; then
+            echo '::error::The ASSET_CATALOG_SIGNING_KEY secret is not set'
+            exit 1
+          fi
+          KEY="$RUNNER_TEMP/asset-catalog-signing.pem"
+          trap 'rm -f "$KEY"' EXIT
+          (umask 077; printf '%s\n' "$ASSET_CATALOG_SIGNING_KEY" > "$KEY")
           python3 scripts/export_pages_language_assets.py \
-            --output "$PAGES_DIR/assets" --version "$RELEASE_VERSION" --channel stable
+            --output "$PAGES_DIR/assets" --version "$RELEASE_VERSION" --channel stable \
+            --signing-key "$KEY"
 
       - name: Push to gh-pages
         run: |

@@ -173,6 +173,12 @@ def inject_download_endpoints(env):
             protocols = 'HTTP(S)' if scheme == 'https?' else 'HTTPS'
             raise ValueError(f'{variable} must be an {protocols} prefix ending in /')
         env.Append(CPPDEFINES=[(define, '\\\"' + base + '\\\"')])
+    # Another asset host signs its catalogs with its own key (AssetCatalogSignature.cpp).
+    key = os.environ.get('CROSSINK_ASSET_CATALOG_KEY', '')
+    if key:
+        if not re.fullmatch(r'04[0-9a-f]{128}', key):
+            raise ValueError('CROSSINK_ASSET_CATALOG_KEY must be an uncompressed P-256 point in lowercase hex')
+        env.Append(CPPDEFINES=[('ASSET_CATALOG_PUBLIC_KEY', '\\\"' + key + '\\\"')])
 
 
 def inject_version(env):

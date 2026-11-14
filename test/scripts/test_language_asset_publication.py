@@ -339,6 +339,45 @@ class PagesExportTest(unittest.TestCase):
                 pages_export.plan(output, [(catalog, files)])
             self.assertEqual((output / key).read_bytes(), before)
 
+    def test_signatures_vouch_for_each_catalog_and_its_indexes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            key = tmp / 'key.pem'
+            subprocess.run(['openssl', 'ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', str(key)],
+                           check=True, capture_output=True)
+            public = tmp / 'public.pem'
+            subprocess.run(['openssl', 'ec', '-in', str(key), '-pubout', '-out', str(public)],
+                           check=True, capture_output=True)
+            bundles = [bundle(), bundle(kind='hyphenation', revision='e')]
+            files, catalogs = pages_export.plan(tmp / 'out', copy.deepcopy(bundles))
+            envelopes = pages_export.signatures(bundles, catalogs, key)
+            self.assertEqual(set(envelopes), {name + '.sig' for name in catalogs})
+            for catalog, payloads in bundles:
+                name = publisher.catalog_key(catalog)
+                message, _, signature = envelopes[name + '.sig'].rpartition(b'signature=')
+                prefix = f"snapshots/{catalog['revision']}/"
+                self.assertEqual(message.decode().splitlines(), [
+                    'CrossInk signed asset catalog 1',
+                    'kind=' + catalog['kind'],
+                    'catalog=' + publisher.sha(catalogs[name]),
+                    'notices=' + publisher.sha(payloads[prefix + 'notices.json']),
+                    'sources=' + publisher.sha(payloads[prefix + 'sources.json']),
+                ])
+                self.assertTrue(signature.endswith(b'\n'))
+                (tmp / 'message').write_bytes(message)
+                (tmp / 'signature').write_bytes(bytes.fromhex(signature.decode()))
+                verified = subprocess.run(['openssl', 'dgst', '-sha256', '-verify', str(public), '-signature',
+                                           str(tmp / 'signature'), str(tmp / 'message')], capture_output=True)
+                self.assertEqual(verified.returncode, 0, verified.stderr)
+            self.assertNotEqual(pages_export.public_key_hex(key), pages_export.firmware_public_key())
+
+    def test_firmware_key_is_the_built_in_one_unless_a_build_overrides_it(self):
+        with patch.dict('os.environ', {}, clear=True):
+            built_in = pages_export.firmware_public_key()
+        self.assertRegex(built_in, r'^04[0-9a-f]{128}$')
+        with patch.dict('os.environ', {'CROSSINK_ASSET_CATALOG_KEY': '04' + 'ab' * 64}):
+            self.assertEqual(pages_export.firmware_public_key(), '04' + 'ab' * 64)
+
 
 class ReleaseIdentityTest(unittest.TestCase):
     def identity(self, tag='v2.0.0', channel=None, commit='1' * 40, dirty='', **changes):

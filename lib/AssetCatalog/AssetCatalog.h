@@ -27,6 +27,10 @@ struct Catalog {
   char keyset[65] = {};
   Entry entries[MAX_ENTRIES] = {};
   size_t count = 0;
+  // This fork: SHA-256 of the snapshot's notices.json and sources.json, from the catalog's
+  // verified signature envelope (AssetCatalogSignature). Companion downloads must match.
+  char noticesSha256[65] = {};
+  char sourcesSha256[65] = {};
 };
 struct Options {
   Kind expectedKind = Kind::Hyphenation;

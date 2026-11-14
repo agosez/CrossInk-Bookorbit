@@ -26,6 +26,11 @@ Based on CrossInk v2.0.0.
 
 - Shortcuts set to BookOrbit Sync keep working after this update. CrossInk v2.0.0 gives the numbers they were saved under to Back Home and Home/Reader, so they are carried over the first time the device starts, on every button that offers BookOrbit Sync, the Home key and Quick Actions included.
 - BookOrbit Sync no longer sends a guessed position when the device cannot place the page within the book's structure: the sync stops with an error instead. A guessed position could send another reader to the wrong place, or to the start of the book.
+- Download Languages and Hyphenation Packs work on the X3 and X4. The download failed every time after a minute of waiting: with Wi-Fi on, the reader had too little memory left for the secure connection it opened. It now uses the lighter one that BookOrbit Sync and font downloads already use, as CrossInk v2.0.0-RC also fails there ([CrossInk#927](https://github.com/uxjulia/CrossInk/issues/927)).
+
+### Security
+
+- Language and hyphenation catalogs are now signed by this fork's release workflow, and the reader refuses one whose signature does not hold. The signature also covers the license and source indexes each pack comes with, so every file a language or hyphenation download writes to the SD card is checked against it, whatever the connection it arrived over.
 
 ## [v1.6.1+bookorbit.8] - 2026-11-13
 

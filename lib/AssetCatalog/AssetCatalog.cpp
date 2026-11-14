@@ -60,6 +60,7 @@ Parser::Parser(Catalog& catalog, const Options& options) : catalog_(catalog), op
   // Reset in place; avoid a large temporary on the constrained device stack.
   catalog_.count = 0;
   catalog_.revision[0] = catalog_.source[0] = catalog_.keyset[0] = '\0';
+  catalog_.noticesSha256[0] = catalog_.sourcesSha256[0] = '\0';
   catalog_.kind = options.expectedKind;
   catalog_.channel = options.expectedChannel;
   if (options_.expectedKind == Kind::Translation &&

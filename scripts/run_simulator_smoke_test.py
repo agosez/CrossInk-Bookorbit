@@ -210,6 +210,31 @@ def prepare_asset_mock(temp_root: Path, snapshot: str | None, hyphenation_only: 
     return mock
 
 
+def sign_asset_mock(mock: Path, temp_root: Path) -> str:
+    """Sign every catalog the mock serves, as the release workflows do, with a throwaway key.
+
+    Returns the public key the simulator is told to trust (CROSSINK_SIM_ASSET_CATALOG_KEY).
+    Call it once the catalogs are final: a later edit voids their signatures.
+    """
+    from export_pages_language_assets import SIGNATURE_SUFFIX, envelope, public_key_hex
+    key = temp_root / "asset-catalog-key.pem"
+    subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(key)],
+                   check=True, capture_output=True)
+    catalogs = [mock / "hyphenation.json", mock / "translation.json", *(mock / "catalogs").rglob("*.json")]
+    for path in catalogs:
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
+        catalog = json.loads(data)
+        snapshot = mock / "snapshots" / catalog["revision"]
+        if not (snapshot / "notices.json").is_file() or not (snapshot / "sources.json").is_file():
+            continue  # left unsigned: the firmware refuses it, as it would a broken release
+        path.with_name(path.name + SIGNATURE_SUFFIX).write_bytes(envelope(
+            catalog["kind"], data, (snapshot / "notices.json").read_bytes(),
+            (snapshot / "sources.json").read_bytes(), key))
+    return public_key_hex(key)
+
+
 def run_smoke(args: argparse.Namespace) -> int:
     book = Path(args.book).resolve()
     if not book.exists():
@@ -286,6 +311,7 @@ def run_smoke(args: argparse.Namespace) -> int:
                 catalog["entries"] = []
                 catalog_path.write_text(json.dumps(catalog, ensure_ascii=False, separators=(",", ":")))
                 env["CROSSINK_ASSET_SMOKE_EMPTY_CATALOG"] = "1"
+            env["CROSSINK_SIM_ASSET_CATALOG_KEY"] = sign_asset_mock(Path(env["CROSSINK_SIM_HTTP_MOCK_ROOT"]), temp_root)
             env["CROSSPOINT_SIM_WIFI_NETWORKS"] = "asset-smoke:-40:open"
             env["CROSSINK_LANGUAGE_FLASH"] = str(temp_root / "language-flash.bin")
             if args.asset_hyphenation_only:

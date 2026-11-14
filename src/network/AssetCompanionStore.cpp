@@ -197,6 +197,8 @@ bool download(Workspace& w, const char* relative, uint32_t expected = 0, bool ve
   options.maxBytes = FILE_LIMIT;
   options.expectedBytes = expected;
   options.maxRedirects = 2;
+  options.transport = AssetDownloadService::transport();
+  options.reserveFullRecord = true;  // source files reach hundreds of KB
   options.allowUrl = AssetDownloadService::allowUrl;
   options.urlContext = const_cast<AssetDownloadService::Endpoints*>(w.endpoints);
   options.validateWithContext = verify ? validateFile : nullptr;
@@ -236,6 +238,7 @@ bool downloadIndex(Workspace& w, size_t index) {
   HttpDownloader::DownloadOptions options(false, false, [&] { return stopped(w); }, 1024);
   options.maxBytes = FILE_LIMIT;
   options.maxRedirects = 2;
+  options.transport = AssetDownloadService::transport();
   options.allowUrl = AssetDownloadService::allowUrl;
   options.urlContext = const_cast<AssetDownloadService::Endpoints*>(w.endpoints);
   const auto result = HttpDownloader::streamUrl(
@@ -272,6 +275,14 @@ bool downloadIndex(Workspace& w, size_t index) {
     return false;
   }
   for (size_t i = 0; i < sizeof(digest); ++i) std::snprintf(w.hashes[index] + 2 * i, 3, "%02x", digest[i]);
+  // The index names every companion and its SHA-256, so it is only as trustworthy as the
+  // transport unless it matches the catalog's signed envelope (empty when unsigned).
+  const char* signedHash = index == 0 ? w.catalog->noticesSha256 : w.catalog->sourcesSha256;
+  if (std::strcmp(w.hashes[index], signedHash) != 0) {
+    LOG_ERR("ASSET", "%s does not match the signed catalog", INDEX_NAMES[index]);
+    w.result = Result::Invalid;
+    return false;
+  }
   return true;
 }
 char lower(char value) { return value >= 'A' && value <= 'Z' ? char(value + 'a' - 'A') : value; }

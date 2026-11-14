@@ -95,6 +95,29 @@ streaming wolfSSL transport already used by other network features, avoiding
 the esp_http_client path that has stalled on ESP32-C3 devices. Downloaded font
 files are validated by CRC before installation.
 
+### Language and hyphenation download hosting
+
+The release workflows publish language and hyphenation packs to this fork's
+GitHub Pages site with `scripts/export_pages_language_assets.py`, which signs
+every catalog with the `ASSET_CATALOG_SIGNING_KEY` repository secret (a PEM
+P-256 private key). The firmware refuses an unsigned catalog: on the X3 and X4
+these downloads use the wolfSSL transport, which does not check certificates, so
+the signature, and the SHA-256 digests the catalog lists, are what authenticate
+them.
+
+To serve packs from another host, build with `CROSSINK_ASSET_BASE_URL` set to
+that host and `CROSSINK_ASSET_CATALOG_KEY` set to the public half of your own
+key, as an uncompressed point in lowercase hex:
+
+```sh
+openssl ecparam -name prime256v1 -genkey -noout -out catalog-key.pem
+openssl ec -in catalog-key.pem -pubout -conv_form uncompressed -outform DER | tail -c 65 | xxd -p -c 65
+```
+
+Then export with `--signing-key catalog-key.pem` and the same
+`CROSSINK_ASSET_CATALOG_KEY` in the environment; the script refuses a key the
+firmware would not trust.
+
 ## Flash
 
 ```sh

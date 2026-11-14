@@ -62,6 +62,9 @@ class AssetDownloadActivity final : public Activity {
   void installSelected();  // discover -> (confirm overwrite) -> download -> activate.
   void showError(StrId error, Pending next = Pending::Exit);
   void confirmOverwrite();
+  // Fetches "<catalog>.sig", checks it signs these catalog bytes, and records the snapshot
+  // index digests it vouches for. Sets incompatible when the signature itself is refused.
+  bool verifySignature(const char* catalogRelative, const uint8_t (&digest)[32], bool& incompatible);
   void fetch();
   void download();
   void activate();

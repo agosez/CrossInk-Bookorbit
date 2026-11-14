@@ -476,6 +476,8 @@ Result download(const AssetCatalog::Catalog& catalog, const AssetCatalog::Entry&
   options.maxBytes = MAX_PAYLOAD;
   options.expectedBytes = entry.bytes;
   options.maxRedirects = 2;
+  options.transport = transport();
+  options.reserveFullRecord = true;  // packs span many TLS records
   options.allowUrl = allowUrl;
   options.urlContext = const_cast<Endpoints*>(&endpoints);
   options.validateWithContext = validate;
