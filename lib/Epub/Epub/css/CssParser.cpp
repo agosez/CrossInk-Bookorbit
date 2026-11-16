@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <charconv>
 #include <cmath>
 #include <cstring>
@@ -136,6 +137,26 @@ bool tryParseNumber(std::string_view s, T& out) {
   if (begin < end && *begin == '+') ++begin;
   const auto r = std::from_chars(begin, end, out);
   return r.ec == std::errc{} && r.ptr == end;
+}
+
+// Floating-point std::from_chars links ~20 KB of libstdc++ tables into the
+// image; strtof is linked already. Accepts what the template above accepts:
+// no leading space or second sign, no hex, nothing left over, no overflow.
+bool tryParseNumber(std::string_view s, float& out) {
+  if (!s.empty() && s.front() == '+') s.remove_prefix(1);
+  char buf[32];
+  if (s.empty() || s.size() >= sizeof(buf) || s.front() == '+' || std::isspace(static_cast<unsigned char>(s.front())) ||
+      s.find_first_of("xX") != std::string_view::npos) {
+    return false;
+  }
+  memcpy(buf, s.data(), s.size());
+  buf[s.size()] = '\0';
+  char* parsedEnd = nullptr;
+  errno = 0;
+  const float value = strtof(buf, &parsedEnd);
+  if (parsedEnd != buf + s.size() || errno == ERANGE) return false;
+  out = value;
+  return true;
 }
 
 // Collect up to 4 whitespace-separated tokens for a CSS edge-value shorthand
