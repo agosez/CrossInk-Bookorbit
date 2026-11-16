@@ -29,6 +29,7 @@
 #include <memory>
 
 #include "BookOrbitCredentialStore.h"
+#include "BookOrbitJsonFilter.h"
 #include "StreamingJsonParser.h"
 
 // This file intentionally mirrors lib/KOReaderSync/KOReaderSyncClient.cpp rather than
@@ -53,6 +54,10 @@ const char* BookOrbitSyncClient::deviceId() {
     return value;
   }();
   return id.data();
+}
+
+void bookOrbitSetFilter(JsonDocument& filter, const char* json) {
+  if (deserializeJson(filter, json) != DeserializationError::Ok) LOG_ERR("BookOrbit", "Unreadable reply filter");
 }
 
 namespace {
@@ -1517,17 +1522,9 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeBookmarks(
   if (httpCode < 200 || httpCode >= 300) return SERVER_ERROR;
 
   JsonDocument filter;
-  filter["unmatched"] = true;
-  filter["results"][0]["more"] = true;
-  filter["results"][0]["skippedNoPosition"] = true;
-  JsonObject addFilter = filter["results"][0]["toApply"]["add"].add<JsonObject>();
-  addFilter["serverId"] = true;
-  addFilter["pos"] = true;
-  addFilter["title"] = true;
-  addFilter["pageno"] = true;
-  JsonObject deleteFilter = filter["results"][0]["toApply"]["delete"].add<JsonObject>();
-  deleteFilter["serverId"] = true;
-  deleteFilter["key"] = true;
+  bookOrbitSetFilter(filter, R"({"unmatched":true,"results":[{"more":true,"skippedNoPosition":true,)"
+                             R"("toApply":{"add":[{"serverId":true,"pos":true,"title":true,"pageno":true}],)"
+                             R"("delete":[{"serverId":true,"key":true}]}}]})");
 
   JsonDocument doc;
   if (deserializeJson(doc, response, DeserializationOption::Filter(filter)) != DeserializationError::Ok) {

@@ -15,6 +15,7 @@
 
 #include "BookOrbitCredentialStore.h"
 #include "BookOrbitHomeStore.h"
+#include "BookOrbitJsonFilter.h"
 #include "BookOrbitSyncClient.h"
 #include "DaysFromCivil.h"
 #include "activities/reader/ReadingStatsUtils.h"
@@ -305,12 +306,8 @@ bool BookOrbitCatalogClient::fetchCatalogCounts(BookOrbitCatalogCounts& outCount
   const std::string url =
       BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/dashboard?section=" + std::string(WANT_TO_READ_SHELF);
   JsonDocument filter;
-  filter["browseCounts"]["libraries"] = true;
-  filter["browseCounts"]["authors"] = true;
-  filter["browseCounts"]["series"] = true;
-  filter["browseCounts"]["collections"] = true;
-  filter["browseCounts"]["smartScopes"] = true;
-  filter["section"]["books"][0]["formats"] = true;
+  bookOrbitSetFilter(filter, R"({"browseCounts":{"libraries":true,"authors":true,"series":true,"collections":true,)"
+                             R"("smartScopes":true},"section":{"books":[{"formats":true}]}})");
   JsonDocument doc;
   if (!fetchJson(url, filter, doc)) return false;
 
@@ -380,33 +377,15 @@ bool BookOrbitCatalogClient::fetchHomeDashboard(BookOrbitHomeSnapshot& out, HalF
   if (!BOOKORBIT_STORE.hasCredentials()) return false;
 
   JsonDocument filter;
-  filter["displayName"] = true;
-  filter["totalBooks"] = true;
-  filter["browseCounts"]["authors"] = true;
-  filter["browseCounts"]["series"] = true;
-  filter["browseCounts"]["collections"] = true;
-  for (const char* list : {"continueReading", "discover"}) {
-    JsonObject book = filter[list][0].to<JsonObject>();
-    book["id"] = true;
-    book["title"] = true;
-    book["formats"] = true;
-    book["hasCover"] = true;
-    book["updatedAt"] = true;
-    book["progressPercentage"] = true;
-  }
-  filter["readingGoal"]["goalBooks"] = true;
-  filter["readingGoal"]["completedBooks"] = true;
-  filter["readingGoal"]["year"] = true;
-  filter["readingStreak"]["currentStreak"] = true;
-  filter["readingStreak"]["longestStreak"] = true;
-  filter["readingStreak"]["lastSevenDays"] = true;
-  filter["highlightOfTheDay"]["text"] = true;
-  filter["highlightOfTheDay"]["bookTitle"] = true;
-  filter["readingYear"]["startDate"] = true;
-  filter["readingYear"]["minutes"] = true;
-  filter["achievements"]["next"]["name"] = true;
-  filter["achievements"]["next"]["threshold"] = true;
-  filter["achievements"]["next"]["currentProgress"] = true;
+  bookOrbitSetFilter(
+      filter, R"({"displayName":true,"totalBooks":true,"browseCounts":{"authors":true,"series":true,)"
+              R"("collections":true},"continueReading":[{"id":true,"title":true,"formats":true,"hasCover":true,)"
+              R"("updatedAt":true,"progressPercentage":true}],"discover":[{"id":true,"title":true,"formats":true,)"
+              R"("hasCover":true,"updatedAt":true,"progressPercentage":true}],"readingGoal":{"goalBooks":true,)"
+              R"("completedBooks":true,"year":true},"readingStreak":{"currentStreak":true,"longestStreak":true,)"
+              R"("lastSevenDays":true},"highlightOfTheDay":{"text":true,"bookTitle":true},)"
+              R"("readingYear":{"startDate":true,"minutes":true},"achievements":{"next":{"name":true,)"
+              R"("threshold":true,"currentProgress":true}}})");
 
   JsonDocument doc;
   if (!fetchJson(BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/dashboard", filter, doc)) return false;
@@ -489,10 +468,7 @@ bool BookOrbitCatalogClient::fetchBooks(const BookOrbitBookQuery& query, const i
   if (!query.shelf.empty()) {
     // A shelf is one short list in the server's order, and it is not narrowed to EPUBs.
     JsonDocument filter;
-    filter["section"]["books"][0]["id"] = true;
-    filter["section"]["books"][0]["title"] = true;
-    filter["section"]["books"][0]["authors"] = true;
-    filter["section"]["books"][0]["formats"] = true;
+    bookOrbitSetFilter(filter, R"({"section":{"books":[{"id":true,"title":true,"authors":true,"formats":true}]}})");
     JsonDocument doc;
     if (!fetchJson(booksUrl(query, page, PAGE_SIZE), filter, doc)) return false;
     JsonArrayConst books = doc["section"]["books"].as<JsonArrayConst>();
@@ -512,12 +488,8 @@ bool BookOrbitCatalogClient::fetchBooks(const BookOrbitBookQuery& query, const i
   const std::string url = booksUrl(query, page, PAGE_SIZE, withLetters);
 
   JsonDocument filter;
-  filter["page"] = true;
-  filter["total"] = true;
-  filter["size"] = true;
-  filter["items"][0]["id"] = true;
-  filter["items"][0]["title"] = true;
-  filter["items"][0]["authors"] = true;
+  bookOrbitSetFilter(filter,
+                     R"({"page":true,"total":true,"size":true,"items":[{"id":true,"title":true,"authors":true}]})");
   // Only what the sort's list sections need: a series name per row costs heap.
   if (bySeries) filter["items"][0]["seriesName"] = true;
   if (byDateAdded) filter["items"][0]["addedAt"] = true;
@@ -559,12 +531,8 @@ bool BookOrbitCatalogClient::fetchSectionEntries(const std::string& sectionId, c
   }
 
   JsonDocument filter;
-  filter["page"] = true;
-  filter["hasNext"] = true;
-  filter["items"][0]["id"] = true;
-  filter["items"][0]["title"] = true;
-  filter["items"][0]["count"] = true;
-  filter["items"][0]["seriesId"] = true;
+  bookOrbitSetFilter(filter,
+                     R"({"page":true,"hasNext":true,"items":[{"id":true,"title":true,"count":true,"seriesId":true}]})");
   JsonDocument doc;
   if (!fetchJson(url, filter, doc)) return false;
 
@@ -600,13 +568,9 @@ bool BookOrbitCatalogClient::fetchBookDetail(const int64_t bookId, BookOrbitBook
   const std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/books/" + std::to_string(bookId) +
                           "?deviceId=" + BookOrbitSyncClient::deviceId();
   JsonDocument filter;
-  filter["id"] = true;
-  filter["title"] = true;
-  filter["authors"] = true;
-  filter["files"][0]["id"] = true;
-  filter["files"][0]["format"] = true;
-  filter["files"][0]["sizeBytes"] = true;
-  filter["files"][0]["devicePath"] = true;
+  bookOrbitSetFilter(filter,
+                     R"({"id":true,"title":true,"authors":true,"files":[{"id":true,"format":true,"sizeBytes":true,)"
+                     R"("devicePath":true}]})");
   JsonDocument doc;
   if (!fetchJson(url, filter, doc)) return false;
 
