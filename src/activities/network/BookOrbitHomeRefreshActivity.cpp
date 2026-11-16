@@ -7,6 +7,7 @@
 #include <Logging.h>
 #include <WallClock.h>
 
+#include "BookOrbitDeviceScan.h"
 #include "BookOrbitHomeStore.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
@@ -21,7 +22,15 @@ constexpr unsigned long FAILURE_MESSAGE_MS = 2500;
 
 void BookOrbitHomeRefreshActivity::onEnter() {
   Activity::onEnter();
+  // This boot's onEnter() can run inside setup(): the scan waits for the first loop().
+  scanPending = true;
   requestUpdate();
+}
+
+void BookOrbitHomeRefreshActivity::connect() {
+  // The BookOrbit theme's sync also recognises books copied to the card; its offline half
+  // (the Library index, the hashes) runs before Wi-Fi takes its share of the heap.
+  BookOrbitDeviceScan::prepare(nullptr);
   startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
                          [this](const ActivityResult& result) {
                            if (result.isCancelled) {
@@ -52,6 +61,7 @@ void BookOrbitHomeRefreshActivity::runRefresh() {
 
   const auto sizes = BookOrbitHomeLayout::coverSizes(renderer);
   const bool refreshed = BookOrbitHomeStore::refresh(nullptr, sizes);
+  if (refreshed) BookOrbitDeviceScan::run(nullptr);
 
   SavedWifiConnect::disconnect();
 
@@ -71,6 +81,11 @@ void BookOrbitHomeRefreshActivity::runRefresh() {
 }
 
 void BookOrbitHomeRefreshActivity::loop() {
+  if (scanPending) {
+    scanPending = false;
+    connect();
+    return;
+  }
   if (refreshPending) {
     refreshPending = false;
     runRefresh();

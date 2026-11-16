@@ -797,6 +797,57 @@ to version 2 the first time the index is loaded.
   - `[12-13]` `pathLength` (`uint16_t`, 1-256)
   - `[14…]` `path` (`pathLength` bytes, absolute SD path, not null-terminated)
 
+## `/.crosspoint/bookorbit_recognition.bin`
+
+### Version 1
+
+What the BookOrbit theme's syncs keep between two passes of the device scan, which
+recognises books copied to the card (see `src/BookOrbitDeviceScan.h`): the last Library
+arrival handled, the server's library token, and the EPUBs the server did not recognise.
+Books it recognises are not listed here: they join `bookorbit_downloads.bin`.
+
+`watermark` is a `firstSeen` value of the Library index (`library.idx`): every book that
+arrived before it has been handled, so a pass only looks at the books with a `firstSeen` at
+or above it, and none at all while it equals the index's `nextFirstSeen`. Renames keep a
+book's `firstSeen`. An index that starts over (a `nextFirstSeen` below the watermark) resets
+it to 0.
+
+The unrecognised files are asked about again, by bare hash so that the server does not list
+them for review a second time, when the token the server sends with its answers
+(`libraryVersion`) differs from the one recorded: a book was added or a hash linked by hand.
+A sync with nothing new asks about the first few of them only, to learn the token. A file
+that changed or went away is forgotten when it is asked about again. At most 1024 files
+without PSRAM, 8192 with it. The file is discarded when the configured server changes, and
+rewritten through `bookorbit_recognition.tmp`.
+
+Binary layout (all little-endian, packed):
+
+- `[0-3]` magic + version: ASCII `BOR1`
+- `[4-7]` `serverCrc` (`uint32_t`, CRC32 of the configured BookOrbit server URL)
+- `[8-9]` `watermark` (`uint16_t`)
+- `[10-11]` reserved
+- `[12-43]` `libraryVersion` (32 ASCII hex characters, the server's token; zeros until known)
+- `[44-47]` `count` (`uint32_t`)
+- `count` records:
+  - `[0-31]` `hash` (KOReader partial MD5, 32 lowercase hex characters)
+  - `[32-35]` `fileSize` (`uint32_t`)
+  - `[36-39]` `pathHash` (`uint32_t`, 32-bit FNV-1a of the path, as in `bookorbit_downloads.bin`)
+  - `[40-41]` `pathLength` (`uint16_t`, 1-256)
+  - `[42]` `titleLength`, `[43]` `authorLength` (`uint8_t`, always 0 here)
+  - then `path` (`pathLength` bytes, absolute SD path, not null-terminated)
+
+## `/.crosspoint/bookorbit_scan.bin`
+
+### Version 2
+
+Temporary: the books one pass of the device scan found, from its offline half (before
+Wi-Fi) to its online half, and removed by the latter. A header of 12 bytes (ASCII `BOS2`,
+the `uint16_t` watermark the state takes once every record has been handled, 2 reserved
+bytes, a `uint32_t` count) then `count` records laid out as in `bookorbit_recognition.bin`,
+with the Library's title and author after the path (`titleLength` and `authorLength` bytes,
+each cut to 255 bytes on a UTF-8 character boundary). Those label the book in the server's
+"KOReader Books to Review" when it does not recognise it.
+
 ## `/.crosspoint/daily_minutes.bin`
 
 ### Version 1

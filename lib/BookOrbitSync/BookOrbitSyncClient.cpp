@@ -833,6 +833,97 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::uploadPageStats(const std::strin
 #endif
 }
 
+BookOrbitSyncClient::Error BookOrbitSyncClient::matchCheck(const std::string& deviceModel, const MatchQuery* queries,
+                                                           const size_t count,
+                                                           void (*visit)(const char* hash, int64_t bookId,
+                                                                         int64_t bookFileId, void* context),
+                                                           void* context, char* outLibraryVersion) {
+  outLibraryVersion[0] = '\0';
+  lastHttpCode = 0;
+  lastTransportError = 0;
+  if (!BOOKORBIT_STORE.hasCredentials()) {
+    LOG_DBG("BookOrbit", "No credentials configured");
+    return NO_CREDENTIALS;
+  }
+  if (queries == nullptr || count == 0 || count > MATCH_CHECK_MAX) return JSON_ERROR;
+
+  const std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/match-check";
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const uint32_t heapFloor = requiredHeapFloor();
+  if (freeHeap < heapFloor) {
+    LOG_ERR("BookOrbit", "Insufficient heap for sync request: %u bytes free (need %u)", freeHeap, heapFloor);
+    return LOW_MEMORY;
+  }
+
+  // See uploadPageStats for why pluginVersion is a literal and the JsonDocument is scoped.
+  JsonBody body;
+  {
+    JsonDocument doc;
+    doc["deviceId"] = deviceId();
+    doc["deviceModel"] = deviceModel;
+    doc["pluginVersion"] = "crossink-bo-1";
+    JsonArray hashes = doc["hashes"].to<JsonArray>();
+    for (size_t i = 0; i < count; i++) {
+      hashes.add(queries[i].hash);
+      if (queries[i].title == nullptr) continue;
+      // "file": a book on the device, which the server lists for review when unmatched.
+      JsonObject book = doc["books"].add<JsonObject>();
+      book["hash"] = queries[i].hash;
+      book["title"] = queries[i].title;
+      if (queries[i].authors != nullptr && queries[i].authors[0] != '\0') book["authors"] = queries[i].authors;
+      book["source"] = "file";
+    }
+    if (!body.build(doc)) return LOW_MEMORY;
+  }
+
+#ifdef SIMULATOR
+  HTTPClient http;
+  std::unique_ptr<WiFiClientSecure> secureClient;
+  WiFiClient plainClient;
+
+  if (isHttpsUrl(url)) {
+    secureClient.reset(new WiFiClientSecure);
+    secureClient->setInsecure();
+    http.begin(*secureClient, url.c_str());
+  } else {
+    http.begin(plainClient, url.c_str());
+  }
+  addAuthHeaders(http);
+  http.addHeader("Content-Type", "application/json");
+
+  const int httpCode = http.POST(body.c_str());
+  std::string response = httpCode > 0 ? http.getString().c_str() : "";
+  http.end();
+#else
+  std::string response;
+  const int httpCode = sendBookOrbitRequest("POST", url, &body, response);
+#endif
+  lastHttpCode = httpCode > 0 ? httpCode : 0;
+  lastTransportError = httpCode < 0 ? httpCode : 0;
+  body.release();
+  LOG_DBG("BookOrbit", "Match check response: %d (%u hashes)", httpCode, static_cast<unsigned>(count));
+
+  if (httpCode < 0) return NETWORK_ERROR;
+  if (httpCode == 401) return AUTH_FAILED;
+  if (httpCode < 200 || httpCode >= 300) return SERVER_ERROR;
+
+  JsonDocument filter;
+  bookOrbitSetFilter(filter, R"({"matches":[{"hash":true,"bookId":true,"bookFileId":true}],"libraryVersion":true})");
+  JsonDocument doc;
+  if (deserializeJson(doc, response, DeserializationOption::Filter(filter)) != DeserializationError::Ok) {
+    LOG_ERR("BookOrbit", "Failed to parse match check response");
+    return JSON_ERROR;
+  }
+  for (JsonObjectConst match : doc["matches"].as<JsonArrayConst>()) {
+    const char* hash = match["hash"] | "";
+    const int64_t bookId = match["bookId"] | static_cast<int64_t>(0);
+    const int64_t bookFileId = match["bookFileId"] | static_cast<int64_t>(0);
+    if (bookId != 0 && hash[0] != '\0' && visit != nullptr) visit(hash, bookId, bookFileId, context);
+  }
+  snprintf(outLibraryVersion, LIBRARY_VERSION_SIZE, "%s", doc["libraryVersion"] | "");
+  return OK;
+}
+
 BookOrbitSyncClient::Error BookOrbitSyncClient::completeSweep(const std::string& deviceModel,
                                                               const uint32_t booksMatched,
                                                               const uint32_t pageStatsUploaded,

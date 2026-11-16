@@ -23,6 +23,7 @@
 #include "BookOrbitAnnotationStore.h"
 #include "BookOrbitBookmarkStore.h"
 #include "BookOrbitCredentialStore.h"
+#include "BookOrbitDeviceScan.h"
 #include "BookOrbitHomeStore.h"
 #include "BookOrbitStatsQueue.h"
 #include "BookmarkStore.h"
@@ -328,6 +329,10 @@ void BookOrbitSyncActivity::returnToReader() {
 void BookOrbitSyncActivity::runSleepSync() {
   LOG_INF("BookOrbit", "Sleep sync starting (free=%u maxAlloc=%u)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   sdFontSystem.releaseLoadedFont(renderer);
+  // The BookOrbit theme's sync also recognises books copied to the card. Its offline half
+  // (the Library index, the hashes) runs before Wi-Fi takes its share of the heap.
+  const bool bookOrbitHome = UITheme::hasBookOrbitHome();
+  if (bookOrbitHome) BookOrbitDeviceScan::prepare(&sleepSyncWakeRequested);
   wifiActivated = true;
   bool wifiConnectedForSleepSync = false;
   if (SavedWifiConnect::connect(&sleepSyncWakeRequested)) {
@@ -342,11 +347,12 @@ void BookOrbitSyncActivity::runSleepSync() {
   // retried by the next sync, so a wake press can end it anywhere. Its tile dates the
   // snapshot as the last sync: a sync that failed for the book leaves it as it was, or
   // the tile would report as done a sync whose progress never reached the server.
-  const bool homeShown = wifiConnectedForSleepSync && UITheme::hasBookOrbitHome();
+  const bool homeShown = wifiConnectedForSleepSync && bookOrbitHome;
   const bool refreshHome = homeShown && state != SYNC_FAILED;
   if (homeShown && !refreshHome) LOG_INF("BookOrbit", "Sleep sync failed: the Home snapshot stays as it was");
   const auto homeCoverSizes = BookOrbitHomeLayout::coverSizes(renderer);
   if (refreshHome && !sleepSyncWakeRequested()) BookOrbitHomeStore::refresh(&sleepSyncWakeRequested, homeCoverSizes);
+  if (refreshHome && !sleepSyncWakeRequested()) BookOrbitDeviceScan::run(&sleepSyncWakeRequested);
   SavedWifiConnect::disconnect();
   if (refreshHome && !sleepSyncWakeRequested()) {
     BookOrbitHomeStore::decodePendingCovers(&sleepSyncWakeRequested, homeCoverSizes);

@@ -46,7 +46,6 @@
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
 #include "util/BookOrbitDevicePath.h"
-#include "util/StringUtils.h"
 
 namespace fui = freeink::ui;
 
@@ -181,8 +180,7 @@ constexpr size_t WINDOW_ROWS = (MAX_WINDOW_PAGES + 1) * BookOrbitCatalogClient::
 // The SD filename (leading slash, no folder) this firmware falls back to when the
 // server does not say where the file belongs.
 std::string catalogBookFilename(const std::string& title, const std::string& author) {
-  const std::string suffix = author.empty() ? "" : (" - " + author);
-  return "/" + StringUtils::sanitizeFilename(title + suffix) + ".epub";
+  return BookOrbitDevicePath::catalogFilename("", title, author);
 }
 
 // Where a catalog file belongs under the download folder, leading slash included.
@@ -191,9 +189,7 @@ std::string catalogBookFilename(const std::string& title, const std::string& aut
 // account's KOReader devices put it — series folders and all. Servers that do not
 // send one keep the title-author name this fork always used.
 std::string catalogBookFilename(const BookOrbitBookDetail& detail, const BookOrbitCatalogFile& file) {
-  const std::string fromServer = BookOrbitDevicePath::sanitizeRelativePath(file.devicePath);
-  if (!fromServer.empty()) return "/" + fromServer;
-  return catalogBookFilename(detail.title, detail.author);
+  return BookOrbitDevicePath::catalogFilename(file.devicePath, detail.title, detail.author);
 }
 
 // The full SD path a catalog book downloads to: the configured download folder

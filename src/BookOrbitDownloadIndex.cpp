@@ -444,6 +444,8 @@ void BookOrbitDownloadIndex::relocate(const std::string& oldPath, const std::str
   if (!wasLoaded) unload();
 }
 
+uint32_t BookOrbitDownloadIndex::pathHash(const std::string& path) { return pathHashOf(path); }
+
 size_t BookOrbitDownloadIndex::recordedCount() {
   ensureLoaded();
   return count;

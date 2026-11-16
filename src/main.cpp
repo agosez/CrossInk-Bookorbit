@@ -485,9 +485,12 @@ void silentRestartToNetwork(const NetworkBootTarget target, const uint32_t paylo
   clearSilentRestartReaderPageBuild();
   silentRebootTarget = static_cast<uint32_t>(target);
   silentRebootPayload = payload;
+  if (target == NetworkBootTarget::BOOKORBIT_HOME_REFRESH && !library::libraryIndexNeedsRefresh()) {
+    silentRebootPayload |= BOOKORBIT_HOME_REFRESH_PAYLOAD_LIBRARY_CURRENT;
+  }
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Silent restart (target=network/%lu payload=%lu)", static_cast<unsigned long>(silentRebootTarget),
-          static_cast<unsigned long>(payload));
+          static_cast<unsigned long>(silentRebootPayload));
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
   delay(50);
   restartWithSilentToken();
@@ -1862,6 +1865,9 @@ void setup() {
         launched = activityManager.goToBookOrbitCatalog(/*networkBootReady=*/true);
         break;
       case NetworkBootTarget::BOOKORBIT_HOME_REFRESH: {
+        if ((snapshotPayload & BOOKORBIT_HOME_REFRESH_PAYLOAD_LIBRARY_CURRENT) != 0) {
+          library::restoreLibraryIndexAfterSleep();
+        }
         auto refresh = makeUniqueNoThrow<BookOrbitHomeRefreshActivity>(renderer, mappedInputManager);
         if (refresh) {
           activityManager.replaceActivity(std::move(refresh));

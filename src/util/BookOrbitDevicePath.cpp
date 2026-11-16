@@ -82,3 +82,11 @@ std::string sanitizeRelativePath(const std::string& devicePath) {
 }
 
 }  // namespace BookOrbitDevicePath
+
+std::string BookOrbitDevicePath::catalogFilename(const std::string& devicePath, const std::string& title,
+                                                 const std::string& author) {
+  const std::string fromServer = sanitizeRelativePath(devicePath);
+  if (!fromServer.empty()) return "/" + fromServer;
+  const std::string suffix = author.empty() ? "" : (" - " + author);
+  return "/" + StringUtils::sanitizeFilename(title + suffix) + ".epub";
+}

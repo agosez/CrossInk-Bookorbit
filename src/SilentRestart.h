@@ -55,6 +55,9 @@ constexpr uint32_t BOOKORBIT_SLEEP_SYNC_PAYLOAD_QUICK_RESUME = 1u << 1;
 // sleep. The restart drops that knowledge, which upstream otherwise carries from sleep to
 // wake (see library::ScanSleepToken), so the sleep sync hands it over to its own sleep.
 constexpr uint32_t BOOKORBIT_SLEEP_SYNC_PAYLOAD_LIBRARY_CURRENT = 1u << 2;
+// BOOKORBIT_HOME_REFRESH payload: the same for the Home tile's sync, whose device scan
+// would otherwise rebuild a Library index that still matches the card.
+constexpr uint32_t BOOKORBIT_HOME_REFRESH_PAYLOAD_LIBRARY_CURRENT = 1u << 0;
 
 constexpr bool isNetworkBootTargetValue(const uint32_t value) {
   switch (static_cast<NetworkBootTarget>(value)) {

@@ -18,6 +18,7 @@ import hashlib
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -392,6 +393,21 @@ class KosyncDevice:
         naming template resolved server-side for this device."""
         return request_json("GET", self.api(f"/plugin/catalog/books/{book_id}?deviceId={self.device_id}"),
                             self._headers(), ok=(200,))
+
+    def catalog_manifest(self) -> list[dict]:
+        """Every EPUB book of the catalog manifest, following the cursor to the end, with
+        this device's resolved devicePath — what the firmware's device scan matches on."""
+        items: list[dict] = []
+        cursor = ""
+        while True:
+            query = f"size=100&format=epub&deviceId={self.device_id}"
+            if cursor:
+                query += f"&cursor={urllib.parse.quote(cursor, safe='')}"
+            page = request_json("GET", self.api(f"/plugin/catalog/manifest?{query}"), self._headers(), ok=(200,))
+            items.extend(page["items"])
+            cursor = page.get("nextCursor") or ""
+            if not page.get("hasNext") or not cursor:
+                return items
 
     def get_progress(self, document_hash: str) -> dict:
         return request_json("GET", self.api(f"/syncs/progress/{document_hash}"),

@@ -9,6 +9,10 @@ on; for everything inherited from upstream, see the
 
 Based on CrossInk v1.6.1.
 
+### Added
+
+- With the BookOrbit theme, the reader now recognises the BookOrbit books that reached the card without the catalog (copied over USB, sent by another app such as Apogee, downloaded by another reader), including books never opened. At each sleep sync and each sync of Home's BookOrbit tile, it looks at the books the Library has seen arrive since the previous sync and recognises them by their content, the way KOReader sync does, so whatever the file is called and even when your server has since rewritten the book's metadata. Each one moves where a catalog download would have put it, following your KOReader file naming template under the download folder, with its reading position, bookmarks and highlights. It then has its on-device dot in the catalog, shows under "On device" and counts on the Library page's card tile. A second copy of a book already in place is deleted; the reading position and highlights stay with the copy that is kept. Books in /Read stay where they are, and so does a book whose place is taken by a different file. Files BookOrbit does not recognise are left alone and listed in its KOReader Books to Review, under the title and author the Library shows, where you can link them to a book by hand; a later sync then files them too. The first syncs after updating do this for the books already on the card, 200 at a time on the X3 and X4.
+
 ### Changed
 
 - The BookOrbit catalog now remembers where up to 512 downloaded books landed (2048 on the X4 Pro and reTerminal Sticky), up from 128. Beyond 128 downloads, older books filed in the server's series folders used to lose their on-device dot and drop out of "On device"; they now keep both, and the BookOrbit count on the Library page's card tile (BookOrbit theme) no longer stops at 128. The existing record is converted automatically the first time it is read. The "On device" list itself still shows at most 200 books.

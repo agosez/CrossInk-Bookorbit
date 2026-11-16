@@ -47,6 +47,10 @@ bool hasPath(const std::string& path);
 // unloaded: the file browser and the reader call this, and neither keeps it around.
 void relocate(const std::string& oldPath, const std::string& newPath);
 
+// Hash of a path as the index stores it (32-bit FNV-1a), for callers keeping their own
+// record of paths beside it.
+uint32_t pathHash(const std::string& path);
+
 // Downloads recorded for the configured server, without checking their files: a book
 // deleted outside the catalog stays counted until a lookup finds it gone.
 size_t recordedCount();

@@ -2335,6 +2335,95 @@ def scenario_highlight_mint_outside_paragraph(verbose: bool) -> None:
             f"\"{text}\" stored at {mine[-1]['pos0']} .. {mine[-1]['pos1']} on the server"
 
 
+def scenario_sleep_sync_device_scan(verbose: bool) -> None:
+    """Under the BookOrbit theme, the sleep sync recognises books that reached the card by
+    other means, by content hash through the server's match check, and files them where a
+    catalog download would have. Three sleep syncs on one card, the download folder being
+    the SD root. First: two books copied to /Inbox and the open book move to the paths the
+    server's naming template gives them (the open book's state follows it), a book in /Read
+    stays there, and an EPUB the server does not have is left alone and remembered. Every
+    book identified ends up in the download index; the destinations are read back from that
+    index rather than recomputed here. Second, with the index and the scan's state lost (as
+    when the server URL changes) and a stray copy of one book added: the books already in
+    place are not moved again, the stray copy is deleted and the index is rebuilt. Third,
+    with nothing changed: no book is hashed, and only the remembered file's hash goes to the
+    server, to learn whether its library changed."""
+    manifest, library = load_seed()
+    sim = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                       manifest["kosync"]["password"], SIM_DEVICE_ID)
+    ids = {f["fileHash"]: item["id"] for item in sim.catalog_manifest()
+           for f in item["files"] if f["format"].lower() == "epub"}
+    book_a, book_c, book_d = (library[i] for i in (40, 41, 42))  # outside every seeded range
+    id_a, id_c, id_d = (ids[b["hash"]] for b in (book_a, book_c, book_d))
+    seeded = manifest["progress"][2]
+    id_open = ids[seeded["hash"]]
+
+    def scan_lines(output: str) -> str:
+        return "\n".join(line for line in output.splitlines() if "Device scan" in line)
+
+    def sleep_sync(fs: SimFs) -> str:
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="none", timeout_s=120, verbose=verbose)
+        assert "Sleep sync over" in output, "sleep sync never ran to its end"
+        return output
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        fs.enable_sync_on_sleep()
+        settings = json.loads((fs.crosspoint / "crossink-settings.json").read_text())
+        settings["uiTheme"] = UI_THEME_BOOKORBIT
+        (fs.crosspoint / "crossink-settings.json").write_text(json.dumps(settings))
+        open_path = fs.add_book(INTEGRATION / "library" / seeded["file"])
+        fs.set_open_book(open_path)
+        write_progress_bin(fs.epub_cache_dir(open_path) / "progress.bin", 4, 0, 1)
+
+        def place(book: dict, sd_path: str) -> Path:
+            dest = fs.fs / sd_path.lstrip("/")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(INTEGRATION / "library" / book["file"], dest)
+            return dest
+
+        # 1. Misplaced books move to their catalog location.
+        misplaced_a = place(book_a, "/Inbox/a.epub")
+        misplaced_c = place(book_c, "/Inbox/c.epub")
+        place(book_d, "/Read/d.epub")
+        unknown = fs.fs / "Inbox" / "unknown.epub"
+        unknown.write_bytes(b"not a BookOrbit book " * 200)
+
+        output = sleep_sync(fs)
+        assert "Device scan: asked=5 matched=4 moved=3 duplicates=0 remembered=1" in output, \
+            "first scan differs:\n" + scan_lines(output)
+        index = {book_id: path for book_id, path, _ in read_download_index(fs.fs / DOWNLOAD_INDEX)}
+        assert set(index) == {id_a, id_c, id_d, id_open}, f"download index after the first scan: {index}"
+        assert index[id_d] == "/Read/d.epub", f"a book in /Read was moved to {index[id_d]}"
+        for original, book_id in ((misplaced_a, id_a), (misplaced_c, id_c), (fs.fs / open_path.lstrip("/"), id_open)):
+            assert not original.exists(), f"{original.name} was not moved"
+            assert (fs.fs / index[book_id].lstrip("/")).exists(), f"book {book_id} is not at {index[book_id]}"
+        state = json.loads((fs.crosspoint / "state.json").read_text())
+        assert state["openEpubPath"] == index[id_open], f"the open book's state stayed at {state['openEpubPath']}"
+        assert fs.epub_cache_dir(index[id_open]).exists(), "the open book's cache did not follow it"
+        assert unknown.exists(), "an EPUB the server does not have was touched"
+
+        # 2. With the index and the scan state lost, books in place stay put and a stray copy goes.
+        (fs.fs / DOWNLOAD_INDEX).unlink()
+        (fs.crosspoint / "bookorbit_recognition.bin").unlink()
+        stray_c = place(book_c, "/Inbox/c copy.epub")
+        output = sleep_sync(fs)
+        assert "Device scan: asked=6 matched=5 moved=0 duplicates=1 remembered=1" in output, \
+            "second scan differs:\n" + scan_lines(output)
+        assert not stray_c.exists(), "the stray copy of an in-place book was not deleted"
+        rebuilt = {book_id: path for book_id, path, _ in read_download_index(fs.fs / DOWNLOAD_INDEX)}
+        assert rebuilt == index, f"the rebuilt index differs: {rebuilt} vs {index}"
+        leftovers = sorted(p.name for p in fs.crosspoint.glob("bookorbit_scan*"))
+        assert not leftovers, f"the scan left files behind: {leftovers}"
+
+        # 3. Nothing new: nothing is hashed, and one bare hash asks whether the library changed.
+        output = sleep_sync(fs)
+        assert "new books of" not in output and "Device scan: asked=" not in output, \
+            "an unchanged card was scanned again:\n" + scan_lines(output)
+        probes = [line for line in output.splitlines() if "Match check response" in line]
+        assert len(probes) == 1 and "(1 hashes)" in probes[0], f"unexpected match checks: {probes}"
+
+
 CATALOG_ROOT_SCRIPT = ";".join([
     "6000:DOWN", "6500:DOWN", "7000:CONFIRM",  # home menu -> BookOrbit catalog
     "13000:QUIT",                              # the root counts local books as it builds
@@ -2389,6 +2478,7 @@ SCENARIOS = {
     "catalog_deep_listing": scenario_catalog_deep_listing,
     "catalog_download_index_migration": scenario_catalog_download_index_migration,
     "catalog_download_index_beyond_legacy_cap": scenario_catalog_download_index_beyond_legacy_cap,
+    "sleep_sync_device_scan": scenario_sleep_sync_device_scan,
     "catalog_hides_non_epub": scenario_catalog_hides_non_epub,
     "catalog_sort_filter": scenario_catalog_sort_filter,
     "catalog_sections_and_shelf": scenario_catalog_sections_and_shelf,

@@ -21,11 +21,14 @@ class BookOrbitHomeRefreshActivity final : public Activity {
  private:
   enum class State { Connecting, Refreshing, DecodingCovers, Failed };
 
+  // Runs the scan's offline half, then joins Wi-Fi.
+  void connect();
   // Puts the step's message on screen before the blocking work it announces.
   void showStep(State step);
   void runRefresh();
 
   State state = State::Connecting;
+  bool scanPending = false;
   bool refreshPending = false;
   unsigned long failedAt = 0;
 };
