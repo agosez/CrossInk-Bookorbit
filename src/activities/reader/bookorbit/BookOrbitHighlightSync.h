@@ -45,6 +45,9 @@ class BookOrbitHighlightSync {
   // The server's answer on whether it recognises this document at all, taken from the
   // annotation exchange (which always runs); the sweep record reports it as booksMatched.
   bool documentUnmatched() const { return unmatchedDocument; }
+  // It knows the book, but only by an older hash of its file (positionIncompatible): it takes
+  // none of this copy's highlights until the copy is the library's.
+  bool documentIncompatible() const { return incompatibleDocument; }
   uint16_t sent() const { return annotationsSent; }
   uint16_t added() const { return annotationsAdded; }
   uint16_t removed() const { return annotationsRemoved; }
@@ -82,6 +85,7 @@ class BookOrbitHighlightSync {
   // Deleted here and, through the key set, on the server too.
   uint32_t annotationsDeletedOnServer = 0;
   bool unmatchedDocument = false;
+  bool incompatibleDocument = false;
 
   std::vector<BookOrbitAnnotation> pendingAnnotations;
   uint32_t pendingAnnotationWatermark = 0;

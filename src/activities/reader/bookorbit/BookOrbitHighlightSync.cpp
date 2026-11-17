@@ -244,10 +244,13 @@ bool BookOrbitHighlightSync::exchangeKeys() {
                                                       nullptr, 0, unmatched, &incomingAnnotations, &morePending,
                                                       nullptr, &incomingOffered, &annotationsDeletedOnServer);
   }
-  LOG_INF("BookOrbit", "Highlight exchange result=%d (http=%d, unmatched=%d, keys=%u, deleted on server=%lu)",
-          static_cast<int>(result), BookOrbitSyncClient::lastHttpCode, unmatched ? 1 : 0, (unsigned)keys.count,
-          static_cast<unsigned long>(annotationsDeletedOnServer));
-  unmatchedDocument = unmatched;
+  incompatibleDocument = BookOrbitSyncClient::lastPositionIncompatible;
+  LOG_INF("BookOrbit",
+          "Highlight exchange result=%d (http=%d, unmatched=%d, incompatible=%d, keys=%u, deleted on server=%lu)",
+          static_cast<int>(result), BookOrbitSyncClient::lastHttpCode, unmatched ? 1 : 0, incompatibleDocument ? 1 : 0,
+          (unsigned)keys.count, static_cast<unsigned long>(annotationsDeletedOnServer));
+  // The sweep's booksMatched: an incompatible copy's book is one the server knows.
+  unmatchedDocument = unmatched && !incompatibleDocument;
   // The key set goes out with the first request only.
   pendingAnnotationKeys.clear();
   pendingAnnotationKeys.shrink_to_fit();

@@ -39,6 +39,7 @@
 
 int BookOrbitSyncClient::lastHttpCode = 0;
 int BookOrbitSyncClient::lastTransportError = 0;
+bool BookOrbitSyncClient::lastPositionIncompatible = false;
 
 const char* BookOrbitSyncClient::deviceId() {
   static const std::array<char, 24> id = [] {
@@ -1096,10 +1097,12 @@ class ExchangeReplyReader {
 
   void feed(const uint8_t* data, const size_t len) { parser.feed(reinterpret_cast<const char*>(data), len); }
 
-  // Parsed to its end, and it either answered for a book or said it does not know this one.
-  bool complete() const { return !parser.hasError() && depth == 0 && (sawResult || unmatched); }
+  // Parsed to its end, and it either answered for a book or said why it did not: it does not
+  // know this one, or this copy of it differs from the library file.
+  bool complete() const { return !parser.hasError() && depth == 0 && (sawResult || unmatched || incompatible); }
 
   bool unmatched = false;
+  bool incompatible = false;
   bool more = false;
   uint32_t skippedNoPosition = 0;
   size_t offered = 0;          // valid changes in results[0], skipped ones aside
@@ -1110,6 +1113,7 @@ class ExchangeReplyReader {
   enum class Key : uint8_t {
     Other,
     Unmatched,
+    Incompatible,
     Results,
     ToApply,
     Add,
@@ -1126,9 +1130,10 @@ class ExchangeReplyReader {
     Text,
     Chapter
   };
-  // {"unmatched": [hash...], "results": [{"more", "skippedNoPosition", "applied": {"deviceDeleted"},
-  // "toApply": {"add": [{entry}], "delete": [{entry}]}}]}: the depth of each container this reader
-  // looks into.
+  // {"unmatched": [hash...], "positionIncompatible": [hash...],
+  //  "results": [{"more", "skippedNoPosition", "applied": {"deviceDeleted"},
+  //  "toApply": {"add": [{entry}], "delete": [{entry}]}}]}: the depth of each container this
+  // reader looks into.
   static constexpr uint8_t LIST = 2;
   static constexpr uint8_t RESULT = 3;
   static constexpr uint8_t TO_APPLY = 4;
@@ -1143,6 +1148,7 @@ class ExchangeReplyReader {
       const char* name;
       Key key;
     } KEYS[] = {{"unmatched", Key::Unmatched},
+                {"positionIncompatible", Key::Incompatible},
                 {"results", Key::Results},
                 {"toApply", Key::ToApply},
                 {"add", Key::Add},
@@ -1240,8 +1246,9 @@ class ExchangeReplyReader {
 
   static void onString(void* ctx, const char* value, const size_t len) {
     ExchangeReplyReader& r = self(ctx);
-    if (r.depth == LIST && r.isArray[LIST] && r.containerKey[LIST] == Key::Unmatched) {
-      if (r.documentHash == value) r.unmatched = true;
+    if (r.depth == LIST && r.isArray[LIST] &&
+        (r.containerKey[LIST] == Key::Unmatched || r.containerKey[LIST] == Key::Incompatible)) {
+      if (r.documentHash == value) (r.containerKey[LIST] == Key::Unmatched ? r.unmatched : r.incompatible) = true;
       return;
     }
     if (!r.inEntry() || !r.incoming) return;
@@ -1323,6 +1330,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
   if (outOffered) *outOffered = 0;
   if (outDeviceDeleted) *outDeviceDeleted = 0;
   lastTransportError = 0;
+  lastPositionIncompatible = false;
   outUnmatched = false;
   if (!BOOKORBIT_STORE.hasCredentials()) {
     LOG_DBG("BookOrbit", "No credentials configured");
@@ -1435,10 +1443,15 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeAnnotations(
     dropCollected();
     return JSON_ERROR;
   }
-  if (reader->unmatched) {
-    LOG_INF("BookOrbit", "Server does not know this document; annotations not exchanged");
+  if (reader->unmatched || reader->incompatible) {
+    // positionIncompatible (BookOrbit 3.6.0+): the server knows the book only by an older hash
+    // of its file and keeps none of this copy's changes. Read as success, that reply once moved
+    // the upload watermark past highlights the server dropped.
+    LOG_INF("BookOrbit", "Server %s; annotations not exchanged",
+            reader->incompatible ? "has another copy of this document" : "does not know this document");
     dropCollected();
     outUnmatched = true;
+    lastPositionIncompatible = reader->incompatible;
     return OK;
   }
   // `more` says the push-down page was full; skippedNoPosition counts web highlights whose
@@ -1533,6 +1546,7 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeBookmarks(
     std::vector<BookOrbitIncomingBookmark>* outIncoming, bool* outMorePending) {
   lastHttpCode = 0;
   lastTransportError = 0;
+  lastPositionIncompatible = false;
   outUnmatched = false;
   if (!BOOKORBIT_STORE.hasCredentials()) {
     LOG_DBG("BookOrbit", "No credentials configured");
@@ -1613,7 +1627,8 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeBookmarks(
   if (httpCode < 200 || httpCode >= 300) return SERVER_ERROR;
 
   JsonDocument filter;
-  bookOrbitSetFilter(filter, R"({"unmatched":true,"results":[{"more":true,"skippedNoPosition":true,)"
+  bookOrbitSetFilter(filter, R"({"unmatched":true,"positionIncompatible":true,)"
+                             R"("results":[{"more":true,"skippedNoPosition":true,)"
                              R"("toApply":{"add":[{"serverId":true,"pos":true,"title":true,"pageno":true}],)"
                              R"("delete":[{"serverId":true,"key":true}]}}]})");
 
@@ -1622,9 +1637,13 @@ BookOrbitSyncClient::Error BookOrbitSyncClient::exchangeBookmarks(
     LOG_ERR("BookOrbit", "Failed to parse bookmark exchange response");
     return JSON_ERROR;
   }
-  for (JsonVariantConst hash : doc["unmatched"].as<JsonArrayConst>()) {
-    if (documentHash == hash.as<const char*>()) {
-      LOG_INF("BookOrbit", "Server does not know this document; bookmarks not exchanged");
+  // positionIncompatible: as for the annotation exchange, a reply without a result for the book.
+  for (const char* list : {"unmatched", "positionIncompatible"}) {
+    for (JsonVariantConst hash : doc[list].as<JsonArrayConst>()) {
+      const char* listed = hash.as<const char*>();
+      if (!listed || documentHash != listed) continue;
+      lastPositionIncompatible = list[0] == 'p';
+      LOG_INF("BookOrbit", "Server does not take this copy (%s); bookmarks not exchanged", list);
       outUnmatched = true;
       return OK;
     }
