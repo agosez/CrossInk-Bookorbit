@@ -24,6 +24,7 @@ import os
 import random
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -31,6 +32,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from pathlib import Path
@@ -501,6 +503,7 @@ FRESH_BOOK = {
     "highlight_push_backlog": 45,
     "highlight_pull_backlog": 46,
     "highlight_delete_propagates_large": 47,
+    "outdated_copy": 49,
 }
 
 # Bookmarks dedupe server-side on their converted location (paragraph precision), so a
@@ -2501,6 +2504,177 @@ def scenario_catalog_download_index_beyond_legacy_cap(verbose: bool) -> None:
             "'On device' did not count every book the index lists"
 
 
+def rewrite_book_file(manifest: dict, book: dict) -> None:
+    """BookOrbit writes its metadata into the book's file, as editing a book's details does
+    with write-back on: the file's hash changes and the old one stays only as history
+    (`file_write`). A device holding the library's original copy is then answered
+    `positionIncompatible`. Rewriting again on a re-run keeps that original hash in history."""
+    admin = AdminClient(BASE_URL)
+    admin.login(manifest["user"]["username"], manifest["user"]["password"])
+    ids = admin.find_book_ids([book["title"], Path(book["file"]).stem])
+    assert ids, f"the server does not list {book['file']}"
+    result = request_json("POST", admin.api(f"/books/{next(iter(ids.values()))}/write-and-rename"),
+                          admin._headers(), {}, ok=(200, 201))
+    assert result.get("write", {}).get("status") == "success", f"metadata write-back failed: {result}"
+
+
+def scenario_outdated_copy_holds_changes(verbose: bool) -> None:
+    """The device holds the library's original copy of a book whose file BookOrbit has since
+    rewritten. BookOrbit 3.6.0+ answers both exchanges with positionIncompatible, HTTP 200 and
+    no result, and keeps nothing: the device must not count its highlight or bookmark as sent
+    (v1.6.1+bookorbit.7 did, and never sent them again), and the sync still ends normally."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["outdated_copy"]]
+    rewrite_book_file(manifest, book)
+    probe = verify_device(manifest, "outdated")
+    reply = probe.exchange_annotations(book["hash"], keys=[], keys_complete=False, changes=[])
+    if book["hash"] not in reply.get("positionIncompatible", []):
+        print("  (skipped: this server does not answer positionIncompatible)")
+        return
+    now = int(time.time())
+    text = f"Outdated copy highlight {now}"
+    bookmark_pos = "/body/DocFragment[3]/body/p[1]/text().0"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        write_clipping_store(fs.clippings_store(book["hash"]), book.get("title", ""),
+                             book.get("author", ""), sim_path,
+                             [{"spine": 1, "paragraph": 2, "timestamp": 4545,
+                               "text": text, "chapter": "Chapter", "wordCount": len(text.split())}])
+        write_boa_store(fs.state_dir(book["hash"]) / ANNOTATION_STORE, 0, [{
+            "timestamp": 4545, "identityEpoch": now, "spine": 1, "paragraph": 2,
+            "pos0": "/body/DocFragment[2]/body/p[2]/text().0",
+            "pos1": f"/body/DocFragment[2]/body/p[2]/text().{len(text)}",
+        }])
+        write_bookmark_store(fs.bookmarks_store(book["hash"]), book.get("title", ""),
+                             book.get("author", ""), sim_path,
+                             [{"spine": 2, "progress": 0.25, "timestamp": now,
+                               "chapter": "Chapter", "paragraph": 1, "snippet": "Outdated copy bookmark"}])
+        write_bob_store(fs.state_dir(book["hash"]) / BOOKMARK_STORE, 0, [{
+            "timestamp": now, "identityEpoch": now, "spine": 2, "pos": bookmark_pos,
+        }])
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "sync never reached its end marker"
+        assert re.search(r"Highlight exchange result=0 \(http=20\d, unmatched=1, incompatible=1", output), \
+            "the highlight exchange did not take the reply for an outdated copy"
+        assert re.search(r"Bookmark upload result=0 \(http=20\d, unmatched=1, incompatible=1", output), \
+            "the bookmark exchange did not take the reply for an outdated copy"
+        highlight_watermark, records = read_boa_store(fs.state_dir(book["hash"]) / ANNOTATION_STORE)
+        assert highlight_watermark < now and records, \
+            f"the highlight was counted as sent (watermark {highlight_watermark})"
+        bookmark_watermark, _ = read_bob_store(fs.state_dir(book["hash"]) / BOOKMARK_STORE)
+        assert bookmark_watermark < now, f"the bookmark was counted as sent (watermark {bookmark_watermark})"
+
+
+def free_portal_port() -> int:
+    """A port for the portal's HTTP server whose next one, the WebSocket server's, is free too."""
+    with contextlib.closing(socket.socket()) as http, contextlib.closing(socket.socket()) as websocket:
+        http.bind(("127.0.0.1", 0))
+        port = http.getsockname()[1]
+        websocket.bind(("127.0.0.1", port + 1))
+        return port
+
+
+@contextlib.contextmanager
+def file_transfer_portal(fs: SimFs, verbose: bool):
+    """The simulator booted straight into the file transfer screen's hotspot mode (boot target
+    6, payload 2), its web portal and WebDAV on a local port. Yields the portal's base URL."""
+    port = free_portal_port()
+    env = os.environ.copy()
+    env.update(SDL_VIDEODRIVER="dummy", CROSSPOINT_SIM_SD=str(fs.fs), CROSSPOINT_SIM_HTTP_PORT=str(port),
+               CROSSPOINT_SIM_SILENT_REBOOT_MAGIC=str(0xC1EAB007), CROSSPOINT_SIM_SILENT_REBOOT_TARGET="6",
+               CROSSPOINT_SIM_SILENT_REBOOT_PAYLOAD="2")
+    for name in ("CROSSPOINT_SIM_INPUT_SCRIPT", "CROSSINK_SIMULATOR_SMOKE_TEST",
+                 "CROSSINK_SIM_BOOKORBIT_CHOICE", "CROSSINK_SIM_BOOKORBIT_QUIT_AFTER_SYNC"):
+        env.pop(name, None)
+    url = f"http://127.0.0.1:{port}"
+    log_path = fs.root / "simulator.log"
+    with log_path.open("w") as log:
+        process = subprocess.Popen([str(PROGRAM)], cwd=fs.root, env=env, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 45
+            while True:
+                try:
+                    with urllib.request.urlopen(url + "/", timeout=1) as response:
+                        if response.status == 200:
+                            break
+                except (OSError, urllib.error.URLError):
+                    assert process.poll() is None and time.monotonic() < deadline, \
+                        "the simulator's web portal never started"
+                    time.sleep(0.1)
+            yield url
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            if verbose:
+                print(log_path.read_text(errors="replace"))
+
+
+def portal_request(method: str, url: str, data: bytes | None = None,
+                   headers: dict[str, str] | None = None) -> tuple[int, str]:
+    request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    try:
+        response = urllib.request.urlopen(request, timeout=20)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        return response.getcode(), response.read().decode()
+
+
+def scenario_web_move_keeps_book_state(verbose: bool) -> None:
+    """Moving a book from the file transfer page (POST /move) or over WebDAV (MOVE) carries
+    its path-keyed state to the new path: the reading position in its render cache and its
+    recent entry. Both used to clear the cache and leave that state behind. WebDAV still
+    moves a book the state cannot follow, such as a client renaming x.epub to x.epub.bak
+    before saving over it."""
+    manifest, books = load_seed()
+    position = (3, 7, 20)
+    names = ("Portal.epub", "Dav.epub", "Backup.epub")
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        (fs.fs / "Moved").mkdir()
+        recent = []
+        for index, name in enumerate(names):
+            sim_path = f"/books/{name}"
+            shutil.copy2(INTEGRATION / "library" / books[index]["file"], fs.fs / "books" / name)
+            write_progress_bin(fs.epub_cache_dir(sim_path) / "progress.bin", *position)
+            recent.append({"path": sim_path, "title": f"Title of {name}", "author": "Author"})
+        (fs.crosspoint / "recent.json").write_text(json.dumps({"books": recent}))
+
+        with file_transfer_portal(fs, verbose) as url:
+            form = urllib.parse.urlencode({"path": "/books/Portal.epub", "dest": "/Moved"}).encode()
+            status, body = portal_request("POST", url + "/move", form,
+                                          {"Content-Type": "application/x-www-form-urlencoded"})
+            assert status == 200, f"portal move failed: {status} {body}"
+            status, body = portal_request("MOVE", url + "/books/Dav.epub",
+                                          headers={"Destination": url + "/Moved/Dav.epub", "Overwrite": "F"})
+            assert status == 201, f"WebDAV move failed: {status} {body}"
+            status, body = portal_request("MOVE", url + "/books/Backup.epub",
+                                          headers={"Destination": url + "/books/Backup.epub.bak"})
+            assert status == 201, f"WebDAV move to a non-book name failed: {status} {body}"
+
+        recent_paths = [b["path"] for b in json.loads((fs.crosspoint / "recent.json").read_text())["books"]]
+        for name in names[:2]:
+            old, new = f"/books/{name}", f"/Moved/{name}"
+            assert (fs.fs / new.lstrip("/")).exists() and not (fs.fs / old.lstrip("/")).exists(), \
+                f"{name} did not move"
+            progress = read_progress_bin(fs.epub_cache_dir(new) / "progress.bin")
+            assert progress and (progress["spine"], progress["page"]) == position[:2], \
+                f"{name}'s reading position did not follow it: {progress}"
+            assert not fs.epub_cache_dir(old).exists(), f"{name}'s old cache was left behind"
+            assert new in recent_paths and old not in recent_paths, \
+                f"{name}'s recent entry did not follow it: {recent_paths}"
+        assert (fs.fs / "books/Backup.epub.bak").exists() and not (fs.fs / "books/Backup.epub").exists(), \
+            "the WebDAV rename to a non-book name did not happen"
+
+
 SCENARIOS = {
     "catalog_collections_browse": scenario_catalog_collections_browse,
     "catalog_empty_listing_back": scenario_catalog_empty_listing_back,
@@ -2543,6 +2717,8 @@ SCENARIOS = {
     "bookmark_pull": scenario_bookmark_pull,
     "bookmark_delete_all_propagates": scenario_bookmark_delete_all_propagates,
     "bookmark_push": scenario_bookmark_push,
+    "outdated_copy_holds_changes": scenario_outdated_copy_holds_changes,
+    "web_move_keeps_book_state": scenario_web_move_keeps_book_state,
 }
 
 
