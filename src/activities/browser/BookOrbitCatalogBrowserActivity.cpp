@@ -21,6 +21,7 @@
 #include "AppVersion.h"
 #include "BookOrbitCredentialStore.h"
 #include "BookOrbitDownloadIndex.h"
+#include "BookOrbitLocalBooks.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
@@ -157,7 +158,6 @@ bool isFacetSection(const std::string& id) {
 
 constexpr size_t BOOKORBIT_DOWNLOAD_BUFFER_SIZE = 2048;
 constexpr char READ_FOLDER_PREFIX[] = "/Read";
-constexpr size_t MAX_LOCAL_ENTRIES = 200;
 constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 5;
 constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 1000;
 constexpr unsigned long DOWNLOAD_PROGRESS_MAX_UPDATE_MS = 5000;
@@ -208,12 +208,9 @@ std::string catalogBookPath(const BookOrbitBookDetail& detail, const BookOrbitCa
 // downloads in the current download location, the SD root (the old fixed location)
 // and the /Read folder the finished-book move feature uses. It cannot cover the
 // server's naming template: only the book detail carries the resolved path, and a
-// listing would need one request per row to know it. Books downloaded under a
-// template but missing from the index (another device, or an index dropped when the
-// server URL changed) are therefore not detected — as with books moved or renamed by
-// hand, this stays a best-effort convenience marker.
-bool bookOnDevice(const int64_t bookId, const std::string& title, const std::string& author, std::string& outPath) {
-  if (BookOrbitDownloadIndex::lookup(bookId, outPath)) return true;
+// listing would need one request per row to know it. Confirm checks the resolved
+// path for the selected book and records any matching copy for future listings.
+bool findLegacyBookPath(const std::string& title, const std::string& author, std::string& outPath) {
   const std::string filename = catalogBookFilename(title, author);
   const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
   // Candidates are built aside: outPath is a listed row's own path, and most catalog
@@ -303,6 +300,7 @@ void BookOrbitCatalogBrowserActivity::onEnter() {
   selectorIndex = 0;
   navLevel = NavLevel::Root;
   listIsLocal = false;
+  listOnDeviceSnapshot = false;
   listDefaultReadStatus.clear();
   listOptions.reset();
   pendingListChoice = -1;
@@ -355,7 +353,7 @@ void BookOrbitCatalogBrowserActivity::onExit() {
   Activity::onExit();
   listOptions.reset();
   entries.clear();
-  BookOrbitDownloadIndex::unload();
+  BookOrbitLocalBooks::clear();
 
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
@@ -430,6 +428,10 @@ void BookOrbitCatalogBrowserActivity::showLoadingBeforeFetch() {
 
 bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   navLevel = NavLevel::Root;
+  if (listOnDeviceSnapshot) {
+    BookOrbitLocalBooks::clear();
+    listOnDeviceSnapshot = false;
+  }
   std::vector<BookOrbitCatalogSection> sections;
   const bool cacheHit = BookOrbitCatalogListCache::loadRootSections(sections);
   if (!cacheHit && !allowNetwork) {
@@ -467,8 +469,8 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   };
 
   // Local, offline categories: what's already on the SD card, counted on the spot.
-  localOnDeviceCount = collectLocalBooks("on-device", nullptr);
-  localInProgressCount = collectLocalBooks("in-progress", nullptr);
+  const size_t localOnDeviceCount = BookOrbitLocalBooks::count();
+  localInProgressCount = collectInProgressBooks(nullptr);
 
   RenderLock lock(*this);             // the render task draws the rows replaced here
   startListing(sections.size() + 4);  // the server's sections, Want to read, the two local ones, Search
@@ -516,124 +518,100 @@ bool BookOrbitCatalogBrowserActivity::loadRoot(const bool allowNetwork) {
   return true;
 }
 
-// Enumerate the local books behind one of the offline root categories, appending
-// Entry rows when a sink is given. Returns the count either way, so the root can
-// badge the categories without building (and then discarding) their rows.
-size_t BookOrbitCatalogBrowserActivity::collectLocalBooks(const std::string& kind, std::vector<Entry>* sink) {
+// The recent-books list already bounds the size of In progress.
+size_t BookOrbitCatalogBrowserActivity::collectInProgressBooks(std::vector<Entry>* sink) {
   size_t count = 0;
-  if (kind == "in-progress") {
-    // Books with local reading progress: the recent-books list minus finished ones.
-    for (const auto& book : RECENT_BOOKS.getBooks()) {
-      if (!FsHelpers::hasEpubExtension(book.path) || !Storage.exists(book.path.c_str())) continue;
-      const BookReadingStats stats = BookReadingStats::load(Epub::cachePathForFilePath(book.path, "/.crosspoint"));
-      if (stats.isCompleted) continue;
-      count++;
-      if (!sink) continue;
-      Entry entry;
-      entry.type = EntryType::LOCAL_BOOK;
-      entry.title = book.title.empty() ? book.path : book.title;
-      entry.subtitle = book.author;
-      entry.path = book.path;
-      sink->push_back(std::move(entry));
-    }
-    LOG_DBG("BookOrbit", "Local scan: kind=%s count=%u", kind.c_str(), static_cast<unsigned>(count));
-    return count;
+  for (const auto& book : RECENT_BOOKS.getBooks()) {
+    if (!FsHelpers::hasEpubExtension(book.path) || !Storage.exists(book.path.c_str())) continue;
+    const BookReadingStats stats = BookReadingStats::load(Epub::cachePathForFilePath(book.path, "/.crosspoint"));
+    if (stats.isCompleted) continue;
+    ++count;
+    if (!sink) continue;
+    Entry entry;
+    entry.type = EntryType::LOCAL_BOOK;
+    entry.title = book.title.empty() ? book.path : book.title;
+    entry.subtitle = book.author;
+    entry.path = book.path;
+    sink->push_back(std::move(entry));
   }
-
-  // This firmware's own catalog downloads come from the index, which recorded where
-  // each one landed. That is what makes the server's file naming template a non-issue
-  // here: however deep it filed a book, the path is known and nothing has to be
-  // walked. A download whose index entry is gone (another device, or an index
-  // discarded when the server URL changed) falls back to the directory scan below,
-  // and is missed when the template filed it in a subfolder.
-  struct LocalBookCollector {
-    size_t* count;
-    std::vector<Entry>* sink;
-  };
-  LocalBookCollector collector{&count, sink};
-  BookOrbitDownloadIndex::forEachExisting(
-      [](const int64_t, const std::string& path, void* context) {
-        auto* out = static_cast<LocalBookCollector*>(context);
-        if (*out->count >= MAX_LOCAL_ENTRIES) return;
-        (*out->count)++;
-        if (out->sink == nullptr) return;
-        Entry entry;
-        entry.type = EntryType::LOCAL_BOOK;
-        entry.title = bookTitleFromPath(path);
-        entry.path = path;
-        out->sink->push_back(std::move(entry));
-      },
-      &collector);
-
-  // Then every other EPUB sitting in the places books arrive: the configured download
-  // folder, the SD root (where older firmware downloaded, and where books copied over
-  // USB land) and the /Read folder the finished-book move uses. Flat on purpose —
-  // descending would walk every folder on the card to find books that, if they came
-  // from the catalog, the index already listed.
-  const auto scanDir = [&count, sink](const std::string& dirPath) {
-    FsFile dir = Storage.open(dirPath.c_str());
-    if (!dir || !dir.isDirectory()) {
-      dir.close();
-      return;
-    }
-    const std::string prefix = dirPath == "/" ? dirPath : dirPath + "/";
-    char name[128];
-    std::string path;  // reused: one allocation for the whole directory, not per file
-    FsFile file;
-    while (count < MAX_LOCAL_ENTRIES && (file = dir.openNextFile())) {
-      const size_t nameLen = file.isDirectory() ? 0 : file.getName(name, sizeof(name));
-      file.close();
-      if (nameLen <= 5 || !FsHelpers::hasEpubExtension(std::string_view(name, nameLen))) continue;
-      path.assign(prefix).append(name, nameLen);
-      if (BookOrbitDownloadIndex::hasPath(path)) continue;  // already listed from the index
-      count++;
-      if (!sink) continue;
-      Entry entry;
-      entry.type = EntryType::LOCAL_BOOK;
-      entry.title = std::string(name, nameLen - 5);  // strip ".epub"
-      entry.path = path;
-      sink->push_back(std::move(entry));
-    }
-    dir.close();
-  };
-  const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
-  if (!folder.empty() && folder != READ_FOLDER_PREFIX) scanDir(folder);
-  scanDir("/");
-  scanDir(READ_FOLDER_PREFIX);
-  LOG_DBG("BookOrbit", "Local scan: kind=%s count=%u", kind.c_str(), static_cast<unsigned>(count));
   return count;
 }
 
 void BookOrbitCatalogBrowserActivity::loadLocalBooks(const std::string kind) {
   const bool inProgress = kind == "in-progress";
-  RenderLock lock(*this);  // the render task draws the rows replaced here
+  int total = 0;
+  if (!inProgress) showLoadingBeforeFetch();
+  const bool ready = inProgress || BookOrbitLocalBooks::build(total);
+
+  RenderLock lock(*this);
   listTitle = inProgress ? tr(STR_BOOKORBIT_IN_PROGRESS) : tr(STR_BOOKORBIT_ON_DEVICE);
-  // Sized by the root's badge count: this list is sorted whole, so it cannot be paged
-  // like a server listing, and growing it a row at a time would double its block.
-  startListing(inProgress ? localInProgressCount : localOnDeviceCount);
-
-  collectLocalBooks(kind, &entries);
-  std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
-    if (FsHelpers::naturalLess(a.title, b.title)) return true;
-    if (FsHelpers::naturalLess(b.title, a.title)) return false;
-    return FsHelpers::naturalLess(a.subtitle, b.subtitle);
-  });
-
-  // Local listings behave like a book list one level below the root. Neutralise
-  // the paging context left by a previous server listing: without this, reaching
-  // the bottom of a local list could append SERVER results into it, and the
-  // scroll indicator would size itself on the stale server total.
+  startListing(inProgress ? localInProgressCount : BookOrbitCatalogClient::PAGE_SIZE);
   navLevel = NavLevel::Books;
   booksFromFacet = false;
   listIsLocal = true;
   listFreedForDownload = false;
   listPage = 1;
-  listTotal = static_cast<int>(entries.size());
-  listPageSize = std::max<int>(1, static_cast<int>(entries.size()));
-  state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
-  if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
+  listTotal = total;
+  listPageSize = BookOrbitCatalogClient::PAGE_SIZE;
+
+  if (inProgress) {
+    collectInProgressBooks(&entries);
+    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+      if (FsHelpers::naturalLess(a.title, b.title)) return true;
+      if (FsHelpers::naturalLess(b.title, a.title)) return false;
+      return FsHelpers::naturalLess(a.subtitle, b.subtitle);
+    });
+    listTotal = static_cast<int>(entries.size());
+    listPageSize = std::max(1, listTotal);
+    listOnDeviceSnapshot = false;
+    state = entries.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
+    if (entries.empty()) errorMessage = tr(STR_NO_ENTRIES);
+  } else {
+    listOnDeviceSnapshot = true;
+    state = BrowserState::ERROR;
+    errorMessage = ready ? tr(STR_NO_ENTRIES) : tr(STR_BOOKORBIT_CATALOG_ERROR);
+  }
+  lock.unlock();
+  if (ready && total > 0) {
+    loadOnDevicePage(1, PageLoad::Open);
+  } else {
+    requestUpdate();
+  }
+}
+
+bool BookOrbitCatalogBrowserActivity::loadOnDevicePage(const int page, const PageLoad load) {
+  const int start = (page - 1) * listPageSize;
+  const int count = std::min(listPageSize, listTotal - start);
+  if (count <= 0) return false;
+  std::vector<std::string> paths;
+  if (!BookOrbitLocalBooks::readPage(start, count, paths)) {
+    state = BrowserState::ERROR;
+    errorMessage = tr(STR_BOOKORBIT_CATALOG_ERROR);
+    requestUpdate();
+    return false;
+  }
+
+  RenderLock lock(*this);
+  if (load == PageLoad::Open) {
+    startListing(count);
+    windowStart = topIndex = selectorIndex = start;
+  }
+  if (load == PageLoad::Append) dropPagesBefore(topIndex, /*incoming=*/1);
+  if (load == PageLoad::Prepend) dropPagesAfter(topIndex + visibleRows - 1, /*incoming=*/1);
+  if (load != PageLoad::Prepend) listPage = page;
+  const size_t first = placePageRows(load, paths.size(), static_cast<uint16_t>(page));
+  for (size_t i = 0; i < paths.size(); ++i) {
+    Entry& entry = entries[first + i];
+    entry.type = EntryType::LOCAL_BOOK;
+    entry.title = bookTitleFromPath(paths[i]);
+    entry.path = std::move(paths[i]);
+  }
+  LOG_DBG("BookOrbit", "Local page=%d rows=%u start=%d total=%d", page, static_cast<unsigned>(entries.size()),
+          windowStart, listTotal);
+  state = BrowserState::BROWSING;
   lock.unlock();
   requestUpdate();
+  return true;
 }
 
 bool BookOrbitCatalogBrowserActivity::loadFacetEntries(const std::string& sectionId, const std::string& title,
@@ -735,12 +713,24 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
   // and "Recently added", series order for series -- and appending pages keeps
   // it consistent; a client-side re-sort would destroy both.
   const size_t first = placePageRows(load, result.books.size(), static_cast<uint16_t>(page));
+  // A page needs only one pass over the disk index. Check file sizes for its
+  // rows only, then apply the old filename fallback for books without a match.
+  struct PageRows {
+    std::vector<Entry>& entries;
+    size_t first;
+    size_t end;
+    Entry* find(const int64_t bookId) const {
+      for (size_t i = first; i < end; ++i) {
+        if (entries[i].bookId == bookId) return &entries[i];
+      }
+      return nullptr;
+    }
+  } rows{entries, first, first + result.books.size()};
   for (size_t i = 0; i < result.books.size(); i++) {
     auto& book = result.books[i];
     Entry& entry = entries[first + i];
     entry.type = EntryType::BOOK;
     entry.bookId = book.id;
-    entry.onDevice = bookOnDevice(book.id, book.title, book.author, entry.path);
     entry.title = std::move(book.title);
     entry.subtitle = std::move(book.author);
     // The list section the sort files the book under. The day is formatted once, here:
@@ -751,6 +741,18 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
       char day[24];
       if (formatLocalDateText(day, sizeof(day), book.addedAt)) entry.sectionId = day;
     }
+  }
+  BookOrbitDownloadIndex::forEachExisting(
+      [](const int64_t bookId, const std::string& path, void* context) {
+        Entry* entry = static_cast<PageRows*>(context)->find(bookId);
+        entry->onDevice = true;
+        entry->path = path;
+      },
+      &rows,
+      [](const int64_t bookId, void* context) { return static_cast<PageRows*>(context)->find(bookId) != nullptr; });
+  for (size_t i = rows.first; i < rows.end; ++i) {
+    Entry& entry = entries[i];
+    if (!entry.onDevice) entry.onDevice = findLegacyBookPath(entry.title, entry.subtitle, entry.path);
   }
   // The letters span the whole listing and only come with its first page.
   if (page == 1) setListLetters(result.letters);
@@ -914,6 +916,7 @@ bool BookOrbitCatalogBrowserActivity::appendNextPageForCurrentList(const bool al
   }
 
   if (navLevel == NavLevel::Books && hasMorePages()) {
+    if (listOnDeviceSnapshot) return loadOnDevicePage(listPage + 1, PageLoad::Append);
     if (!loadBooks(listQuery, listTitle, listPage + 1, booksFromFacet, PageLoad::Append, /*allowNetwork=*/false)) {
       if (!allowNetwork) return false;
       showLoadingBeforeFetch();
@@ -931,7 +934,9 @@ bool BookOrbitCatalogBrowserActivity::prependPreviousPage() {
   if (entries.empty() || entries.front().page <= 1) return false;
   const int page = entries.front().page - 1;
   const int previousStart = windowStart;
-  if (navLevel == NavLevel::FacetList) {
+  if (navLevel == NavLevel::Books && listOnDeviceSnapshot) {
+    if (!loadOnDevicePage(page, PageLoad::Prepend)) return false;
+  } else if (navLevel == NavLevel::FacetList) {
     if (!loadFacetEntries(facetSectionId, facetTitle, page, PageLoad::Prepend, /*allowNetwork=*/false)) {
       showLoadingBeforeFetch();
       loadFacetEntries(facetSectionId, facetTitle, page, PageLoad::Prepend);
@@ -961,6 +966,7 @@ bool BookOrbitCatalogBrowserActivity::rewindToStart() {
     return loadFacetEntries(facetSectionId, facetTitle, 1);
   }
   if (navLevel == NavLevel::Books) {
+    if (listOnDeviceSnapshot) return loadOnDevicePage(1, PageLoad::Open);
     if (loadBooks(listQuery, listTitle, 1, booksFromFacet, PageLoad::Open, /*allowNetwork=*/false)) return true;
     showLoadingBeforeFetch();
     return loadBooks(listQuery, listTitle, 1, booksFromFacet);
@@ -969,6 +975,10 @@ bool BookOrbitCatalogBrowserActivity::rewindToStart() {
 }
 
 bool BookOrbitCatalogBrowserActivity::wrapToEndFromCache() {
+  if (listOnDeviceSnapshot) {
+    const int lastPage = (listTotal - 1) / listPageSize + 1;
+    return loadOnDevicePage(lastPage, PageLoad::Open);
+  }
   while (hasMorePages()) {
     // The walk keeps nothing behind it: the selection lands on the listing's end.
     topIndex = selectorIndex = loadedEnd() - 1;
@@ -1191,7 +1201,7 @@ void BookOrbitCatalogBrowserActivity::showDownloadScreen(const std::string& titl
 }
 
 void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const std::string& title,
-                                                   const std::string& replacePath) {
+                                                   const std::string& replacePath, const bool openExisting) {
   showDownloadScreen(title);
 
   BookOrbitBookDetail detail;
@@ -1217,6 +1227,19 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
   // so a failure or a cancel never costs the user the copy they had, and a new book
   // never sits half-written under its own name.
   const std::string finalPath = replacePath.empty() ? catalogBookPath(detail, epubFile) : replacePath;
+  // Sideloaders that use the same BookOrbit naming template put the file at the
+  // resolved path but have no index entry. Confirm can find it from detail data
+  // already fetched here. Explicit Download and Redownload still transfer it.
+  if (openExisting && !epubFile.devicePath.empty() && epubFile.sizeBytes > 0) {
+    FsFile local = Storage.open(finalPath.c_str());
+    const bool matches = local && !local.isDirectory() && local.fileSize64() == epubFile.sizeBytes;
+    local.close();
+    if (matches) {
+      BookOrbitDownloadIndex::record(bookId, finalPath);
+      openLocalBook(finalPath);
+      return;
+    }
+  }
   // Create the download folder and, when the server's naming template nests the book
   // ("Sprawl/<book>.epub"), every folder it asks for. mkdir's pFlag creates the
   // missing parents in one call, so this covers both at once.
@@ -1517,7 +1540,7 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       if (entry.onDevice) {
         openLocalBook(entry.path);
       } else {
-        downloadBook(entry.bookId, entry.title);
+        downloadBook(entry.bookId, entry.title, "", /*openExisting=*/true);
       }
       break;
   }
@@ -1600,7 +1623,8 @@ void BookOrbitCatalogBrowserActivity::promptDeleteBook(const int row) {
                            library::invalidateLibraryIndex();
                            // Re-detect rather than just clearing the flag: another copy (the SD root,
                            // /Read) may still match. The index drops its now-stale entry on lookup.
-                           entry.onDevice = bookOnDevice(entry.bookId, entry.title, entry.subtitle, entry.path);
+                           entry.onDevice = BookOrbitDownloadIndex::lookup(entry.bookId, entry.path) ||
+                                            findLegacyBookPath(entry.title, entry.subtitle, entry.path);
                            requestUpdate();
                          });
 }

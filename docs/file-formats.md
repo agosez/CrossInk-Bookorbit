@@ -756,8 +756,8 @@ server's file naming template filed it, without walking the card. It is a
 best-effort convenience cache: entries are verified on lookup (the file must
 still exist with its recorded size) and dropped when stale, and a missing or
 discarded index costs the marker and the listing entry, leaving the filename
-heuristic and a flat directory scan as fallbacks. Capped at 128 entries, oldest
-evicted first.
+heuristic and a flat directory scan as fallbacks. Records are streamed from the
+card, and updates replace the complete file through a staged copy.
 
 Book ids are only meaningful on the server that issued them, so the header
 records a CRC32 of the configured server URL; the whole file is discarded when

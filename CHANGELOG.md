@@ -5,6 +5,13 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+### Fixed
+
+- BookOrbit's On device list can browse more than 200 books, and catalog downloads no longer disappear from the index when it reaches 128 books. The reader loads pages from the SD card as needed.
+- Selecting a catalog book opens a matching copy already at the path returned by BookOrbit and remembers it for the downloaded indicator in future listings.
+
 ## [v1.6.1+bookorbit.8] - 2026-11-13
 
 Based on CrossInk v1.6.1.
