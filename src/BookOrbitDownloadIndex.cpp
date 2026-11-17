@@ -163,6 +163,15 @@ bool BookOrbitDownloadIndex::hasPath(const std::string& path) {
   return std::any_of(entries.begin(), entries.end(), [&path](const Entry& entry) { return entry.path == path; });
 }
 
+bool BookOrbitDownloadIndex::bookIdForPath(const std::string& path, int64_t& outBookId) {
+  ensureLoaded();
+  const auto it =
+      std::find_if(entries.begin(), entries.end(), [&path](const Entry& entry) { return entry.path == path; });
+  if (it == entries.end()) return false;
+  outBookId = it->bookId;
+  return true;
+}
+
 void BookOrbitDownloadIndex::relocate(const std::string& oldPath, const std::string& newPath) {
   const bool wasLoaded = loaded;
   ensureLoaded();

@@ -70,6 +70,11 @@ class HttpDownloader {
     // (or deletes) an existing file and never leaves a truncated one behind
     // under the real name.
     bool stageAsPart = false;
+    // With stageAsPart: leave the file the download replaced at "<destPath>.old" for the
+    // caller, which must remove it. A replaced book's highlights and sync state are keyed by
+    // its content, and moving them needs the old copy beside the new one. Left over after a
+    // crash, the next staged download to destPath removes it (DownloadFileSwap::recover).
+    bool keepReplaced = false;
     // Checks the finished file before it is accepted (and, with stageAsPart,
     // before it replaces destPath). Returning false fails the download and
     // removes the file. Catches bodies cut short without a Content-Length.

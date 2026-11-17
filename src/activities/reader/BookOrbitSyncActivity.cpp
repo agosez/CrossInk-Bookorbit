@@ -23,6 +23,7 @@
 #include "BookOrbitAnnotationStore.h"
 #include "BookOrbitBookmarkStore.h"
 #include "BookOrbitCredentialStore.h"
+#include "BookOrbitDownloadIndex.h"
 #include "BookOrbitHomeStore.h"
 #include "BookOrbitStatsQueue.h"
 #include "BookmarkStore.h"
@@ -37,6 +38,8 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
+#include "activities/browser/BookOrbitCatalogLink.h"
+#include "activities/browser/BookOrbitCatalogListCache.h"
 #include "activities/home/RecentBookProgress.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/TouchActionButtons.h"
@@ -573,6 +576,66 @@ void BookOrbitSyncActivity::performSync() {
     if (stopIfWoken()) return;
   }
 
+  progressFetchResult = result;
+  // The offer screen picks the sync up again (continueWithProgress) unless the copy is replaced.
+  if (offerBookUpdate()) return;
+  continueWithProgress();
+}
+
+#if !CROSSINK_APP_CAP_BOOK_UPDATE
+bool BookOrbitSyncActivity::offerBookUpdate() {
+  if (!documentIncompatible) return false;
+  LOG_INF("BookOrbit", "This copy differs from the library file; its highlights and bookmarks wait");
+  return false;
+}
+#else
+bool BookOrbitSyncActivity::offerBookUpdate() {
+  if (!documentIncompatible) return false;
+  if (sleepSync) {
+    LOG_INF("BookOrbit", "This copy differs from the library file; the next manual sync offers to update it");
+    return false;
+  }
+  updateBookId = 0;
+  if (!BookOrbitDownloadIndex::bookIdForPath(epubPath, updateBookId)) updateBookId = 0;
+  BookOrbitDownloadIndex::unload();
+  LOG_INF("BookOrbit", "This copy differs from the library file; offering to update it (book %lld)",
+          static_cast<long long>(updateBookId));
+  {
+    RenderLock lock(*this);
+    state = UPDATE_OFFER;
+  }
+  requestUpdate(true);
+  return true;
+}
+
+void BookOrbitSyncActivity::startBookUpdate() {
+  BookOrbitCatalogLink link;
+  link.bookId = updateBookId;
+  link.replacePath = epubPath;
+  // Shown on the download screen; the file name is what this device calls the book.
+  link.title = epubPath.substr(epubPath.find_last_of('/') + 1);
+  const size_t dot = link.title.rfind('.');
+  if (dot != std::string::npos) link.title.resize(dot);
+  // Through the catalog's network boot rather than a pushed catalog: leaving this activity in
+  // place would run onExit()'s restart into the reader. The browser reads the link back,
+  // downloads over this file and reopens it.
+  if (!BookOrbitCatalogListCache::saveEntryLink(link)) {
+    LOG_ERR("BookOrbit", "Could not save the catalog link to update this copy");
+    continueWithProgress();
+    return;
+  }
+  LOG_INF("BookOrbit", "Restarting into the catalog to update %s (book %lld)", epubPath.c_str(),
+          static_cast<long long>(updateBookId));
+  syncSession.reset();
+  SavedWifiConnect::disconnect();
+  silentRestartToNetwork(NetworkBootTarget::BOOKORBIT_CATALOG);
+  // Only returns when deep sleep is already under way, which ends this session anyway.
+  BookOrbitCatalogListCache::discardEntryLink();
+}
+#endif  // CROSSINK_APP_CAP_BOOK_UPDATE
+
+void BookOrbitSyncActivity::continueWithProgress() {
+  const BookOrbitSyncClient::Error result = progressFetchResult;
   if (result == BookOrbitSyncClient::NOT_FOUND) {
     if (smartSyncEnabled() || sleepSync) {
       LOG_DBG("BookOrbit", "Smart sync: no remote progress, uploading local %.6f", localProgress.percentage);
@@ -736,7 +799,8 @@ const Clipping* sendableClipping(const BookOrbitAnnotationRecord& record, size_t
       // highlight made here always covers a word). The server holds it already, and with more
       // than this device can show: sent back, BookOrbit 3.5.0's field-by-field merge reads the
       // missing note as removed and the plain style as changed, and the range shrinks to pos0.
-      return candidate->wordCount == 0 ? nullptr : candidate;
+      // An orphaned one's position points into a chapter the book's new copy changed.
+      return candidate->wordCount == 0 || candidate->orphaned ? nullptr : candidate;
     }
   }
   return nullptr;  // deleted locally; the key list will tell the server
@@ -871,6 +935,19 @@ void BookOrbitSyncActivity::prepareAnnotationBatch() {
     if (record.identityEpoch > watermark && sendableClipping(record, clippingIndex)) annotationsToSend++;
   }
   annotationWatermark = watermark;
+  // An orphaned highlight without a position never gets one (its chapter changed under it), so
+  // it must not hold the key set back below as one still waiting for its position.
+  size_t orphansWithoutPosition = 0;
+  for (size_t i = 0; i < localClippingCount; i++) {
+    const Clipping* clipping = CLIPPINGS.clippingAt(i);
+    if (!clipping || !clipping->orphaned) continue;
+    const BookOrbitClippingRef ref{clipping->timestamp, clipping->spineIndex, clipping->paragraphIndex};
+    if (std::none_of(records.begin(), records.end(), [&ref](const BookOrbitAnnotationRecord& record) {
+          return BookOrbitClippingRef{record.timestamp, record.spineIndex, record.paragraphIndex} == ref;
+        })) {
+      orphansWithoutPosition++;
+    }
+  }
 
   CLIPPINGS.unload();
 
@@ -900,7 +977,7 @@ void BookOrbitSyncActivity::prepareAnnotationBatch() {
   // non-destructive; bringing the highlights back takes the "new" sidecar state below, which
   // only a server that accepts it and a book with no highlight left here can use. Deletion
   // reporting resumes on its own once highlights sync again.
-  const bool everyClippingHasAPosition = records.size() >= localClippingCount;
+  const bool everyClippingHasAPosition = records.size() + orphansWithoutPosition >= localClippingCount;
   const bool keySetFits =
       ESP.getMaxAllocHeap() >= records.size() * sizeof(BookOrbitAnnotationKey) + KEY_SET_HEAP_MARGIN;
   if (!syncedHereBefore) {
@@ -959,10 +1036,14 @@ bool BookOrbitSyncActivity::exchangeAnnotationKeys() {
                                                       nullptr, 0, unmatched, &incomingAnnotations, &morePending,
                                                       nullptr, &incomingOffered, &annotationsDeletedOnServer);
   }
-  LOG_INF("BookOrbit", "Highlight exchange result=%d (http=%d, unmatched=%d, keys=%u, deleted on server=%lu)",
-          static_cast<int>(result), BookOrbitSyncClient::lastHttpCode, unmatched ? 1 : 0, (unsigned)keys.count,
+  LOG_INF("BookOrbit",
+          "Highlight exchange result=%d (http=%d, unmatched=%d, incompatible=%d, keys=%u, deleted on server=%lu)",
+          static_cast<int>(result), BookOrbitSyncClient::lastHttpCode, unmatched ? 1 : 0,
+          BookOrbitSyncClient::lastPositionIncompatible ? 1 : 0, (unsigned)keys.count,
           static_cast<unsigned long>(annotationsDeletedOnServer));
-  documentUnmatched = unmatched;
+  documentIncompatible = BookOrbitSyncClient::lastPositionIncompatible;
+  // The sweep's booksMatched: an incompatible copy's book is matched, and its progress applied.
+  documentUnmatched = unmatched && !documentIncompatible;
   // The key set goes out with the first request only.
   pendingAnnotationKeys.clear();
   pendingAnnotationKeys.shrink_to_fit();
@@ -1184,8 +1265,9 @@ void BookOrbitSyncActivity::uploadBookmarkBatch() {
   const BookOrbitSyncClient::Error result = BookOrbitSyncClient::exchangeBookmarks(
       documentHash, SETTINGS.getEffectiveDeviceName(), keys, pendingBookmarks.data(), pendingBookmarks.size(),
       unmatched, &incomingBookmarks, &morePending);
-  LOG_INF("BookOrbit", "Bookmark upload result=%d (http=%d, unmatched=%d)", static_cast<int>(result),
-          BookOrbitSyncClient::lastHttpCode, unmatched ? 1 : 0);
+  LOG_INF("BookOrbit", "Bookmark upload result=%d (http=%d, unmatched=%d, incompatible=%d)", static_cast<int>(result),
+          BookOrbitSyncClient::lastHttpCode, unmatched ? 1 : 0, BookOrbitSyncClient::lastPositionIncompatible ? 1 : 0);
+  if (BookOrbitSyncClient::lastPositionIncompatible) documentIncompatible = true;
   if (result == BookOrbitSyncClient::SERVER_ERROR && BookOrbitSyncClient::lastHttpCode == 404) {
     LOG_INF("BookOrbit", "Server predates bookmark sync; not asking again until reboot");
     s_bookmarkRouteUnsupported = true;
@@ -2107,6 +2189,37 @@ void BookOrbitSyncActivity::render(RenderLock&&) {
     return;
   }
 
+#if CROSSINK_APP_CAP_BOOK_UPDATE
+  if (state == UPDATE_OFFER) {
+    UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, tr(STR_BOOKORBIT_COPY_OUTDATED), true,
+                              EpdFontFamily::BOLD);
+    const int messageWidth = screen.width - metrics.contentSidePadding * 2;
+    const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+    int messageY = top + 40;
+    // Without a catalog book to download, the offer can only say where to get the copy.
+    const char* hints[] = {tr(STR_BOOKORBIT_COPY_OUTDATED_HINT),
+                           updateBookId != 0 ? nullptr : tr(STR_BOOKORBIT_COPY_REDOWNLOAD_HINT)};
+    for (const char* hint : hints) {
+      if (!hint) continue;
+      for (const auto& line : renderer.wrappedText(UI_10_FONT_ID, hint, messageWidth, 3)) {
+        UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, messageY, line.c_str());
+        messageY += lineHeight + 4;
+      }
+    }
+
+    if (updateBookId != 0 && mappedInput.hasTouch()) {
+      const auto actions = noRemoteProgressActionLayout(screen, metrics);
+      const char* actionLabels[] = {tr(STR_UPDATE), tr(STR_NOT_NOW)};
+      TouchActionButtons::draw(renderer, actions, actionLabels, 0, -1, UI_10_FONT_ID);
+    }
+    const auto labels = updateBookId != 0 ? mappedInput.mapLabels(tr(STR_NOT_NOW), tr(STR_UPDATE), "", "")
+                                          : mappedInput.mapLabels(tr(STR_BACK), tr(STR_OK), "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
+    renderer.displayBuffer();
+    return;
+  }
+#endif
+
   if (state == SYNC_COMPLETE) {
     UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, tr(STR_ALREADY_SYNCED), true, EpdFontFamily::BOLD);
 
@@ -2238,6 +2351,55 @@ void BookOrbitSyncActivity::loop() {
     }
     return;
   }
+
+#if CROSSINK_APP_CAP_BOOK_UPDATE
+  if (state == UPDATE_OFFER) {
+    // Declining, or an offer with nothing to download, goes on with the sync's progress half.
+    const auto decline = [this] {
+      {
+        RenderLock lock(*this);
+        state = SYNCING;
+      }
+      continueWithProgress();
+    };
+#ifdef SIMULATOR
+    // Scripted runs have nobody to answer; the progress choice they script still comes next.
+    if (std::getenv("CROSSINK_SIM_BOOKORBIT_CHOICE") != nullptr) {
+      decline();
+      return;
+    }
+#endif
+    if (updateBookId != 0 && mappedInput.hasTouch()) {
+      const auto& metrics = UITheme::getInstance().getMetrics();
+      const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+      const auto actions = noRemoteProgressActionLayout(screen, metrics);
+      int touchedOption = -1;
+      const auto touch = mappedInput.rowTouch(
+          touchedOption, actions.buttons[0].y, TouchActionButtons::kDefaultHeight + TouchActionButtons::kDefaultGap,
+          actions.count, actions.buttons[0].x, actions.buttons[0].x + actions.buttons[0].width,
+          actions.buttons[0].height);
+      if (touch == MappedInputManager::RowTouch::Down) return;
+      if (touch == MappedInputManager::RowTouch::Tap) {
+        if (touchedOption == 0) {
+          startBookUpdate();
+        } else if (touchedOption == 1) {
+          decline();
+        }
+        return;
+      }
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      if (updateBookId != 0) {
+        startBookUpdate();
+      } else {
+        decline();
+      }
+      return;
+    }
+    if (backRequested) decline();
+    return;
+  }
+#endif
 
   if (state == NO_REMOTE_PROGRESS) {
 #ifdef SIMULATOR

@@ -240,4 +240,13 @@ class BookOrbitSyncClient {
 
   /** Transport-layer error from the last request (for diagnostics). */
   static int lastTransportError;
+
+  /**
+   * Set by the last highlight or bookmark exchange when the server listed this document under
+   * `positionIncompatible` (BookOrbit 3.6.0 and later): it knows the book, but this copy differs
+   * from the library file, so it cannot place the copy's positions and exchanges nothing. The
+   * exchange reports such a book as unmatched, which stops every upload; this says why, so the
+   * sync can offer to replace the copy.
+   */
+  static bool lastPositionIncompatible;
 };

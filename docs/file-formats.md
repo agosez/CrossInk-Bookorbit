@@ -743,6 +743,43 @@ whenever its timestamp is newer.
 A file shorter than 12 bytes, with another magic or with a timestamp of 0 or less, is no
 history at all: Smart sync then asks, and the sleep sync leaves the progress alone.
 
+## `orphaned_clippings.bin`
+
+### Version 1
+
+Written and read only by firmware built with `CROSSINK_APP_CAP_BOOK_UPDATE` (the S3 boards).
+
+`orphaned_clippings.bin` lives in the book's content-keyed state directory
+(`/.crosspoint/book_<contentHash>/`) and lists the highlights a replacement of the book's
+file orphaned. A BookOrbit catalog download over an existing copy
+(`src/util/BookUpdateMigration.cpp`) moves the clipping file, the bookmark file and
+`book_<contentHash>/` from the old copy's content hash to the new one's. It then compares the
+two copies' spines: a slot whose ZIP entry has the same path and the same CRC-32 in both
+copies is unchanged, and a highlight in any other slot is orphaned. When the copies cannot be
+compared, every highlight is. Orphaned highlights stay in the clipping file and in the
+highlight list, but are never drawn in the book, jumped to, given a position or synced.
+
+The list is kept out of the clipping file on purpose: a new clipping version would make older
+firmware read every rewritten clipping file as corrupt. The file only appears after such a
+replacement; earlier marks are kept when a later one adds more. An entry whose highlight was
+deleted is left in place and matches nothing.
+
+During the download the replaced copy waits at `<book>.epub.old` beside the new one until
+the move is done (`DownloadOptions::keepReplaced`). One left behind by a power loss is
+removed by the next download to the same path, and the state stays under the old hash.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `OCL1`
+- `[4-5]` `count` (`uint16_t`, at most 256)
+- Repeated `count` times, 8 bytes each: the clipping's identity, as
+  `bookorbit_annotations.bin` joins on it
+  - `[0-3]` `timestamp` (`uint32_t`, `Clipping::timestamp`)
+  - `[4-5]` `spineIndex` (`uint16_t`)
+  - `[6-7]` `paragraphIndex` (`uint16_t`)
+
+A file whose magic or length does not match is ignored: no highlight is orphaned.
+
 ## `/.crosspoint/bookorbit_downloads.bin`
 
 ### Version 1

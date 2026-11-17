@@ -9,8 +9,14 @@ on; for everything inherited from upstream, see the
 
 Based on CrossInk v1.6.1.
 
+### Added
+
+- On the X4 Pro, Sticky and X4 Classic, when a BookOrbit sync finds that the library's file of the open book changed after it was downloaded, it now offers to update the copy on the reader. BookOrbit rewrites a book's file when its details are edited, and from then on (BookOrbit 3.6.0 and later) it takes no highlights or bookmarks from the older copy. Update downloads the library's file over it and reopens the book, with its highlights, bookmarks, reading position and sync state. A highlight in a chapter the new file changed stays in the book's highlights, marked as such, but is no longer drawn in the book, opened at its place or synced. Not now goes on with the sync. The sync behind the sleep screen never asks; the next manual sync does. A book the reader did not download from the catalog cannot be updated this way, and the sync says to download it again from the catalog. The X3 and X4 have no room for this; their syncs keep such a book's highlights and bookmarks and try them again each time.
+
 ### Fixed
 
+- A BookOrbit sync no longer records highlights and bookmarks as sent for a book whose copy differs from the library's file (BookOrbit 3.6.0 and later). v1.6.1+bookorbit.7 recorded them as sent while the server dropped them, so they never went again; v1.6.1+bookorbit.8 kept them on the reader but did not say why.
+- On the X4 Pro, Sticky and X4 Classic, downloading a book again from the BookOrbit catalog, over a copy that differs from the new one, no longer leaves its highlights, bookmarks and BookOrbit sync state behind with the old copy.
 - Moving a book with the file transfer page or over WebDAV now keeps its reading position, reading stats, reader settings and place in recent books, as renaming it already did.
 
 ## [v1.6.1+bookorbit.8] - 2026-11-13

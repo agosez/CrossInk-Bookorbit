@@ -31,7 +31,7 @@ The main data directory is `.crosspoint` on the SD card. It stores render caches
 ├── koreader.json           # KOReader sync credentials
 ├── bookmarks/              # Bookmark files, one per book, named by content hash
 ├── clippings/              # EPUB clipping/highlight files, one per book, named by content hash
-├── book_<contenthash>/     # Per-book BookOrbit sync state and reading-progress copy; follows the book through moves
+├── book_<contenthash>/     # Per-book BookOrbit sync state, reading-progress copy and orphaned-highlight list; follows the book through moves, and (S3 boards) through a catalog download of a changed copy
 ├── bookorbit_downloads.bin # Where BookOrbit catalog downloads landed, for the catalog's on-device marker
 ├── bookorbit_download.json # A catalog download waiting out the X3/X4 restart before it; removed once read
 ├── bookorbit_catalog_link.json # Where the BookOrbit Home sent the catalog, waiting out the X3/X4 restart before it; removed once read

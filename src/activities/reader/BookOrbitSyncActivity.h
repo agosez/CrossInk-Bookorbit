@@ -1,4 +1,5 @@
 #pragma once
+#include <AppCapabilities.h>
 #include <Epub.h>
 
 #include <functional>
@@ -70,7 +71,10 @@ class BookOrbitSyncActivity final : public Activity {
     NO_REMOTE_PROGRESS,
     SYNC_FAILED,
     NO_CREDENTIALS,
-    SYNC_COMPLETE
+    SYNC_COMPLETE,
+    // The server knows the book but not this copy of it (positionIncompatible): offered between
+    // the highlight exchange and the progress decision.
+    UPDATE_OFFER
   };
 
   std::shared_ptr<Epub> epub;  // null until lazy-loaded after TLS in performSync()
@@ -147,7 +151,28 @@ class BookOrbitSyncActivity final : public Activity {
 
   void onWifiSelectionComplete(bool success);
   void performSync();
+  // The progress half of performSync(), after the stats, highlights and bookmarks; the update
+  // offer resumes here when the user declines.
+  void continueWithProgress();
+  BookOrbitSyncClient::Error progressFetchResult = BookOrbitSyncClient::OK;
   void performUpload();
+
+  // The server answered the highlight or bookmark exchange with positionIncompatible: its
+  // library file changed after this copy was made (a metadata write-back does that), so it
+  // takes none of this copy's highlights or bookmarks. With CROSSINK_APP_CAP_BOOK_UPDATE a
+  // manual sync offers to download the library's copy over this one
+  // (BookOrbitCatalogLink::replacePath), which carries the local state across
+  // (BookUpdateMigration); a sleep sync leaves the offer to the next manual one. Without it the
+  // highlights and bookmarks wait, and every sync tries them again.
+  bool documentIncompatible = false;
+  // Shows the offer and returns true, or returns false to let the sync go on.
+  bool offerBookUpdate();
+#if CROSSINK_APP_CAP_BOOK_UPDATE
+  // The catalog book this file was downloaded as, 0 when the download index does not know it:
+  // the offer then only says to re-download it from the catalog.
+  int64_t updateBookId = 0;
+  void startBookUpdate();
+#endif
   // Returns how many queued reading-session events the server accepted this sync,
   // reported in the sweep record that closes the sync (see completeSweep).
   size_t uploadQueuedStats();

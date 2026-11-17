@@ -19,6 +19,18 @@
 #error "CROSSINK_APP_CAP_USB_DRIVE must be 0 or 1"
 #endif
 
+// Replacing a book with the BookOrbit library's changed copy: the sync's update offer, the
+// catalog download that carries the book's highlights and sync state across, and orphaned
+// highlights. Every S3 image has it; the X3/X4 (C3) partition has no room. Without it a sync
+// still holds the highlights the server refuses for such a copy (positionIncompatible).
+#ifndef CROSSINK_APP_CAP_BOOK_UPDATE
+#error "Define CROSSINK_APP_CAP_BOOK_UPDATE as 0 or 1 in the PlatformIO environment"
+#endif
+
+#if CROSSINK_APP_CAP_BOOK_UPDATE != 0 && CROSSINK_APP_CAP_BOOK_UPDATE != 1
+#error "CROSSINK_APP_CAP_BOOK_UPDATE must be 0 or 1"
+#endif
+
 // Native simulator BoardConfig intentionally exposes only simulated runtime
 // profiles, so keep this firmware-image identity available at the app layer.
 #if defined(FREEINK_DEVICE_X4CLASSIC) && FREEINK_DEVICE_X4CLASSIC

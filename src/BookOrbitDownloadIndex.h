@@ -40,6 +40,11 @@ void forEachExisting(void (*visit)(int64_t bookId, const std::string& path, void
 // skip files the index already listed, without a second pass to de-duplicate.
 bool hasPath(const std::string& path);
 
+// The catalog book a recorded download at this exact path came from. Unlike lookup(),
+// the file's size is not checked: the caller is about to replace that copy, typically
+// because the server's file changed after it was downloaded.
+bool bookIdForPath(const std::string& path, int64_t& outBookId);
+
 // Follows a recorded download that was renamed or moved on the device, so the catalog
 // still finds it. No-op when oldPath was never a catalog download. Leaves the index
 // unloaded: the file browser and the reader call this, and neither keeps it around.

@@ -46,6 +46,11 @@ struct Clipping {
   // Session-only migration state, intentionally omitted from the on-disk
   // record.
   uint8_t resolvedLayoutBoundaries = 0;
+  // The book file was replaced by a copy whose chapter this highlight points into differs
+  // (see BookUpdateMigration): its position no longer locates its text. Still listed, never
+  // drawn, jumped to or synced. Kept beside the record, not in it, in the book's state dir
+  // (orphaned_clippings.bin), so the clipping format and older firmware are unaffected.
+  bool orphaned = false;
   char chapterTitle[CLIPPING_CHAPTER_TITLE_MAX] = {};
 };
 
@@ -121,6 +126,11 @@ class ClippingStore {
                                    RenameMigration& migration);
   static bool commitRenameMigration(RenameMigration& migration);
   static bool rollbackRenameMigration(RenameMigration& migration);
+  // Marks orphaned every highlight of the EPUB at filePath whose chapter changed when its file
+  // was replaced: chapterChanged[spineIndex] != 0, or a spine index at or past chapterCount.
+  // Earlier marks are kept. Call once the clipping store already follows the new copy. Defined
+  // only with CROSSINK_APP_CAP_BOOK_UPDATE.
+  static bool markOrphanedChapters(const std::string& filePath, const uint8_t* chapterChanged, size_t chapterCount);
 
  private:
   static ClippingStore instance;

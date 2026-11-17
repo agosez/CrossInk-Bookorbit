@@ -16,5 +16,5 @@ target_link_libraries(TouchReaderPreviewModelTest PRIVATE
 gtest_discover_tests(TouchReaderPreviewModelTest)
 
 target_compile_definitions(TouchReaderPreviewModelTest PRIVATE
-  SIMULATOR CROSSINK_APP_CAP_TOUCH=0 CROSSINK_APP_CAP_USB_DRIVE=0
+  SIMULATOR CROSSINK_APP_CAP_TOUCH=0 CROSSINK_APP_CAP_USB_DRIVE=0 CROSSINK_APP_CAP_BOOK_UPDATE=0
 )

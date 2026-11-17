@@ -211,10 +211,18 @@ void EpubReaderClippingListActivity::jumpToSelectedClipping() {
   if (selectedIndex < 0 || selectedIndex >= static_cast<int>(CLIPPINGS.clippingCount())) return;
 
   const Clipping* clipping = CLIPPINGS.clippingAt(static_cast<size_t>(selectedIndex));
-  if (!clipping) return;
+  // An orphaned one's chapter changed in the book's new copy: there is no place to jump to, and
+  // its detail view offers no Open.
+  if (!clipping || clipping->orphaned) return;
   setResult(ClippingJumpResult{clipping->spineIndex, clipping->startPage, clipping->pageCount, clipping->paragraphIndex,
                                static_cast<uint16_t>(selectedIndex)});
   finish();
+}
+
+bool EpubReaderClippingListActivity::selectedClippingOrphaned() const {
+  if (selectedIndex < 0) return false;
+  const Clipping* clipping = CLIPPINGS.clippingAt(static_cast<size_t>(selectedIndex));
+  return clipping && clipping->orphaned;
 }
 
 void EpubReaderClippingListActivity::openSelectedDetail() {
@@ -226,6 +234,10 @@ void EpubReaderClippingListActivity::openSelectedDetail() {
     text.clear();
   }
   buildOneLineSnippetText(text, detailText);
+  const Clipping* clipping = CLIPPINGS.clippingAt(static_cast<size_t>(selectedIndex));
+  if (clipping && clipping->orphaned) {
+    detailText.insert(0, std::string("[") + tr(STR_HIGHLIGHT_ORPHANED) + "] ");
+  }
   detailMode = true;
   detailPage = 0;
   detailLayoutWidth = 0;
@@ -373,7 +385,8 @@ void EpubReaderClippingListActivity::loop() {
 #if CROSSINK_APP_CAP_TOUCH
     if (mappedInput.hasTouchHardware()) {
       const Rect openButton = touchDetailOpenButtonRect(safe, metrics);
-      if (mappedInput.wasTapInRect(openButton.x, openButton.y, openButton.width, openButton.height)) {
+      if (!selectedClippingOrphaned() &&
+          mappedInput.wasTapInRect(openButton.x, openButton.y, openButton.width, openButton.height)) {
         jumpToSelectedClipping();
         return;
       }
@@ -595,8 +608,11 @@ void EpubReaderClippingListActivity::renderDetail() {
                       pageBuf);
   }
 
+  // An orphaned highlight has no place in the book to open (jumpToSelectedClipping()).
+  const bool canOpen = !selectedClippingOrphaned();
 #if CROSSINK_APP_CAP_TOUCH
   if (showTouchControls) {
+    if (!canOpen) return;
     renderer.fillRectDither(openButton.x, openButton.y, openButton.width, openButton.height, Color::White);
     renderer.drawRect(openButton.x, openButton.y, openButton.width, openButton.height, true);
     const char* label = tr(STR_OPEN);
@@ -608,9 +624,9 @@ void EpubReaderClippingListActivity::renderDetail() {
   }
 #endif
 
-  const auto labels =
-      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_OPEN), detailPage > 0 ? tr(STR_DIR_UP) : "",
-                            detailPage < detailPageCount - 1 ? tr(STR_DIR_DOWN) : "");
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), canOpen ? tr(STR_OPEN) : "",
+                                            detailPage > 0 ? tr(STR_DIR_UP) : "",
+                                            detailPage < detailPageCount - 1 ? tr(STR_DIR_DOWN) : "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
 }
 

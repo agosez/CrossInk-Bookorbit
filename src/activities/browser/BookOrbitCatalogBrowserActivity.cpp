@@ -1,5 +1,6 @@
 #include "BookOrbitCatalogBrowserActivity.h"
 
+#include <AppCapabilities.h>
 #include <BoardConfig.h>
 #include <Epub.h>
 #include <FsHelpers.h>
@@ -46,6 +47,7 @@
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
 #include "util/BookOrbitDevicePath.h"
+#include "util/BookUpdateMigration.h"
 #include "util/StringUtils.h"
 
 namespace fui = freeink::ui;
@@ -166,6 +168,10 @@ constexpr unsigned long LONG_PRESS_MS = 1000;
 // Where HttpDownloader stages a download until it is complete and checked (see
 // DownloadFileSwap). Not ".epub", so a leftover never shows up as a book.
 constexpr char STAGED_DOWNLOAD_SUFFIX[] = ".part";
+#if CROSSINK_APP_CAP_BOOK_UPDATE
+// Where the file a re-download replaced waits for BookUpdateMigration (DownloadOptions::keepReplaced).
+constexpr char REPLACED_COPY_SUFFIX[] = ".old";
+#endif
 // Marker appended (right-aligned) to catalog rows whose book already exists on the
 // device. U+2022 bullet: guaranteed by the built-in fonts' default glyph intervals.
 constexpr char ON_DEVICE_MARKER[] = "\xE2\x80\xA2";
@@ -400,7 +406,9 @@ void BookOrbitCatalogBrowserActivity::onWifiSelectionComplete(const bool connect
     listPage = 1;
     booksFromFacet = false;
     downloadFromHome = true;
-    downloadBook(link.bookId, link.title, "");
+    // A sync sent this one to replace the open book's out-of-date copy: back to that book after.
+    reopenAfterDownload = !link.replacePath.empty();
+    downloadBook(link.bookId, link.title, link.replacePath);
     return;
   }
   if (!loadRoot(/*allowNetwork=*/false)) {
@@ -1340,6 +1348,9 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
   // only put the file in place once it opens as an EPUB. A body cut short without a
   // Content-Length, or an error page served as the file, used to land as the book.
   downloadOptions.stageAsPart = true;
+  // A re-download's highlights, bookmarks and sync state are keyed by the old copy's content;
+  // it stays beside the new one until they have moved (see the OK branch below).
+  downloadOptions.keepReplaced = CROSSINK_APP_CAP_BOOK_UPDATE;
   downloadOptions.checkFreeSpace = true;
   downloadOptions.validate = [](const std::string& path) {
     ZipFile zip(path);
@@ -1408,9 +1419,22 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
 
   if (result == HttpDownloader::OK) {
     clearBookCache(finalPath);
+#if CROSSINK_APP_CAP_BOOK_UPDATE
+    // Run after the cache clear, so the new copy's spine comes from the new file; the session
+    // is closed by now, so loading both copies' metadata costs no TLS headroom.
+    const std::string replacedCopy = finalPath + REPLACED_COPY_SUFFIX;
+    if (Storage.exists(replacedCopy.c_str())) {
+      BookUpdateMigration::apply(finalPath, replacedCopy);
+      if (!Storage.remove(replacedCopy.c_str())) LOG_ERR("BookOrbit", "Could not remove %s", replacedCopy.c_str());
+    }
+#endif
     BookOrbitDownloadIndex::record(bookId, finalPath);
     // A new book, or new contents under a known path: the Library's index is stale.
     library::invalidateLibraryIndex();
+    if (reopenAfterDownload) {
+      openLocalBook(finalPath);
+      return;
+    }
   } else if (result == HttpDownloader::ABORTED) {
     LOG_DBG("BookOrbit", "Download cancelled");
     if (goHomeAfterCancel) {
