@@ -1352,21 +1352,34 @@ void CrossPointWebServer::handleMove() const {
     return;
   }
 
-  clearBookCache(itemPath.c_str());
-  const bool success = file.rename(newPath.c_str());
+  // A move is a rename into another folder: it carries the book's path-keyed state (reading
+  // position, stats, reader settings, recent entry, catalog download record) as Rename does.
+  // It used to clear the cache, which left that state behind under the old path.
   file.close();
-
-  if (success) {
-    LOG_DBG("WEB", "Moved file: %s -> %s", itemPath.c_str(), newPath.c_str());
-    ImageFolderIndex::invalidateForPath(itemPath.c_str());
-    sdFontSystem.markRegistryDirtyForPath(itemPath.c_str());
-    ImageFolderIndex::invalidateForPath(newPath.c_str());
-    sdFontSystem.markRegistryDirtyForPath(newPath.c_str());
-    server->send(200, "text/plain", "Moved successfully");
-  } else {
+  const auto migration = BookMoveUtils::renameFilePreservingBookState(itemPath.c_str(), newPath.c_str());
+  if (migration == BookMoveUtils::RenameMigrationResult::DestinationStateExists) {
+    server->send(409, "text/plain", "Target folder already has saved reading data for this filename");
+    return;
+  }
+  if (migration == BookMoveUtils::RenameMigrationResult::InvalidBookType ||
+      migration == BookMoveUtils::RenameMigrationResult::RolledBack) {
     LOG_ERR("WEB", "Failed to move file: %s -> %s", itemPath.c_str(), newPath.c_str());
     server->send(500, "text/plain", "Failed to move file");
+    return;
   }
+
+  LOG_DBG("WEB", "Moved file: %s -> %s", itemPath.c_str(), newPath.c_str());
+  ImageFolderIndex::invalidateForPath(itemPath.c_str());
+  sdFontSystem.markRegistryDirtyForPath(itemPath.c_str());
+  ImageFolderIndex::invalidateForPath(newPath.c_str());
+  sdFontSystem.markRegistryDirtyForPath(newPath.c_str());
+  if (migration == BookMoveUtils::RenameMigrationResult::KeepRenamed) {
+    LOG_ERR("WEB", "Move kept new path after incomplete state rollback: %s", newPath.c_str());
+    server->send(500, "text/plain",
+                 "File was moved, but some saved references could not be updated. Refresh the file list.");
+    return;
+  }
+  server->send(200, "text/plain", "Moved successfully");
 }
 
 void CrossPointWebServer::handleDelete() const {

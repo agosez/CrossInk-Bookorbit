@@ -19,6 +19,7 @@ Based on CrossInk v1.6.1.
 
 ### Fixed
 
+- Moving a book with the file transfer page or over WebDAV now keeps its reading position, reading stats, reader settings and place in recent books, as renaming it already did.
 - With the BookOrbit theme, the message shown while Home's BookOrbit tile syncs no longer runs off the screen when it is longer than one line, as "Fetching your BookOrbit stats..." is in French. It now wraps onto the next line, on a screen titled BookOrbit Sync like a book's sync.
 
 ## [v1.6.1+bookorbit.8] - 2026-11-13
