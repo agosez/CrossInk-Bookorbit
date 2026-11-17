@@ -120,8 +120,9 @@ void BookOrbitBookmarkSync::exchange() {
   const BookOrbitSyncClient::Error result = BookOrbitSyncClient::exchangeBookmarks(
       documentHash, SETTINGS.getEffectiveDeviceName(), keys, pendingBookmarks.data(), pendingBookmarks.size(),
       unmatched, &incomingBookmarks, &morePending);
-  LOG_INF("BookOrbit", "Bookmark upload result=%d (http=%d, unmatched=%d)", static_cast<int>(result),
-          BookOrbitSyncClient::lastHttpCode, unmatched ? 1 : 0);
+  incompatibleDocument = BookOrbitSyncClient::lastPositionIncompatible;
+  LOG_INF("BookOrbit", "Bookmark upload result=%d (http=%d, unmatched=%d, incompatible=%d)", static_cast<int>(result),
+          BookOrbitSyncClient::lastHttpCode, unmatched ? 1 : 0, incompatibleDocument ? 1 : 0);
   if (result == BookOrbitSyncClient::SERVER_ERROR && BookOrbitSyncClient::lastHttpCode == 404) {
     LOG_INF("BookOrbit", "Server predates bookmark sync; not asking again until reboot");
     s_bookmarkRouteUnsupported = true;

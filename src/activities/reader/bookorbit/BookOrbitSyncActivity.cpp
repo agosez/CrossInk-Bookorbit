@@ -432,6 +432,19 @@ void BookOrbitSyncActivity::showExchangeSummaries() {
     requestUpdateAndWait();
     if (!sleepSync) delay(1500);
   }
+  if (!sleepSync && (highlights.documentIncompatible() || bookmarks.documentIncompatible())) {
+    // Said rather than left to the log: the sync goes on, and nothing else on screen tells why
+    // this book's highlights and bookmarks stay here.
+    {
+      RenderLock lock(*this);
+      statusMessage = tr(STR_BOOKORBIT_COPY_OUTDATED);
+      summaryLines[0] = tr(STR_BOOKORBIT_COPY_OUTDATED_HINT);
+    }
+    requestUpdateAndWait();
+    delay(3000);
+    RenderLock lock(*this);
+    summaryLines[0].clear();
+  }
 }
 
 void BookOrbitSyncActivity::recordSweep(const size_t statsAccepted) {

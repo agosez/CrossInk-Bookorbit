@@ -264,4 +264,12 @@ class BookOrbitSyncClient {
 
   /** Transport-layer error from the last request (for diagnostics). */
   static int lastTransportError;
+
+  /**
+   * Set by the last highlight or bookmark exchange when the server listed this document under
+   * `positionIncompatible` (BookOrbit 3.6.0 and later): it knows the book only by an older hash
+   * of its file, so this copy's positions cannot be placed and nothing is exchanged. The
+   * exchange reports the book as unmatched, which records nothing as sent; this says why.
+   */
+  static bool lastPositionIncompatible;
 };

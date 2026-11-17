@@ -129,11 +129,14 @@ void drawStatus(const GfxRenderer& renderer, const Rect& screen, const ThemeMetr
                 const size_t progressTotal) {
   UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, status, true, EpdFontFamily::BOLD);
   const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const int lineWidth = screen.width - metrics.contentSidePadding * 2;
   int lineY = top;
   for (const std::string& line : summaryLines) {
     if (line.empty()) continue;
-    lineY += lineHeight + metrics.verticalSpacing;
-    UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, lineY, line.c_str());
+    for (const auto& wrapped : renderer.wrappedText(UI_10_FONT_ID, line.c_str(), lineWidth, 3)) {
+      lineY += lineHeight + metrics.verticalSpacing;
+      UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, lineY, wrapped.c_str());
+    }
   }
   if (progressTotal > 0) {
     char counts[32];

@@ -38,6 +38,8 @@ class BookOrbitBookmarkSync {
   uint16_t added() const { return bookmarksAdded; }
   uint16_t removed() const { return bookmarksRemoved; }
   bool changedAnything() const { return bookmarksSent > 0 || bookmarksAdded > 0 || bookmarksRemoved > 0; }
+  // See BookOrbitHighlightSync::documentIncompatible().
+  bool documentIncompatible() const { return incompatibleDocument; }
 
  private:
   const std::string& epubPath;
@@ -53,6 +55,7 @@ class BookOrbitBookmarkSync {
   uint16_t bookmarksSent = 0;
   uint16_t bookmarksAdded = 0;
   uint16_t bookmarksRemoved = 0;
+  bool incompatibleDocument = false;
   // Their exchange still builds its key set as JSON nodes, and above this the set and its
   // JSON stop fitting beside a TLS session, so it is not sent and the server is told the set
   // is incomplete instead of being left to infer deletions. The highlight key set is written
