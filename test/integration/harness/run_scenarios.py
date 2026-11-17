@@ -1411,7 +1411,7 @@ def scenario_highlight_delete_propagates_large(verbose: bool) -> None:
 def scenario_highlight_delete_guard(verbose: bool) -> None:
     """A lost sync-state store must NOT read as 'every highlight deleted': with
     the store gone, the sync reports no key set and the server keeps everything.
-    This is the destructive-wipe guard in prepareAnnotationBatch."""
+    This is the destructive-wipe guard in BookOrbitHighlightSync::prepare."""
     manifest, books = load_seed()
     book = books[FRESH_BOOK["highlight_delete_guard"]]
     now = int(time.time())

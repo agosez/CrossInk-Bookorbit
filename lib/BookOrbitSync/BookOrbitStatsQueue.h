@@ -15,7 +15,7 @@
  * `era`/`flags` exist because the X4 has no battery-backed RTC: events recorded
  * before the clock was NTP-confirmed carry CLOCK_APPROXIMATE and the WallClock power
  * era they were stamped in. Same-era events are corrected to exact time at upload
- * (see BookOrbitSyncActivity::uploadQueuedStats); older-era events upload with their
+ * (see BookOrbitStatsUpload::uploadQueued); older-era events upload with their
  * checkpoint-approximate stamps.
  */
 struct BookOrbitStatEvent {
@@ -61,7 +61,7 @@ class BookOrbitStatsQueue {
 
   // Reads at most maxEvents events starting at firstIndex, in queue order, so a long
   // backlog can be drained a batch at a time instead of held whole (see
-  // BookOrbitSyncActivity::uploadQueuedStats). Returns false on storage failure or a
+  // BookOrbitStatsUpload::uploadQueued). Returns false on storage failure or a
   // bad header; running past the end of the queue yields true with fewer events.
   static bool readRange(const std::string& bookCachePath, size_t firstIndex, size_t maxEvents,
                         std::vector<BookOrbitStatEvent>& outEvents);
