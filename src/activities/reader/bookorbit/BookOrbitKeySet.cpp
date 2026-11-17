@@ -1,5 +1,7 @@
 #include "BookOrbitKeySet.h"
 
+#include <algorithm>
+
 namespace BookOrbitKeySet {
 namespace {
 bool appendKey(std::vector<BookOrbitAnnotationKey>& keys, const uint32_t identityEpoch, const std::string& pos) {
@@ -14,24 +16,20 @@ bool appendKey(std::vector<BookOrbitAnnotationKey>& keys, const uint32_t identit
 
 bool build(const std::vector<BookOrbitAnnotationRecord>& records, std::vector<BookOrbitAnnotationKey>& keys) {
   keys.reserve(records.size());
-  for (const BookOrbitAnnotationRecord& record : records) {
-    if (!appendKey(keys, record.identityEpoch, record.pos0)) {
-      keys.clear();
-      return false;
-    }
-  }
-  return true;
+  const bool ok = std::all_of(records.begin(), records.end(), [&keys](const BookOrbitAnnotationRecord& record) {
+    return appendKey(keys, record.identityEpoch, record.pos0);
+  });
+  if (!ok) keys.clear();
+  return ok;
 }
 
 bool build(const std::vector<BookOrbitBookmarkRecord>& records, std::vector<BookOrbitAnnotationKey>& keys) {
   keys.reserve(records.size());
-  for (const BookOrbitBookmarkRecord& record : records) {
-    if (!appendKey(keys, record.identityEpoch, record.pos)) {
-      keys.clear();
-      return false;
-    }
-  }
-  return true;
+  const bool ok = std::all_of(records.begin(), records.end(), [&keys](const BookOrbitBookmarkRecord& record) {
+    return appendKey(keys, record.identityEpoch, record.pos);
+  });
+  if (!ok) keys.clear();
+  return ok;
 }
 
 }  // namespace BookOrbitKeySet

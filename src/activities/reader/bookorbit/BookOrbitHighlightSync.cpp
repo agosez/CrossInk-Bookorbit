@@ -433,7 +433,7 @@ bool BookOrbitHighlightSync::applyIncomingAnnotations(const Epub& epub, size_t& 
         }
       }
 
-      bool removed = false;
+      bool removedHere = false;
       if (found) {
         for (size_t i = 0; i < CLIPPINGS.clippingCount(); i++) {
           const Clipping* clipping = CLIPPINGS.clippingAt(i);
@@ -441,11 +441,11 @@ bool BookOrbitHighlightSync::applyIncomingAnnotations(const Epub& epub, size_t& 
               !(BookOrbitClippingRef{clipping->timestamp, clipping->spineIndex, clipping->paragraphIndex} == target)) {
             continue;
           }
-          removed = CLIPPINGS.removeClippingAt(i);
+          removedHere = CLIPPINGS.removeClippingAt(i);
           break;
         }
       }
-      if (removed) {
+      if (removedHere) {
         storeChanged = true;
         removedCount++;
       } else {
@@ -545,12 +545,12 @@ bool BookOrbitHighlightSync::applyIncomingAnnotations(const Epub& epub, size_t& 
     // device never measured. Zero is also the honest layout signature here.
     const size_t newIndex = CLIPPINGS.clippingCount();
     // No table selection either: a server annotation carries text, not a cell coordinate.
-    const auto added = CLIPPINGS.addClipping(spine, 0, 0, 0, 0, 0, 0, incoming.chapter.c_str(), paragraphHint,
-                                             incoming.text, /*tableSelection=*/UINT16_MAX, /*layoutSignature=*/0,
-                                             freeClippingTimestamp(spine, paragraphHint));
-    if (added != ClippingStore::AddResult::Added) {
+    const auto addResult = CLIPPINGS.addClipping(spine, 0, 0, 0, 0, 0, 0, incoming.chapter.c_str(), paragraphHint,
+                                                 incoming.text, /*tableSelection=*/UINT16_MAX, /*layoutSignature=*/0,
+                                                 freeClippingTimestamp(spine, paragraphHint));
+    if (addResult != ClippingStore::AddResult::Added) {
       LOG_ERR("BookOrbit", "Could not store server annotation %lu (result=%d)",
-              static_cast<unsigned long>(incoming.serverId), static_cast<int>(added));
+              static_cast<unsigned long>(incoming.serverId), static_cast<int>(addResult));
       unplacedAnnotationIds.push_back(incoming.serverId);
       continue;  // unacknowledged: a full store should not silently swallow it
     }

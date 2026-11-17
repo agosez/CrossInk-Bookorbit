@@ -70,14 +70,10 @@ void BookOrbitBookmarkSync::prepare(const bool serverAcceptsSidecar) {
     if (pendingBookmarks.size() >= BOOKORBIT_BOOKMARK_BATCH) break;
     if (record.identityEpoch <= watermark) continue;
 
-    const Bookmark* bookmark = nullptr;
-    for (const Bookmark& candidate : bookmarks) {
-      if (candidate.timestamp == record.timestamp && candidate.spineIndex == record.spineIndex) {
-        bookmark = &candidate;
-        break;
-      }
-    }
-    if (!bookmark) continue;  // deleted locally; the key set will tell the server
+    const auto bookmark = std::find_if(bookmarks.begin(), bookmarks.end(), [&record](const Bookmark& candidate) {
+      return candidate.timestamp == record.timestamp && candidate.spineIndex == record.spineIndex;
+    });
+    if (bookmark == bookmarks.end()) continue;  // deleted locally; the key set will tell the server
 
     BookOrbitBookmark entry;
     if (!bookOrbitFormatDatetime(record.identityEpoch, entry.datetime)) continue;
@@ -294,13 +290,9 @@ void BookOrbitBookmarkSync::applyIncoming(const std::shared_ptr<Epub>& epub, Gfx
   // records still wait to upload.
   if (newestMintedIdentity > 0) {
     const uint32_t watermark = BookOrbitBookmarkStore::readWatermark(stateDir);
-    bool localStillPending = false;
-    for (const BookOrbitBookmarkRecord& record : records) {
-      if (record.identityEpoch > watermark) {
-        localStillPending = true;
-        break;
-      }
-    }
+    const bool localStillPending =
+        std::any_of(records.begin(), records.end(),
+                    [watermark](const BookOrbitBookmarkRecord& record) { return record.identityEpoch > watermark; });
     if (!localStillPending) {
       BookOrbitBookmarkStore::advanceWatermark(stateDir, newestMintedIdentity);
     } else {
