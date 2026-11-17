@@ -32,6 +32,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -1846,6 +1847,65 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
         assert "Local scan: kind=on-device count=1" in output, \
             "'On device' did not find the downloaded book inside the template's folders"
 
+        # Simulate the same file arriving through a sideloader rather than the
+        # firmware's catalog download. Recording it must preserve a large index.
+        index = fs.crosspoint / "bookorbit_downloads.bin"
+        existing = bytearray(struct.pack("<4sI", b"BOD1", zlib.crc32(BASE_URL.encode())))
+        for number in range(135):
+            path = f"/Downloads/Older/Book {number}.epub".encode()
+            existing.extend(struct.pack("<qIH", -number - 1, 10, len(path)) + path)
+        index.write_bytes(existing)
+        listing_script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",
+            "11000:DOWN", "11350:DOWN", "11700:DOWN", "12050:DOWN",
+            "12400:DOWN", "12750:DOWN", "13100:DOWN", "13450:CONFIRM",
+            "16000:CONFIRM", "24000:QUIT",
+        ])
+        output = run_simulator(fs, input_script=listing_script, choice="apply", timeout_s=60, verbose=verbose,
+                               after_reboot_script="6000:QUIT")
+        assert "Restarting into the download of book" not in output, "the sideloaded copy downloaded again"
+        assert index.read_bytes().startswith(existing), "recording a book evicted older index entries"
+        assert f"/Downloads/{device_path}".encode() in index.read_bytes(), \
+            "the sideloaded copy was not indexed after selection"
+        state = json.loads((fs.crosspoint / "state.json").read_text())
+        assert state.get("openEpubPath") == f"/Downloads/{device_path}", "the sideloaded copy was not opened"
+
+
+def scenario_catalog_large_local_list(verbose: bool) -> None:
+    """A legacy index above 128 entries and mixed SD folders yield all 210 books."""
+    manifest, library = load_seed()
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
+        index = bytearray(struct.pack("<4sI", b"BOD1", zlib.crc32(BASE_URL.encode())))
+        for number in range(210, 0, -1):
+            folder = "Downloads/Series" if number <= 135 else ("Read", "Downloads", "")[number % 3]
+            book = fs.fs / folder / f"Book {number}.epub"
+            book.parent.mkdir(parents=True, exist_ok=True)
+            if number == 210:
+                shutil.copyfile(INTEGRATION / "library" / Path(library[0]["file"]).name, book)
+            else:
+                book.write_bytes(b"EPUB placeholder")
+            if number <= 135 or number == 136:
+                path = ("/" + book.relative_to(fs.fs).as_posix()).encode()
+                index.extend(struct.pack("<qIH", number, book.stat().st_size, len(path)) + path)
+        (fs.crosspoint / "bookorbit_downloads.bin").write_bytes(index)
+
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",  # Home menu -> BookOrbit catalog
+            "11500:UP", "11900:UP", "12300:UP", "12700:CONFIRM",  # root -> On device
+            "15500:UP",  # wrap to the last row, past the old cap
+            "16000:DOWN",  # wrap back to the first row
+            "16500:UP", "17000:CONFIRM", "24000:QUIT",
+        ])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose,
+                               after_reboot_script="6000:QUIT")
+        assert "Local scan: kind=on-device count=210" in output, "index and flat folders were not counted correctly"
+        pages = [(int(page), int(rows)) for page, rows in re.findall(r"Local page=(\d+) rows=(\d+)", output)]
+        assert [p for p, _ in pages if p != 10] == [1, 11, 1, 11], f"unexpected page traversal: {pages}"
+        assert max(rows for _, rows in pages) <= 60, f"unbounded row window: {pages}"
+        state = json.loads((fs.crosspoint / "state.json").read_text())
+        assert state.get("openEpubPath") == "/Read/Book 210.epub", "incorrect natural-sort endpoint"
+
 
 def scenario_catalog_book_actions(verbose: bool) -> None:
     """A catalog book's action menu, opened by holding Confirm, and what Confirm does
@@ -2267,6 +2327,7 @@ SCENARIOS = {
     "catalog_libraries_browse": scenario_catalog_libraries_browse,
     "catalog_smart_scopes_browse": scenario_catalog_smart_scopes_browse,
     "catalog_download_naming": scenario_catalog_download_naming,
+    "catalog_large_local_list": scenario_catalog_large_local_list,
     "catalog_book_actions": scenario_catalog_book_actions,
     "catalog_deep_listing": scenario_catalog_deep_listing,
     "catalog_hides_non_epub": scenario_catalog_hides_non_epub,

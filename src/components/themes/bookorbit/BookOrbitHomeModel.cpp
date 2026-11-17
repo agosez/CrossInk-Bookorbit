@@ -124,7 +124,6 @@ void BookOrbitHomeModel::computeRows() {
     shelfOnCard[i] = onCardMask(snapshot->shelves[i].books, snapshot->shelves[i].count);
   }
   serverBookCount = static_cast<int32_t>(BookOrbitDownloadIndex::recordedCount());
-  BookOrbitDownloadIndex::unload();
 }
 
 const BookOrbitHomeBook* BookOrbitHomeModel::catalogBook(const int arg) const {
