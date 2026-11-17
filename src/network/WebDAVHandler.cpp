@@ -15,6 +15,7 @@
 #include "CrossPointSettings.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
 #include "util/BookCacheUtils.h"
+#include "util/BookMoveUtils.h"
 
 namespace {
 constexpr const char* HIDDEN_ITEMS[] = {"System Volume Information", "XTCache"};
@@ -581,9 +582,31 @@ void WebDAVHandler::handleMove(WebServer& s) {
     return;
   }
 
-  clearBookCache(srcPath.c_str());
-  bool success = file.rename(dstPath.c_str());
-  file.close();
+  bool success = false;
+  if (!file.isDirectory()) {
+    // A file carries its book's path-keyed state (reading position, stats, reader settings,
+    // recent entry) as the web portal's Rename does. A target already holding saved state, or
+    // one that changes the book's format (a client renaming "x.epub" to "x.epub.bak" before
+    // replacing it), falls back to the plain move, which leaves that state behind.
+    file.close();
+    const auto migration = BookMoveUtils::renameFilePreservingBookState(srcPath.c_str(), dstPath.c_str());
+    if (migration != BookMoveUtils::RenameMigrationResult::DestinationStateExists &&
+        migration != BookMoveUtils::RenameMigrationResult::InvalidBookType) {
+      success = migration == BookMoveUtils::RenameMigrationResult::Success ||
+                migration == BookMoveUtils::RenameMigrationResult::KeepRenamed;
+    } else {
+      file = Storage.open(srcPath.c_str());
+      if (!file) {
+        s.send(500, "text/plain", "Failed to open source");
+        return;
+      }
+    }
+  }
+  if (file) {
+    clearBookCache(srcPath.c_str());
+    success = file.rename(dstPath.c_str());
+    file.close();
+  }
 
   if (success) {
     ImageFolderIndex::invalidateForPath(srcPath.c_str());

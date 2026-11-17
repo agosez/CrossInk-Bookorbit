@@ -5,6 +5,14 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.6.1.
+
+### Fixed
+
+- Moving a book with the file transfer page or over WebDAV now keeps its reading position, reading stats, reader settings and place in recent books, as renaming it already did.
+
 ## [v1.6.1+bookorbit.8] - 2026-11-13
 
 Based on CrossInk v1.6.1.
