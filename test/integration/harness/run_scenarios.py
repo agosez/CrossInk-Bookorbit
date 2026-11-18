@@ -2424,6 +2424,39 @@ def scenario_sleep_sync_device_scan(verbose: bool) -> None:
         assert len(probes) == 1 and "(1 hashes)" in probes[0], f"unexpected match checks: {probes}"
 
 
+def scenario_home_refresh_device_scan(verbose: bool) -> None:
+    """The Home tile's sync runs the card scan too, in its own network boot: a library book
+    copied to /Inbox moves to its catalog location, a second copy of it is deleted, and the
+    sync ends on a summary of what the scan did before it restarts to Home."""
+    manifest, library = load_seed()
+    sim = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                       manifest["kosync"]["password"], SIM_DEVICE_ID)
+    book = library[43]  # outside every seeded range but the collection's
+    book_id = next(item["id"] for item in sim.catalog_manifest()
+                   for f in item["files"] if f["fileHash"] == book["hash"])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        (fs.crosspoint / "crossink-settings.json").write_text(json.dumps({"uiTheme": UI_THEME_BOOKORBIT}))
+        copies = [fs.fs / "Inbox" / "copied.epub", fs.fs / "Inbox" / "copied (1).epub"]
+        for copy in copies:
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(INTEGRATION / "library" / book["file"], copy)
+
+        # With no recent book, the BookOrbit tile is the page's second stop. The run ends on
+        # the timeout: nothing can be scheduled across the two restarts.
+        output = run_simulator(fs, input_script="3000:DOWN:120;4500:CONFIRM:120", choice="none", timeout_s=25,
+                               verbose=verbose)
+        assert "Device scan: asked=2 matched=2 moved=1 duplicates=1 remembered=0" in output, \
+            "the Home refresh's scan differs:\n" + "\n".join(
+                line for line in output.splitlines() if "Device scan" in line)
+        assert "Home refresh: showing the card scan's summary" in output, "the refresh ended without its summary"
+        index = {i: p for i, p, _ in read_download_index(fs.fs / DOWNLOAD_INDEX)}
+        assert book_id in index and (fs.fs / index[book_id].lstrip("/")).exists(), \
+            f"the book was not filed: {index}"
+        assert not any(copy.exists() for copy in copies), "a copy stayed in /Inbox"
+
+
 CATALOG_ROOT_SCRIPT = ";".join([
     "6000:DOWN", "6500:DOWN", "7000:CONFIRM",  # home menu -> BookOrbit catalog
     "13000:QUIT",                              # the root counts local books as it builds
@@ -2479,6 +2512,7 @@ SCENARIOS = {
     "catalog_download_index_migration": scenario_catalog_download_index_migration,
     "catalog_download_index_beyond_legacy_cap": scenario_catalog_download_index_beyond_legacy_cap,
     "sleep_sync_device_scan": scenario_sleep_sync_device_scan,
+    "home_refresh_device_scan": scenario_home_refresh_device_scan,
     "catalog_hides_non_epub": scenario_catalog_hides_non_epub,
     "catalog_sort_filter": scenario_catalog_sort_filter,
     "catalog_sections_and_shelf": scenario_catalog_sections_and_shelf,
