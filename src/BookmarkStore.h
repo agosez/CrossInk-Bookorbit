@@ -81,6 +81,8 @@ class BookmarkStore {
   static bool migrateForFilePath(const std::string& oldFilePath, const std::string& newFilePath,
                                  const std::string& title, const std::string& author, const std::string& bookType);
   static bool hasStoredStateForFilePath(const std::string& filePath, const std::string& bookType);
+  // The content-keyed store of the EPUB whose content hash this is (see BookUpdateMigration).
+  static std::string storePathForHash(const std::string& contentHash);
 
   // Transactional variant used by file rename. Source files and destination
   // backups remain in place until commit, so a later failure can restore both

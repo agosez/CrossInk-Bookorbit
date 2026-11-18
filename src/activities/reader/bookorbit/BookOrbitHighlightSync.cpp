@@ -33,7 +33,8 @@ const Clipping* sendableClipping(const BookOrbitAnnotationRecord& record, size_t
       // highlight made here always covers a word). The server holds it already, and with more
       // than this device can show: sent back, BookOrbit 3.5.0's field-by-field merge reads the
       // missing note as removed and the plain style as changed, and the range shrinks to pos0.
-      return candidate->wordCount == 0 ? nullptr : candidate;
+      // An orphaned one's position points into a chapter the book's new copy changed.
+      return candidate->wordCount == 0 || candidate->orphaned ? nullptr : candidate;
     }
   }
   return nullptr;  // deleted locally; the key list will tell the server
@@ -168,6 +169,19 @@ void BookOrbitHighlightSync::prepare(const bool serverAcceptsSidecar) {
     if (record.identityEpoch > watermark && sendableClipping(record, clippingIndex)) annotationsToSend++;
   }
   annotationWatermark = watermark;
+  // An orphaned highlight without a position never gets one (its chapter changed under it), so
+  // it must not hold the key set back below as one still waiting for its position.
+  size_t orphansWithoutPosition = 0;
+  for (size_t i = 0; i < localClippingCount; i++) {
+    const Clipping* clipping = CLIPPINGS.clippingAt(i);
+    if (!clipping || !clipping->orphaned) continue;
+    const BookOrbitClippingRef ref{clipping->timestamp, clipping->spineIndex, clipping->paragraphIndex};
+    if (std::none_of(records.begin(), records.end(), [&ref](const BookOrbitAnnotationRecord& record) {
+          return BookOrbitClippingRef{record.timestamp, record.spineIndex, record.paragraphIndex} == ref;
+        })) {
+      orphansWithoutPosition++;
+    }
+  }
 
   CLIPPINGS.unload();
 
@@ -197,7 +211,7 @@ void BookOrbitHighlightSync::prepare(const bool serverAcceptsSidecar) {
   // non-destructive; bringing the highlights back takes the "new" sidecar state below, which
   // only a server that accepts it and a book with no highlight left here can use. Deletion
   // reporting resumes on its own once highlights sync again.
-  const bool everyClippingHasAPosition = records.size() >= localClippingCount;
+  const bool everyClippingHasAPosition = records.size() + orphansWithoutPosition >= localClippingCount;
   const bool keySetFits =
       ESP.getMaxAllocHeap() >= records.size() * sizeof(BookOrbitAnnotationKey) + KEY_SET_HEAP_MARGIN;
   if (!syncedHereBefore) {

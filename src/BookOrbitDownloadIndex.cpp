@@ -426,6 +426,14 @@ bool BookOrbitDownloadIndex::hasPath(const std::string& path) {
   return findPath(path) != NOT_FOUND;
 }
 
+bool BookOrbitDownloadIndex::bookIdForPath(const std::string& path, int64_t& outBookId) {
+  ensureLoaded();
+  const size_t index = findPath(path);
+  if (index == NOT_FOUND) return false;
+  outBookId = records[index].bookId;
+  return true;
+}
+
 void BookOrbitDownloadIndex::relocate(const std::string& oldPath, const std::string& newPath) {
   const bool wasLoaded = loaded;
   ensureLoaded();

@@ -125,6 +125,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "simulator/SimulatorSmokeTest.h"
 #endif
 #include "util/BatteryDiagnosticLog.h"
+#include "util/BookUpdateMigration.h"
 #include "util/ButtonNavigator.h"
 #include "util/ButtonShortcutController.h"
 #include "util/Dictionary.h"
@@ -584,6 +585,9 @@ bool startGlobalBookOrbitSync(const bool networkBootReady, const uint32_t payloa
     return true;
   }
 
+  // A catalog update this book has not finished (see ReaderActivity::loadEpub): the sync must
+  // see the state under the new copy's hash, and no highlight whose chapter changed.
+  if (BookUpdateMigration::pending(epubPath)) BookUpdateMigration::begin(epubPath, /*renderCacheIsOld=*/false);
   auto epub = std::make_shared<Epub>(epubPath, "/.crosspoint");
   if (!epub->load(true, SETTINGS.embeddedStyle == 0)) {
     LOG_ERR("MAIN", "Failed to load EPUB for global BookOrbit sync: %s", epubPath.c_str());
@@ -591,6 +595,7 @@ bool startGlobalBookOrbitSync(const bool networkBootReady, const uint32_t payloa
     activityManager.pushActivity(std::make_unique<BookOrbitSettingsActivity>(renderer, mappedInputManager));
     return true;
   }
+  BookUpdateMigration::finish(*epub);
 
   epub->setupCacheDir();
 

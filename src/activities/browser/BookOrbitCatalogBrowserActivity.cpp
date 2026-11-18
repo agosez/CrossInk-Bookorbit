@@ -46,6 +46,7 @@
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
 #include "util/BookOrbitDevicePath.h"
+#include "util/BookUpdateMigration.h"
 
 namespace fui = freeink::ui;
 
@@ -382,7 +383,7 @@ void BookOrbitCatalogBrowserActivity::onWifiSelectionComplete(const bool connect
     return;
   }
   if (!connected) {
-    onGoHome();
+    leaveCatalog();
     return;
   }
   sdFontSystem.releaseForNetwork(renderer);
@@ -396,7 +397,10 @@ void BookOrbitCatalogBrowserActivity::onWifiSelectionComplete(const bool connect
     listPage = 1;
     booksFromFacet = false;
     downloadFromHome = true;
-    downloadBook(link.bookId, link.title, "");
+    // A sync sent this one to replace the open book's outdated copy: back to that book after,
+    // whatever the outcome.
+    reopenPath = link.replacePath;
+    downloadBook(link.bookId, link.title, link.replacePath);
     return;
   }
   if (!loadRoot(/*allowNetwork=*/false)) {
@@ -1287,7 +1291,7 @@ void BookOrbitCatalogBrowserActivity::runPendingDownload(const bool wifiConnecte
   if (!wifiConnected) {
     // Backing out of Wi-Fi cancels the download: back to where it was started.
     if (downloadFromHome) {
-      onGoHome();
+      leaveCatalog();
       return;
     }
     restoreBookListAfterDownload();
@@ -1321,6 +1325,10 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
     return cancelRequested;
   };
 
+  // A replacement a reset interrupted: this download would drop its old copy
+  // (DownloadFileSwap::recover), so the state that copy holds moves first.
+  if (BookUpdateMigration::pending(finalPath)) BookUpdateMigration::begin(finalPath, /*renderCacheIsOld=*/false);
+
   HttpDownloader::DownloadOptions downloadOptions;
   downloadOptions.shouldCancel = pollCancel;
   downloadOptions.bufferSize = BOOKORBIT_DOWNLOAD_BUFFER_SIZE;
@@ -1336,6 +1344,9 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
   // only put the file in place once it opens as an EPUB. A body cut short without a
   // Content-Length, or an error page served as the file, used to land as the book.
   downloadOptions.stageAsPart = true;
+  // A re-download's highlights, bookmarks and sync state are keyed by the old copy's content;
+  // it stays beside the new one until they have moved (see the OK branch below).
+  downloadOptions.keepReplaced = true;
   downloadOptions.checkFreeSpace = true;
   downloadOptions.validate = [](const std::string& path) {
     ZipFile zip(path);
@@ -1403,14 +1414,23 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
   }
 
   if (result == HttpDownloader::OK) {
-    clearBookCache(finalPath);
+    // A copy it replaced hands its state to the new one; that also clears the render cache.
+    if (BookUpdateMigration::pending(finalPath)) {
+      BookUpdateMigration::begin(finalPath, /*renderCacheIsOld=*/true);
+    } else {
+      clearBookCache(finalPath);
+    }
     BookOrbitDownloadIndex::record(bookId, finalPath);
     // A new book, or new contents under a known path: the Library's index is stale.
     library::invalidateLibraryIndex();
+    if (!reopenPath.empty()) {
+      openLocalBook(finalPath);
+      return;
+    }
   } else if (result == HttpDownloader::ABORTED) {
     LOG_DBG("BookOrbit", "Download cancelled");
     if (goHomeAfterCancel) {
-      onGoHome();
+      leaveCatalog();
       return;
     }
     mappedInput.suppressNextBackRelease();
@@ -1422,7 +1442,7 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
   // A download from Home goes back there once done or cancelled; a failure first shows
   // its message, which Back dismisses to Home as well.
   if (downloadFromHome && !downloadFailed) {
-    onGoHome();
+    leaveCatalog();
     return;
   }
 
@@ -1519,6 +1539,14 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
   }
 }
 
+void BookOrbitCatalogBrowserActivity::leaveCatalog() {
+  if (reopenPath.empty()) {
+    onGoHome();
+  } else {
+    openLocalBook(reopenPath);
+  }
+}
+
 void BookOrbitCatalogBrowserActivity::openLocalBook(const std::string& path) {
   // Pushing the reader here would never survive: onExit() reboots while the
   // radio is still up, so the reader is torn down before onEnter() records
@@ -1603,7 +1631,7 @@ void BookOrbitCatalogBrowserActivity::promptDeleteBook(const int row) {
 
 void BookOrbitCatalogBrowserActivity::navigateBack() {
   if (navLevel == NavLevel::Root) {
-    onGoHome();
+    leaveCatalog();
   } else if (navLevel == NavLevel::Books && booksFromFacet) {
     reopenListing(NavLevel::FacetList, facetPage, facetSelectorIndex, facetTopIndex);
   } else {
@@ -1638,7 +1666,7 @@ void BookOrbitCatalogBrowserActivity::loop() {
     // the "no code beyond what's needed" scope decision for this feature.
     if (backRequested) {
       if (!BOOKORBIT_STORE.hasCredentials() || navLevel == NavLevel::Root || downloadFromHome) {
-        onGoHome();
+        leaveCatalog();
       } else if (entries.empty() && listFreedForDownload) {
         // The listing was freed for a download that then failed; rebuild it.
         restoreBookListAfterDownload();
@@ -1657,7 +1685,7 @@ void BookOrbitCatalogBrowserActivity::loop() {
 
   if (state == BrowserState::CHECK_WIFI || state == BrowserState::LOADING) {
     if (backRequested) {
-      onGoHome();
+      leaveCatalog();
     }
     return;
   }

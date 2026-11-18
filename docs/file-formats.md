@@ -743,6 +743,68 @@ whenever its timestamp is newer.
 A file shorter than 12 bytes, with another magic or with a timestamp of 0 or less, is no
 history at all: Smart sync then asks, and the sleep sync leaves the progress alone.
 
+## `orphaned_clippings.bin`
+
+### Version 1
+
+`orphaned_clippings.bin` lives in the book's content-keyed state directory
+(`/.crosspoint/book_<contentHash>/`) and lists the highlights a replacement of the book's
+file orphaned (see `replaced_chapters.bin` below for how they are chosen). Orphaned
+highlights stay in the clipping file and in the highlight list, but are never drawn in the
+book, jumped to, given a position or synced.
+
+The list is kept out of the clipping file on purpose: a new clipping version would make older
+firmware read every rewritten clipping file as corrupt. The file only appears after such a
+replacement; earlier marks are kept when a later one adds more. An entry whose highlight was
+deleted is left in place and matches nothing.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `OCL1`
+- `[4-5]` `count` (`uint16_t`, at most 256)
+- Repeated `count` times, 8 bytes each: the clipping's identity, as
+  `bookorbit_annotations.bin` joins on it
+  - `[0-3]` `timestamp` (`uint32_t`, `Clipping::timestamp`)
+  - `[4-5]` `spineIndex` (`uint16_t`)
+  - `[6-7]` `paragraphIndex` (`uint16_t`)
+
+A file whose magic or length does not match is ignored: no highlight is orphaned.
+
+## `replaced_chapters.bin`
+
+### Version 1
+
+Written in the new copy's state directory (`/.crosspoint/book_<contentHash>/`) when a BookOrbit
+catalog download replaced a book's file by a different copy, and removed once the reader has
+compared it with the new copy (`src/util/BookUpdateMigration.cpp`). Only a book with highlights
+gets one.
+
+The download keeps the replaced file at `<book>.epub.old` (`DownloadOptions::keepReplaced`).
+`BookUpdateMigration::begin` then moves the clipping file, the bookmark file and
+`book_<contentHash>/` from the old copy's content hash to the new one's, writes this list of the
+old copy's chapters, rewinds the upload watermarks of `bookorbit_annotations.bin` and
+`bookorbit_bookmarks.bin` to 1 (every record goes up again), clears the render cache and removes
+`<book>.epub.old`, last. A reset before that leaves `<book>.epub.old`, and the next open of the
+book or the next download to its path runs it again. Right after the download the old spine is
+read from the render cache, still the old copy's; when resuming it is read from the old file.
+
+When the reader next opens the book, each spine slot of the old copy is compared with the same
+slot of the new one: a slot whose ZIP entry has the same path and the same CRC-32 in both is
+unchanged, and a highlight in any other slot is listed in `orphaned_clippings.bin`. An empty
+list (the old copy could not be read) orphans every highlight.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `RCH1`
+- `[4-5]` `count` (`uint16_t`): spine slots of the old copy
+- Repeated `count` times, 15 bytes each:
+  - `[0-7]` `pathHash` (`uint64_t`, FNV-1a 64 of the normalised ZIP entry path)
+  - `[8-11]` `crc32` (`uint32_t`, from the ZIP central directory)
+  - `[12-13]` `pathLength` (`uint16_t`)
+  - `[14]` `found` (`uint8_t`, 0 when the entry was missing from the ZIP)
+
+A file whose magic or length does not match reads as an empty list.
+
 ## `/.crosspoint/bookorbit_downloads.bin`
 
 ### Version 2

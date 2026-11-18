@@ -16,6 +16,7 @@
 #include "activities/util/BmpViewerActivity.h"
 #include "activities/util/FullScreenMessageActivity.h"
 #include "components/UITheme.h"
+#include "util/BookUpdateMigration.h"
 
 bool ReaderActivity::isXtcFile(const std::string& path) { return FsHelpers::hasXtcExtension(path); }
 
@@ -54,6 +55,12 @@ ReaderActivity::EpubOpenResult ReaderActivity::loadEpub(const std::string& path)
     return result;
   }
 
+  // A catalog update a reset interrupted: the copy it replaced still holds the book's state.
+  if (BookUpdateMigration::pending(path)) {
+    GfxRenderer::FrameBufferLoan loan(renderer);
+    BookUpdateMigration::begin(path, /*renderCacheIsOld=*/false);
+  }
+
   auto epub = makeUniqueNoThrow<Epub>(path, "/.crosspoint");
   if (!epub) {
     LOG_ERR("READER", "Failed to allocate EPUB object");
@@ -81,6 +88,8 @@ ReaderActivity::EpubOpenResult ReaderActivity::loadEpub(const std::string& path)
   if (loaded) epub->ensureOptimizerImageIndex();
   loan.end();
   if (loaded) {
+    // After an update, before anything reads the highlights: orphans those whose chapter changed.
+    BookUpdateMigration::finish(*epub);
     result.epub = std::move(epub);
     result.failure = Epub::OpenFailure::None;
     return result;

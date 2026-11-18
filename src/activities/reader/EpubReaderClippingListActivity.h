@@ -53,6 +53,7 @@ class EpubReaderClippingListActivity final : public Activity {
   void closeDetail();
   void jumpToSelectedClipping();
   void openSelectedDetail();
+  bool selectedClippingOrphaned() const;
   void rebuildDetailLayoutIfNeeded();
   void showClippingActionMenu(bool ignoreInitialConfirmRelease);
   void renderDetail();

@@ -24,6 +24,13 @@ namespace BookContentId {
 std::string contentHash(const std::string& filePath);
 
 /**
+ * Drops the memo for a file that was just replaced in place by a different copy. The memo's
+ * size check misses a replacement of the same size, and the old hash would keep naming every
+ * store of the new copy.
+ */
+void forget(const std::string& filePath);
+
+/**
  * Name of the directory holding a book's content-keyed state
  * ("/.crosspoint/book_<hash>"), with no side effects: nothing is created, nothing is
  * migrated. For read paths — home screens and boot resume consult it for every listed
@@ -32,6 +39,9 @@ std::string contentHash(const std::string& filePath);
  * Returns an empty string when the book cannot be hashed.
  */
 std::string bookStateDirName(const std::string& filePath);
+
+/** The same name for a known content hash ("/.crosspoint/book_<hash>"). */
+std::string stateDirNameForHash(const std::string& hash);
 
 /**
  * bookStateDirName() plus writer-side setup: the directory is created on first use, and

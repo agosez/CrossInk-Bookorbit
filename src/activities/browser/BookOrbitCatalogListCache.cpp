@@ -388,6 +388,8 @@ bool saveEntryLink(const BookOrbitCatalogLink& link) {
   appendJsonEscaped(json, link.sectionId);
   json += ",\"title\":";
   appendJsonEscaped(json, link.title);
+  json += ",\"replacePath\":";
+  appendJsonEscaped(json, link.replacePath);
   json += "}";
   return writeJsonStringFile(BOOKORBIT_ENTRY_LINK_PATH, json);
 }
@@ -406,6 +408,7 @@ bool takeEntryLink(BookOrbitCatalogLink& outLink) {
   outLink.bookId = doc["bookId"] | int64_t{0};
   outLink.sectionId = doc["sectionId"] | "";
   outLink.title = doc["title"] | "";
+  outLink.replacePath = doc["replacePath"] | "";
   return outLink.bookId != 0 || !outLink.sectionId.empty();
 }
 

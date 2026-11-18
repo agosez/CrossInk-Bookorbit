@@ -104,6 +104,12 @@ class BookOrbitAnnotationStore {
    */
   static bool markExchanged(const std::string& bookCachePath);
 
+  // Lowers the watermark to BOOKORBIT_EXCHANGED_WATERMARK, so every record goes up again on the
+  // next sync while the store still reads as exchanged ("known"). For a book whose file was
+  // replaced: the server may hold none of what this store says it sent (see
+  // BookUpdateMigration). False only when an existing store could not be rewritten.
+  static bool rewindWatermark(const std::string& bookCachePath);
+
   /**
    * Drop records whose highlight no longer exists locally.
    *

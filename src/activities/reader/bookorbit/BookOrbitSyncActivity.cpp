@@ -19,6 +19,7 @@
 
 #include "BookOrbitCredentialStore.h"
 #include "BookOrbitDeviceScan.h"
+#include "BookOrbitDownloadIndex.h"
 #include "BookOrbitHomeStore.h"
 #include "BookOrbitRemotePosition.h"
 #include "BookOrbitStatsUpload.h"
@@ -31,6 +32,8 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
+#include "activities/browser/BookOrbitCatalogLink.h"
+#include "activities/browser/BookOrbitCatalogListCache.h"
 #include "activities/home/RecentBookProgress.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/reader/EpubReaderUtils.h"
@@ -179,13 +182,115 @@ void BookOrbitSyncActivity::saveProgressAndReturn(const CrossPointPosition& posi
 
 void BookOrbitSyncActivity::returnToReader() {
   // The sleep sync has no reader to go back to: runSleepSync() closes the session and
-  // puts the device back to sleep once the attempt unwinds.
+  // puts the device back to sleep once the attempt unwinds. It never offers an update: the
+  // next manual sync does.
   if (sleepSync) return;
+  if (offerBookUpdate()) return;
 #ifdef SIMULATOR
   endSimulatorScenarioIfRequested(static_cast<int>(state));
 #endif
   syncSession.reset();
   activityManager.goToReader(epubPath);
+}
+
+void BookOrbitSyncActivity::resolveUpdateBook() {
+  int64_t bookId = 0;
+  if (!BookOrbitDownloadIndex::bookIdForPath(epubPath, bookId)) bookId = 0;
+  BookOrbitDownloadIndex::unload();
+  if (bookId == 0) {
+    // Not a catalog download (copied to the card, or the index lost it): the server still
+    // resolves this copy's older hash to its book. A bare hash stays out of Books to Review.
+    const BookOrbitSyncClient::MatchQuery query{documentHash.c_str(), nullptr, nullptr};
+    char libraryVersion[BookOrbitSyncClient::LIBRARY_VERSION_SIZE] = {};
+    BookOrbitSyncClient::matchCheck(
+        SETTINGS.getEffectiveDeviceName(), &query, 1,
+        [](const char*, const int64_t matchedBookId, int64_t, void* context) {
+          *static_cast<int64_t*>(context) = matchedBookId;
+        },
+        &bookId, libraryVersion);
+  }
+  updateBookId = bookId;
+  LOG_INF("BookOrbit", "This copy differs from the library file (book %lld)", static_cast<long long>(updateBookId));
+}
+
+bool BookOrbitSyncActivity::offerBookUpdate() {
+  if (updateOffered || !documentIncompatible()) return false;
+  updateOffered = true;
+  syncSession.reset();  // nothing more goes over it; the update restarts into the catalog
+  {
+    RenderLock lock(*this);
+    state = UPDATE_OFFER;
+  }
+  requestUpdate(true);
+  return true;
+}
+
+void BookOrbitSyncActivity::startBookUpdate() {
+  BookOrbitCatalogLink link;
+  link.bookId = updateBookId;
+  link.replacePath = epubPath;
+  // Shown on the download screen; the file name is what this device calls the book.
+  link.title = epubPath.substr(epubPath.find_last_of('/') + 1);
+  const size_t dot = link.title.rfind('.');
+  if (dot != std::string::npos) link.title.resize(dot);
+  // Through the catalog's network boot rather than a pushed catalog: leaving this activity in
+  // place would run onExit()'s restart into the reader. The catalog reads the link back,
+  // downloads over this file and reopens it.
+  if (!BookOrbitCatalogListCache::saveEntryLink(link)) {
+    LOG_ERR("BookOrbit", "Could not save the catalog link to update this copy");
+    returnToReader();
+    return;
+  }
+  LOG_INF("BookOrbit", "Restarting into the catalog to update %s (book %lld)", epubPath.c_str(),
+          static_cast<long long>(updateBookId));
+  SavedWifiConnect::disconnect();
+  silentRestartToNetwork(NetworkBootTarget::BOOKORBIT_CATALOG);
+  // Only returns when deep sleep is already under way, which ends this session anyway.
+  BookOrbitCatalogListCache::discardEntryLink();
+}
+
+void BookOrbitSyncActivity::handleUpdateOfferInput(const bool backRequested) {
+  const bool canUpdate = updateBookId != 0;
+#ifdef SIMULATOR
+  // Scripted runs: CROSSINK_SIM_BOOKORBIT_UPDATE takes the update, any other scripted run
+  // declines it and ends as usual.
+  if (std::getenv("CROSSINK_SIM_BOOKORBIT_UPDATE") != nullptr && canUpdate) {
+    startBookUpdate();
+    return;
+  }
+  if (std::getenv("CROSSINK_SIM_BOOKORBIT_QUIT_AFTER_SYNC") != nullptr) {
+    returnToReader();
+    return;
+  }
+#endif
+  if (canUpdate && mappedInput.hasTouch()) {
+    const auto& metrics = UITheme::getInstance().getMetrics();
+    const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+    const auto actions = BookOrbitSyncScreens::noRemoteProgressActionLayout(screen, metrics);
+    int touchedOption = -1;
+    const auto touch = mappedInput.rowTouch(touchedOption, actions.buttons[0].y,
+                                            TouchActionButtons::kDefaultHeight + TouchActionButtons::kDefaultGap,
+                                            actions.count, actions.buttons[0].x,
+                                            actions.buttons[0].x + actions.buttons[0].width, actions.buttons[0].height);
+    if (touch == MappedInputManager::RowTouch::Down) return;
+    if (touch == MappedInputManager::RowTouch::Tap) {
+      if (touchedOption == 0) {
+        startBookUpdate();
+      } else if (touchedOption == 1) {
+        returnToReader();
+      }
+      return;
+    }
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    if (canUpdate) {
+      startBookUpdate();
+    } else {
+      returnToReader();
+    }
+    return;
+  }
+  if (backRequested) returnToReader();
 }
 
 void BookOrbitSyncActivity::runSleepSync() {
@@ -390,6 +495,8 @@ bool BookOrbitSyncActivity::exchangeReadingData() {
 
   showExchangeSummaries();
   if (stopIfWoken()) return false;
+  // While the session is open: the offer at the end of the sync needs the book to download.
+  if (!sleepSync && documentIncompatible()) resolveUpdateBook();
 
   recordSweep(statsAccepted);
   return !stopIfWoken();
@@ -431,19 +538,6 @@ void BookOrbitSyncActivity::showExchangeSummaries() {
     }
     requestUpdateAndWait();
     if (!sleepSync) delay(1500);
-  }
-  if (!sleepSync && (highlights.documentIncompatible() || bookmarks.documentIncompatible())) {
-    // Said rather than left to the log: the sync goes on, and nothing else on screen tells why
-    // this book's highlights and bookmarks stay here.
-    {
-      RenderLock lock(*this);
-      statusMessage = tr(STR_BOOKORBIT_COPY_OUTDATED);
-      summaryLines[0] = tr(STR_BOOKORBIT_COPY_OUTDATED_HINT);
-    }
-    requestUpdateAndWait();
-    delay(3000);
-    RenderLock lock(*this);
-    summaryLines[0].clear();
   }
 }
 
@@ -750,6 +844,14 @@ void BookOrbitSyncActivity::render(RenderLock&&) {
       BookOrbitSyncScreens::drawFailure(renderer, screen, metrics, top, statusMessage.c_str());
       drawHints();
       break;
+    case UPDATE_OFFER: {
+      const bool canUpdate = updateBookId != 0;
+      BookOrbitSyncScreens::drawUpdateOffer(renderer, screen, metrics, top, canUpdate && mappedInput.hasTouch());
+      const auto labels =
+          mappedInput.mapLabels(canUpdate ? tr(STR_NOT_NOW) : tr(STR_BACK), canUpdate ? tr(STR_UPDATE) : "", "", "");
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
+      break;
+    }
     case WIFI_SELECTION:
     case CONNECTING:
       // Nothing of this activity's own is shown before the sync starts.
@@ -812,6 +914,11 @@ void BookOrbitSyncActivity::loop() {
 
   if (state == SHOWING_RESULT) {
     handleResultInput(backRequested);
+    return;
+  }
+
+  if (state == UPDATE_OFFER) {
+    handleUpdateOfferInput(backRequested);
     return;
   }
 

@@ -100,12 +100,24 @@ std::string BookContentId::contentHash(const std::string& filePath) {
   return hash;
 }
 
+void BookContentId::forget(const std::string& filePath) {
+  SemaphoreHandle_t lock = memoLock();
+  if (!lock || xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE) return;
+  if (memoPath == filePath) {
+    memoPath.clear();
+    memoHash.clear();
+    memoFileSize = 0;
+  }
+  // The state dir it names may change too; the next bookStateDir() call re-runs the cheap check.
+  migratedStateDir.clear();
+  xSemaphoreGive(lock);
+}
+
+std::string BookContentId::stateDirNameForHash(const std::string& hash) { return "/.crosspoint/book_" + hash; }
+
 std::string BookContentId::bookStateDirName(const std::string& filePath) {
   const std::string hash = contentHash(filePath);
-  if (hash.empty()) {
-    return "";
-  }
-  return "/.crosspoint/book_" + hash;
+  return hash.empty() ? "" : stateDirNameForHash(hash);
 }
 
 std::string BookContentId::bookStateDir(const std::string& filePath) {

@@ -44,6 +44,11 @@ void drawStatus(const GfxRenderer& renderer, const Rect& screen, const ThemeMetr
 void drawResult(const GfxRenderer& renderer, const Rect& screen, const ThemeMetrics& metrics, int top,
                 const ProgressCard& remote, const ProgressCard& local, int selectedOption, bool hasTouch);
 
+// The library has a newer copy of the book: says so, with Update / Not now buttons on touch
+// devices when the book to download is known (withButtons).
+void drawUpdateOffer(const GfxRenderer& renderer, const Rect& screen, const ThemeMetrics& metrics, int top,
+                     bool withButtons);
+
 void drawFailure(const GfxRenderer& renderer, const Rect& screen, const ThemeMetrics& metrics, int top,
                  const char* message);
 

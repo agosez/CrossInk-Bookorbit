@@ -773,6 +773,10 @@ bool BookmarkStore::migrateForFilePath(const std::string& oldFilePath, const std
   return true;
 }
 
+std::string BookmarkStore::storePathForHash(const std::string& contentHash) {
+  return std::string(BOOKMARKS_DIR) + "/epub_" + contentHash + ".bin";
+}
+
 bool BookmarkStore::hasStoredStateForFilePath(const std::string& filePath, const std::string& bookType) {
   const auto paths = {currentStoreFilePathForBook(filePath, bookType), legacyStoreFilePathForBook(filePath, bookType)};
   return std::any_of(paths.begin(), paths.end(), [](const auto& path) {
