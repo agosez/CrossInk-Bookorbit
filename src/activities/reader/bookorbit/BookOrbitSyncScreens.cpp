@@ -180,6 +180,24 @@ void drawResult(const GfxRenderer& renderer, const Rect& screen, const ThemeMetr
   TouchActionButtons::draw(renderer, actions, actionLabels, selectedOption, selectedOption, UI_10_FONT_ID);
 }
 
+void drawUpdateOffer(const GfxRenderer& renderer, const Rect& screen, const ThemeMetrics& metrics, const int top,
+                     const bool withButtons) {
+  UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, tr(STR_BOOKORBIT_COPY_OUTDATED), true,
+                            EpdFontFamily::BOLD);
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  int lineY = top;
+  for (const auto& line : renderer.wrappedText(UI_10_FONT_ID, tr(STR_BOOKORBIT_COPY_OUTDATED_HINT),
+                                               screen.width - metrics.contentSidePadding * 2, 3)) {
+    lineY += lineHeight + metrics.verticalSpacing;
+    UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, lineY, line.c_str());
+  }
+  if (withButtons) {
+    const auto actions = noRemoteProgressActionLayout(screen, metrics);
+    const char* actionLabels[] = {tr(STR_UPDATE), tr(STR_NOT_NOW)};
+    TouchActionButtons::draw(renderer, actions, actionLabels, 0, -1, UI_10_FONT_ID);
+  }
+}
+
 void drawFailure(const GfxRenderer& renderer, const Rect& screen, const ThemeMetrics& metrics, const int top,
                  const char* message) {
   UITheme::drawCenteredText(renderer, screen, UI_10_FONT_ID, top, tr(STR_SYNC_FAILED_MSG), true, EpdFontFamily::BOLD);

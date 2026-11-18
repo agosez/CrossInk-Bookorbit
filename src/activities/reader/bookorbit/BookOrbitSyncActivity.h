@@ -76,7 +76,10 @@ class BookOrbitSyncActivity final : public Activity, private BookOrbitSyncReport
     NO_REMOTE_PROGRESS,
     SYNC_FAILED,
     NO_CREDENTIALS,
-    SYNC_COMPLETE
+    SYNC_COMPLETE,
+    // The server knows the book but not this copy of it (positionIncompatible): offered once
+    // the sync is over, on the way back to the book.
+    UPDATE_OFFER
   };
 
   std::shared_ptr<Epub> epub;  // null until lazy-loaded after TLS in performSync()
@@ -183,6 +186,23 @@ class BookOrbitSyncActivity final : public Activity, private BookOrbitSyncReport
   void drawHints(const char* confirm = "", const char* up = "", const char* down = "");
   void handleResultInput(bool backRequested);
   void handleNoRemoteProgressInput(bool backRequested);
+
+  // The server answered the highlight or bookmark exchange with positionIncompatible: its
+  // library file changed after this copy was made (a metadata write-back does that), so it
+  // takes none of this copy's highlights or bookmarks. A manual sync offers to download the
+  // library's copy over this one (BookOrbitCatalogLink::replacePath), which carries the local
+  // state across (BookUpdateMigration); a sleep sync leaves the offer to the next manual one.
+  bool documentIncompatible() const { return highlights.documentIncompatible() || bookmarks.documentIncompatible(); }
+  // The catalog book to download, from the download index or, for a copy that reached the card
+  // another way, from the server's match check (which resolves the copy's older hash). 0 when
+  // neither knows it: the offer then has no Update.
+  int64_t updateBookId = 0;
+  bool updateOffered = false;
+  void resolveUpdateBook();
+  // Shows the offer and returns true, once per sync; false lets the sync end.
+  bool offerBookUpdate();
+  void startBookUpdate();
+  void handleUpdateOfferInput(bool backRequested);
 
   bool consumeInitialConfirmRelease();
   void ensureEpubLoaded();
