@@ -30,4 +30,11 @@ constexpr size_t MAX_RELATIVE_PATH_BYTES = 180;
  */
 std::string sanitizeRelativePath(const std::string& devicePath);
 
+/**
+ * Where a catalog download of a book lands, relative to the download folder and with a
+ * leading slash: the sanitized devicePath, or "/Title - Author.epub" (this firmware's
+ * naming before servers sent one) when the server gave none.
+ */
+std::string catalogFilename(const std::string& devicePath, const std::string& title, const std::string& author);
+
 }  // namespace BookOrbitDevicePath

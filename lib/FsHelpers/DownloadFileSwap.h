@@ -15,7 +15,9 @@ inline bool recover(const std::string& destination) {
   if (!ok) LOG_ERR("HTTP", "Could not recover download backup: %s", backup.c_str());
   return ok;
 }
-inline bool publishFrom(const std::string& destination, const std::string& partial, bool requireBackupCleanup = false) {
+// keepReplaced leaves the replaced file at "<destination>.old" for the caller to remove.
+inline bool publishFrom(const std::string& destination, const std::string& partial, bool requireBackupCleanup = false,
+                        bool keepReplaced = false) {
   if (!recover(destination)) return false;
   const std::string backup = destination + ".old";
   const bool replacing = Storage.exists(destination.c_str());
@@ -32,13 +34,13 @@ inline bool publishFrom(const std::string& destination, const std::string& parti
   }
   // Asset sources require completed cleanup; legacy book/font callers retain
   // their successful-publication behavior. Both keep the valid new destination.
-  if (replacing && !Storage.remove(backup.c_str())) {
+  if (replacing && !keepReplaced && !Storage.remove(backup.c_str())) {
     LOG_ERR("HTTP", "Could not remove download backup: %s", backup.c_str());
     return !requireBackupCleanup;
   }
   return true;
 }
-inline bool publish(const std::string& destination, bool requireBackupCleanup = false) {
-  return publishFrom(destination, destination + ".part", requireBackupCleanup);
+inline bool publish(const std::string& destination, bool requireBackupCleanup = false, bool keepReplaced = false) {
+  return publishFrom(destination, destination + ".part", requireBackupCleanup, keepReplaced);
 }
 }  // namespace DownloadFileSwap

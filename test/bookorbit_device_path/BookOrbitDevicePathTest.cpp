@@ -92,4 +92,15 @@ TEST(BookOrbitDevicePath, TruncatesAnOverlongSegmentInsteadOfDroppingIt) {
   EXPECT_NE(result.find(".epub"), std::string::npos);
 }
 
+TEST(BookOrbitDevicePath, CatalogFilenameFollowsTheServerPath) {
+  EXPECT_EQ(BookOrbitDevicePath::catalogFilename("Sprawl/Neuromancer.epub", "Neuromancer", "William Gibson"),
+            "/Sprawl/Neuromancer.epub");
+}
+
+TEST(BookOrbitDevicePath, CatalogFilenameFallsBackToTitleAndAuthor) {
+  EXPECT_EQ(BookOrbitDevicePath::catalogFilename("", "Neuromancer", "William Gibson"),
+            "/Neuromancer - William Gibson.epub");
+  EXPECT_EQ(BookOrbitDevicePath::catalogFilename("../..", "Neuromancer", ""), "/Neuromancer.epub");
+}
+
 }  // namespace

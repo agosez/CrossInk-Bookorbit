@@ -21,9 +21,9 @@ Books are laid out again the next time you open them, so the first open is slowe
 
 ## Moving books
 
-Each book's cache is tied to the book's location on the SD card. If you move or rename a book on a computer, CrossInk sees it as a new book and it may start with fresh reading progress. Moving a book inside CrossInk (for example, to the Read folder or with the File Browser move actions) keeps its cache and bookmarks.
+Each book's cache is tied to the book's location on the SD card. If you move or rename a book on a computer, CrossInk sees it as a new book and it may start with fresh reading progress. Moving a book inside CrossInk (for example, to the Read folder or with the File Browser move actions), or from the file transfer page or over WebDAV, keeps its cache and bookmarks.
 
-This fork also keeps your reading position, bookmarks, clippings and BookOrbit sync state under the book's contents rather than its location (in `.crosspoint/book_<hash>/`, `bookmarks/` and `clippings/`). They follow the book through any move or rename, including one made from a computer or over USB, so a moved book picks up where you left it even though its page layout is rebuilt. The position is also saved in the location-based cache, so stock CrossInk still finds it after a firmware swap; when the two differ, the further one wins.
+This fork also keeps your reading position, bookmarks, clippings and BookOrbit sync state under the book's contents rather than its location (in `.crosspoint/book_<hash>/`, `bookmarks/` and `clippings/`). They follow the book through any move or rename, including one made from a computer or over USB, and through a BookOrbit download of a newer copy of the book, so a moved book picks up where you left it even though its page layout is rebuilt. The position is also saved in the location-based cache, so stock CrossInk still finds it after a firmware swap; when the two differ, the further one wins.
 
 Reader settings such as font, layout, and reading aids normally come from the global Reader settings. If you change a setting while reading a book, only that setting is saved for that book. Every other setting still follows your global choices. A book's render mode is also saved per book, so a troublesome book can be switched to Balanced or Light rendering from the File Browser or Library long-press menu before you open it.
 

@@ -890,7 +890,9 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
     return HTTP_ERROR;
   }
 
-  if (options.stageAsPart && !DownloadFileSwap::publish(destination, options.requireBackupCleanup)) return FILE_ERROR;
+  if (options.stageAsPart &&
+      !DownloadFileSwap::publish(destination, options.requireBackupCleanup, options.keepReplaced))
+    return FILE_ERROR;
 
   return OK;
 }

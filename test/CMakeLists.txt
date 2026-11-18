@@ -230,3 +230,4 @@ add_test(NAME WebDavCredentialsRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/test/scripts/test_webdav_credentials.py)
 add_test(NAME TlsFragmentConfigRegression
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/scripts/test_tls_fragment_config.py)
+add_subdirectory(bookorbit_download_index)

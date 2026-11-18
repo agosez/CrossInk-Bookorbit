@@ -7,7 +7,8 @@
 
 // What BookOrbit Smart sync remembers of a book between two syncs, and the decision it
 // takes from it. Free of storage and network code so the rules can be tested on their
-// own (test/bookorbit_smart_sync); BookOrbitSyncActivity does the file and server work.
+// own (test/bookorbit_smart_sync); BookOrbitSyncMarkerFile does the file work and
+// BookOrbitSyncActivity the server work.
 namespace BookOrbitSmartSync {
 
 // A reading position in local pages: a chapter, and a page out of the page count that

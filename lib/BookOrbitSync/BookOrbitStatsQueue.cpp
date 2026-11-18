@@ -231,7 +231,7 @@ bool BookOrbitStatsQueue::captureNow(uint32_t& outEpochSeconds, bool& outApproxi
   // The system clock runs on the internal RC oscillator and drifts by minutes across
   // long deep sleeps, so even an NTP-confirmed clock goes stale. Every system-clock
   // stamp is therefore marked correctable and re-resolved against fresh NTP at
-  // upload time (see BookOrbitSyncActivity::uploadQueuedStats).
+  // upload time (see BookOrbitStatsUpload::uploadQueued).
   outApproximate = true;
   return plausible || outEpochSeconds != 0;
 }

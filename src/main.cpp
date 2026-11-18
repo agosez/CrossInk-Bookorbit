@@ -113,13 +113,13 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "activities/boot_sleep/SleepActivity.h"
 #include "activities/home/BookActions.h"
 #include "activities/network/BookOrbitHomeRefreshActivity.h"
-#include "activities/reader/BookOrbitSyncActivity.h"
 #include "activities/reader/EpubReaderUtils.h"
 #include "activities/reader/KOReaderSyncActivity.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/reader/ReadingStatsUtils.h"
 #include "activities/reader/StatsBackup.h"
 #include "activities/settings/AssetDownloadActivity.h"
+#include "activities/reader/bookorbit/BookOrbitSyncActivity.h"
 #include "activities/settings/BookOrbitSettingsActivity.h"
 #include "activities/settings/FontDownloadActivity.h"
 #include "activities/settings/KOReaderAuthActivity.h"
@@ -139,6 +139,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "simulator/SimulatorSmokeTest.h"
 #endif
 #include "util/BatteryDiagnosticLog.h"
+#include "util/BookUpdateMigration.h"
 #include "util/ButtonNavigator.h"
 #include "util/ButtonShortcutController.h"
 #include "util/Dictionary.h"
@@ -508,9 +509,12 @@ void silentRestartToNetwork(const NetworkBootTarget target, const uint32_t paylo
   clearSilentRestartReaderPageBuild();
   silentRebootTarget = static_cast<uint32_t>(target);
   silentRebootPayload = payload;
+  if (target == NetworkBootTarget::BOOKORBIT_HOME_REFRESH && !library::libraryIndexNeedsRefresh()) {
+    silentRebootPayload |= BOOKORBIT_HOME_REFRESH_PAYLOAD_LIBRARY_CURRENT;
+  }
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Silent restart (target=network/%lu payload=%lu)", static_cast<unsigned long>(silentRebootTarget),
-          static_cast<unsigned long>(payload));
+          static_cast<unsigned long>(silentRebootPayload));
   if (target == NetworkBootTarget::KOREADER_SYNC) {
     RenderLock lock;
     // A drawer close can queue a backdrop repaint. Serialize the handoff and
@@ -612,6 +616,9 @@ bool startGlobalBookOrbitSync(const bool networkBootReady, const uint32_t payloa
     return true;
   }
 
+  // A catalog update this book has not finished (see ReaderActivity::loadEpub): the sync must
+  // see the state under the new copy's hash, and no highlight whose chapter changed.
+  if (BookUpdateMigration::pending(epubPath)) BookUpdateMigration::begin(epubPath, /*renderCacheIsOld=*/false);
   auto epub = std::make_shared<Epub>(epubPath, "/.crosspoint");
   if (!epub->load(true, SETTINGS.embeddedStyle == 0)) {
     LOG_ERR("MAIN", "Failed to load EPUB for global BookOrbit sync: %s", epubPath.c_str());
@@ -619,6 +626,7 @@ bool startGlobalBookOrbitSync(const bool networkBootReady, const uint32_t payloa
     activityManager.pushActivity(std::make_unique<BookOrbitSettingsActivity>(renderer, mappedInputManager));
     return true;
   }
+  BookUpdateMigration::finish(*epub);
 
   epub->setupCacheDir();
 
@@ -2045,6 +2053,9 @@ void setup() {
         launched = activityManager.goToBookOrbitCatalog(/*networkBootReady=*/true);
         break;
       case NetworkBootTarget::BOOKORBIT_HOME_REFRESH: {
+        if ((snapshotPayload & BOOKORBIT_HOME_REFRESH_PAYLOAD_LIBRARY_CURRENT) != 0) {
+          library::restoreLibraryIndexAfterSleep();
+        }
         auto refresh = makeUniqueNoThrow<BookOrbitHomeRefreshActivity>(renderer, mappedInputManager);
         if (refresh) {
           activityManager.replaceActivity(std::move(refresh));

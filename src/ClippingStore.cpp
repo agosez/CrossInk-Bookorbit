@@ -248,6 +248,71 @@ bool findSyncMatch(const std::string& path, const ClippingRecords& clips, const 
   file.close();
   return ok;
 }
+
+// Highlights orphaned by a replacement of their book's file (Clipping::orphaned), in the book's
+// content-keyed state dir: "OCL1", a uint16 count, then (timestamp, spineIndex, paragraphIndex)
+// per highlight, the identity BookOrbitClippingRef joins on. See docs/file-formats.md.
+constexpr char ORPHANS_FILE[] = "/orphaned_clippings.bin";
+constexpr char ORPHANS_MAGIC[4] = {'O', 'C', 'L', '1'};
+
+struct OrphanRef {
+  uint32_t timestamp = 0;
+  uint16_t spineIndex = 0;
+  uint16_t paragraphIndex = 0;
+
+  bool matches(const Clipping& clipping) const {
+    return timestamp == clipping.timestamp && spineIndex == clipping.spineIndex &&
+           paragraphIndex == clipping.paragraphIndex;
+  }
+};
+
+bool readOrphans(const std::string& stateDir, std::vector<OrphanRef>& out) {
+  out.clear();
+  if (stateDir.empty()) return false;
+  const std::string path = stateDir + ORPHANS_FILE;
+  if (!Storage.exists(path.c_str())) return false;
+  FsFile f;
+  if (!Storage.openFileForRead("CLIP", path, f)) return false;
+  char magic[sizeof(ORPHANS_MAGIC)] = {};
+  uint16_t count = 0;
+  bool ok = f.read(magic, sizeof(magic)) == static_cast<int>(sizeof(magic)) &&
+            memcmp(magic, ORPHANS_MAGIC, sizeof(magic)) == 0 && serialization::tryReadPod(f, count) &&
+            count <= CLIPPING_MAX_PER_BOOK;
+  if (ok) {
+    out.reserve(count);
+    for (uint16_t i = 0; i < count && ok; i++) {
+      OrphanRef ref;
+      ok = serialization::tryReadPod(f, ref.timestamp) && serialization::tryReadPod(f, ref.spineIndex) &&
+           serialization::tryReadPod(f, ref.paragraphIndex);
+      if (ok) out.push_back(ref);
+    }
+  }
+  f.close();
+  if (!ok) {
+    LOG_ERR("CLIP", "Unreadable orphaned-highlight list, ignored: %s", path.c_str());
+    out.clear();
+  }
+  return ok;
+}
+
+bool writeOrphans(const std::string& stateDir, const std::vector<OrphanRef>& refs) {
+  const std::string path = stateDir + ORPHANS_FILE;
+  FsFile f = Storage.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+  if (!f) {
+    LOG_ERR("CLIP", "Cannot write orphaned-highlight list: %s", path.c_str());
+    return false;
+  }
+  const uint16_t count = static_cast<uint16_t>(std::min<size_t>(refs.size(), CLIPPING_MAX_PER_BOOK));
+  bool ok = f.write(reinterpret_cast<const uint8_t*>(ORPHANS_MAGIC), sizeof(ORPHANS_MAGIC)) == sizeof(ORPHANS_MAGIC) &&
+            serialization::tryWritePod(f, count);
+  for (uint16_t i = 0; i < count && ok; i++) {
+    ok = serialization::tryWritePod(f, refs[i].timestamp) && serialization::tryWritePod(f, refs[i].spineIndex) &&
+         serialization::tryWritePod(f, refs[i].paragraphIndex);
+  }
+  f.close();
+  if (!ok) LOG_ERR("CLIP", "Failed writing orphaned-highlight list: %s", path.c_str());
+  return ok;
+}
 }  // namespace
 
 ClippingStore ClippingStore::instance;
@@ -314,6 +379,14 @@ bool ClippingStore::loadForBook(const std::string& filePath, const std::string& 
   if (!loaded) {
     clippings.release();
     return false;
+  }
+  // Usually absent: only a replacement of the book's file by a changed copy writes it.
+  std::vector<OrphanRef> orphans;
+  if (readOrphans(BookContentId::bookStateDirName(filePath), orphans)) {
+    for (Clipping& clipping : clippings) {
+      clipping.orphaned = std::any_of(orphans.begin(), orphans.end(),
+                                      [&clipping](const OrphanRef& ref) { return ref.matches(clipping); });
+    }
   }
   // A content-keyed store follows its book through a move, but its header still names the
   // old path; mark it dirty so the next unload rewrites it and the saved-items lists can
@@ -1347,4 +1420,39 @@ bool ClippingStore::rollbackRenameMigration(RenameMigration& migration) {
   }
   if (ok) migration.active = false;
   return ok;
+}
+
+bool ClippingStore::markOrphanedChapters(const std::string& filePath, const uint8_t* chapterChanged,
+                                         const size_t chapterCount) {
+  const std::string storePath = storeFilePathForBook(filePath, "epub");
+  if (storePath.empty() || !Storage.exists(storePath.c_str())) return true;  // no highlights to mark
+
+  ClippingStore reader;
+  ClippingRecords stored;
+  if (!reader.readFromFile(storePath, stored)) {
+    LOG_ERR("CLIP", "Cannot read clippings to mark orphans: %s", storePath.c_str());
+    return false;
+  }
+  const std::string stateDir = BookContentId::bookStateDir(filePath);
+  if (stateDir.empty()) return false;
+
+  std::vector<OrphanRef> orphans;
+  readOrphans(stateDir, orphans);
+  const size_t before = orphans.size();
+  for (const Clipping& clipping : stored) {
+    const bool changed = clipping.spineIndex >= chapterCount || chapterChanged[clipping.spineIndex] != 0;
+    if (!changed || std::any_of(orphans.begin(), orphans.end(),
+                                [&clipping](const OrphanRef& ref) { return ref.matches(clipping); })) {
+      continue;
+    }
+    orphans.push_back({clipping.timestamp, clipping.spineIndex, clipping.paragraphIndex});
+  }
+  if (orphans.size() == before) return true;
+  LOG_INF("CLIP", "%u highlight(s) orphaned by the book's new copy: %s", static_cast<unsigned>(orphans.size() - before),
+          filePath.c_str());
+  return writeOrphans(stateDir, orphans);
+}
+
+std::string ClippingStore::storePathForHash(const std::string& contentHash) {
+  return std::string(CLIPPINGS_DIR) + "/epub_" + contentHash + ".bin";
 }

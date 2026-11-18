@@ -17,6 +17,7 @@
 #include "activities/util/BmpViewerActivity.h"
 #include "activities/util/FullScreenMessageActivity.h"
 #include "components/UITheme.h"
+#include "util/BookUpdateMigration.h"
 
 bool ReaderActivity::isXtcFile(const std::string& path) { return FsHelpers::hasXtcExtension(path); }
 
@@ -41,6 +42,12 @@ ReaderActivity::EpubOpenResult ReaderActivity::loadEpub(const std::string& path)
   if (!Storage.exists(path.c_str())) {
     LOG_ERR("READER", "File does not exist: %s", path.c_str());
     return result;
+  }
+
+  // A catalog update a reset interrupted: the copy it replaced still holds the book's state.
+  if (BookUpdateMigration::pending(path)) {
+    GfxRenderer::FrameBufferLoan loan(renderer);
+    BookUpdateMigration::begin(path, /*renderCacheIsOld=*/false);
   }
 
   auto epub = makeUniqueNoThrow<Epub>(path, "/.crosspoint");
@@ -79,6 +86,8 @@ ReaderActivity::EpubOpenResult ReaderActivity::loadEpub(const std::string& path)
   // The reader applies its settings on entry; failed opens return to the original UI.
   renderer.setOrientation(previousOrientation);
   if (loaded) {
+    // After an update, before anything reads the highlights: orphans those whose chapter changed.
+    BookUpdateMigration::finish(*epub);
     result.epub = std::move(epub);
     result.failure = Epub::OpenFailure::None;
     return result;

@@ -1310,9 +1310,71 @@ whenever its timestamp is newer.
 A file shorter than 12 bytes, with another magic or with a timestamp of 0 or less, is no
 history at all: Smart sync then asks, and the sleep sync leaves the progress alone.
 
-## `/.crosspoint/bookorbit_downloads.bin`
+## `orphaned_clippings.bin`
 
 ### Version 1
+
+`orphaned_clippings.bin` lives in the book's content-keyed state directory
+(`/.crosspoint/book_<contentHash>/`) and lists the highlights a replacement of the book's
+file orphaned (see `replaced_chapters.bin` below for how they are chosen). Orphaned
+highlights stay in the clipping file and in the highlight list, but are never drawn in the
+book, jumped to, given a position or synced.
+
+The list is kept out of the clipping file on purpose: a new clipping version would make older
+firmware read every rewritten clipping file as corrupt. The file only appears after such a
+replacement; earlier marks are kept when a later one adds more. An entry whose highlight was
+deleted is left in place and matches nothing.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `OCL1`
+- `[4-5]` `count` (`uint16_t`, at most 256)
+- Repeated `count` times, 8 bytes each: the clipping's identity, as
+  `bookorbit_annotations.bin` joins on it
+  - `[0-3]` `timestamp` (`uint32_t`, `Clipping::timestamp`)
+  - `[4-5]` `spineIndex` (`uint16_t`)
+  - `[6-7]` `paragraphIndex` (`uint16_t`)
+
+A file whose magic or length does not match is ignored: no highlight is orphaned.
+
+## `replaced_chapters.bin`
+
+### Version 1
+
+Written in the new copy's state directory (`/.crosspoint/book_<contentHash>/`) when a BookOrbit
+catalog download replaced a book's file by a different copy, and removed once the reader has
+compared it with the new copy (`src/util/BookUpdateMigration.cpp`). Only a book with highlights
+gets one.
+
+The download keeps the replaced file at `<book>.epub.old` (`DownloadOptions::keepReplaced`).
+`BookUpdateMigration::begin` then moves the clipping file, the bookmark file and
+`book_<contentHash>/` from the old copy's content hash to the new one's, writes this list of the
+old copy's chapters, rewinds the upload watermarks of `bookorbit_annotations.bin` and
+`bookorbit_bookmarks.bin` to 1 (every record goes up again), clears the render cache and removes
+`<book>.epub.old`, last. A reset before that leaves `<book>.epub.old`, and the next open of the
+book or the next download to its path runs it again. Right after the download the old spine is
+read from the render cache, still the old copy's; when resuming it is read from the old file.
+
+When the reader next opens the book, each spine slot of the old copy is compared with the same
+slot of the new one: a slot whose ZIP entry has the same path and the same CRC-32 in both is
+unchanged, and a highlight in any other slot is listed in `orphaned_clippings.bin`. An empty
+list (the old copy could not be read) orphans every highlight.
+
+Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `RCH1`
+- `[4-5]` `count` (`uint16_t`): spine slots of the old copy
+- Repeated `count` times, 15 bytes each:
+  - `[0-7]` `pathHash` (`uint64_t`, FNV-1a 64 of the normalised ZIP entry path)
+  - `[8-11]` `crc32` (`uint32_t`, from the ZIP central directory)
+  - `[12-13]` `pathLength` (`uint16_t`)
+  - `[14]` `found` (`uint8_t`, 0 when the entry was missing from the ZIP)
+
+A file whose magic or length does not match reads as an empty list.
+
+## `/.crosspoint/bookorbit_downloads.bin`
+
+### Version 2
 
 Remembers where BookOrbit catalog downloads landed on the SD card, keyed by the
 server's book id, so the catalog can mark a book as already on the device even
@@ -1323,14 +1385,38 @@ server's file naming template filed it, without walking the card. It is a
 best-effort convenience cache: entries are verified on lookup (the file must
 still exist with its recorded size) and dropped when stale, and a missing or
 discarded index costs the marker and the listing entry, leaving the filename
-heuristic and a flat directory scan as fallbacks. Capped at 128 entries, oldest
-evicted first.
+heuristic and a flat directory scan as fallbacks.
+
+Only the fixed-size records are loaded into RAM; each path stays in the file
+and is read back at its recorded offset when needed, and the stored path hash
+lets a path match skip the SD read for every other entry. Capped at 512 entries
+on devices without PSRAM and 2048 with it, oldest evicted first; a card moved
+to a device with a lower cap keeps its newest entries.
 
 Book ids are only meaningful on the server that issued them, so the header
 records a CRC32 of the configured server URL; the whole file is discarded when
-it no longer matches, as it is when the magic is unreadable.
+it no longer matches, as it is when the magic is unreadable. The file is
+rewritten through `bookorbit_downloads.tmp` and a `bookorbit_downloads.bak`
+backup, so an interrupted write leaves the previous version in place.
 
 Binary layout (all little-endian):
+
+- `[0-3]` magic + version: ASCII `BOD2`
+- `[4-7]` `serverCrc` (`uint32_t`, CRC32 of the configured BookOrbit server URL)
+- `[8-11]` `count` (`uint32_t`, number of records)
+- `count` fixed-size records of 22 bytes, oldest first:
+  - `[0-7]` `bookId` (`int64_t`, the server's book id)
+  - `[8-11]` `fileSize` (`uint32_t`, size of the downloaded file, for the replacement check)
+  - `[12-15]` `pathHash` (`uint32_t`, 32-bit FNV-1a of the path bytes)
+  - `[16-19]` `pathOffset` (`uint32_t`, absolute file offset of the path)
+  - `[20-21]` `pathLength` (`uint16_t`, 1-256)
+- Path area: each record's `path` (`pathLength` bytes, absolute SD path, not
+  null-terminated), back to back in record order.
+
+### Version 1
+
+Variable-length records with the path inline, capped at 128 entries. Migrated
+to version 2 the first time the index is loaded.
 
 - `[0-3]` magic + version: ASCII `BOD1`
 - `[4-7]` `serverCrc` (`uint32_t`, CRC32 of the configured BookOrbit server URL)
@@ -1339,6 +1425,57 @@ Binary layout (all little-endian):
   - `[8-11]` `fileSize` (`uint32_t`, size of the downloaded file, for the replacement check)
   - `[12-13]` `pathLength` (`uint16_t`, 1-256)
   - `[14…]` `path` (`pathLength` bytes, absolute SD path, not null-terminated)
+
+## `/.crosspoint/bookorbit_recognition.bin`
+
+### Version 1
+
+What the BookOrbit theme's syncs keep between two passes of the device scan, which
+recognises books copied to the card (see `src/BookOrbitDeviceScan.h`): the last Library
+arrival handled, the server's library token, and the EPUBs the server did not recognise.
+Books it recognises are not listed here: they join `bookorbit_downloads.bin`.
+
+`watermark` is a `firstSeen` value of the Library index (`library.idx`): every book that
+arrived before it has been handled, so a pass only looks at the books with a `firstSeen` at
+or above it, and none at all while it equals the index's `nextFirstSeen`. Renames keep a
+book's `firstSeen`. An index that starts over (a `nextFirstSeen` below the watermark) resets
+it to 0.
+
+The unrecognised files are asked about again, by bare hash so that the server does not list
+them for review a second time, when the token the server sends with its answers
+(`libraryVersion`) differs from the one recorded: a book was added or a hash linked by hand.
+A sync with nothing new asks about the first few of them only, to learn the token. A file
+that changed or went away is forgotten when it is asked about again. At most 1024 files
+without PSRAM, 8192 with it. The file is discarded when the configured server changes, and
+rewritten through `bookorbit_recognition.tmp`.
+
+Binary layout (all little-endian, packed):
+
+- `[0-3]` magic + version: ASCII `BOR1`
+- `[4-7]` `serverCrc` (`uint32_t`, CRC32 of the configured BookOrbit server URL)
+- `[8-9]` `watermark` (`uint16_t`)
+- `[10-11]` reserved
+- `[12-43]` `libraryVersion` (32 ASCII hex characters, the server's token; zeros until known)
+- `[44-47]` `count` (`uint32_t`)
+- `count` records:
+  - `[0-31]` `hash` (KOReader partial MD5, 32 lowercase hex characters)
+  - `[32-35]` `fileSize` (`uint32_t`)
+  - `[36-39]` `pathHash` (`uint32_t`, 32-bit FNV-1a of the path, as in `bookorbit_downloads.bin`)
+  - `[40-41]` `pathLength` (`uint16_t`, 1-256)
+  - `[42]` `titleLength`, `[43]` `authorLength` (`uint8_t`, always 0 here)
+  - then `path` (`pathLength` bytes, absolute SD path, not null-terminated)
+
+## `/.crosspoint/bookorbit_scan.bin`
+
+### Version 2
+
+Temporary: the books one pass of the device scan found, from its offline half (before
+Wi-Fi) to its online half, and removed by the latter. A header of 12 bytes (ASCII `BOS2`,
+the `uint16_t` watermark the state takes once every record has been handled, 2 reserved
+bytes, a `uint32_t` count) then `count` records laid out as in `bookorbit_recognition.bin`,
+with the Library's title and author after the path (`titleLength` and `authorLength` bytes,
+each cut to 255 bytes on a UTF-8 character boundary). Those label the book in the server's
+"KOReader Books to Review" when it does not recognise it.
 
 ## `/.crosspoint/daily_minutes.bin`
 

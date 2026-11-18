@@ -135,6 +135,15 @@ bool BookOrbitBookmarkStore::markExchanged(const std::string& bookCachePath) {
   return advanceWatermark(bookCachePath, BOOKORBIT_EXCHANGED_WATERMARK);
 }
 
+bool BookOrbitBookmarkStore::rewindWatermark(const std::string& bookCachePath) {
+  const std::string path = storePath(bookCachePath);
+  uint32_t watermark = 0;
+  std::vector<BookOrbitBookmarkRecord> records;
+  if (!readFile(path, watermark, records)) return true;  // nothing was ever sent from it
+  if (watermark <= BOOKORBIT_EXCHANGED_WATERMARK) return true;
+  return writeFile(path, BOOKORBIT_EXCHANGED_WATERMARK, records);
+}
+
 bool BookOrbitBookmarkStore::retain(const std::string& bookCachePath, const std::vector<uint32_t>& keepTimestamps) {
   const std::string path = storePath(bookCachePath);
   uint32_t watermark = 0;

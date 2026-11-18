@@ -39,7 +39,6 @@
 #include "BookOrbitBookmarkStore.h"
 #include "BookOrbitCredentialStore.h"
 #include "BookOrbitStatsQueue.h"
-#include "BookOrbitSyncActivity.h"
 #include "BookStatsActivity.h"
 #include "BookStatsTracking.h"
 #include "ChapterXPathResolver.h"
@@ -86,6 +85,7 @@
 #include "activities/settings/StatusBarSettingsActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
+#include "bookorbit/BookOrbitSyncActivity.h"
 #include "clippings/ClippingHighlightGeometry.h"
 #include "clippings/ClippingMatchTracker.h"
 #include "clippings/ClippingTextMatcher.h"
@@ -8075,7 +8075,8 @@ bool EpubReaderActivity::backfillAnnotationPositions() {
     for (size_t i = 0; i < CLIPPINGS.clippingCount(); i++) {
       const Clipping* clipping = CLIPPINGS.clippingAt(i);
       if (!clipping || clipping->spineIndex != currentSpineIndex || clipping->timestamp == 0) continue;
-      if (clipping->paragraphIndex == UINT16_MAX) continue;
+      // An orphaned highlight's chapter changed under it: a position minted now could land anywhere.
+      if (clipping->paragraphIndex == UINT16_MAX || clipping->orphaned) continue;
       const bool stamped = std::any_of(records.begin(), records.end(), [&](const BookOrbitAnnotationRecord& record) {
         return record.timestamp == clipping->timestamp;
       });
@@ -8177,7 +8178,7 @@ EpubReaderActivity::PositionMint EpubReaderActivity::recordAnnotationPosition(co
   if (paragraphIndex == UINT16_MAX || !epub) return PositionMint::Skipped;
 
   const Clipping* clipping = CLIPPINGS.clippingAt(clippingIndex);
-  if (!clipping || clipping->timestamp == 0) return PositionMint::Skipped;
+  if (!clipping || clipping->timestamp == 0 || clipping->orphaned) return PositionMint::Skipped;
 
   // Positions are minted here, while the chapter is open, and never recomputed: the server
   // keys annotations by a hash of pos0, so a position rebuilt under a different layout would
@@ -8719,7 +8720,8 @@ void EpubReaderActivity::drawClippingHighlights(const Page& page, const int font
   const auto& clippings = CLIPPINGS.getClippings();
   for (size_t index = 0; index < clippings.size(); ++index) {
     const Clipping& clipping = clippings[index];
-    if (clipping.spineIndex != static_cast<uint16_t>(currentSpineIndex)) continue;
+    // Orphaned: its chapter changed in the book's new copy, so its text may be anywhere or gone.
+    if (clipping.spineIndex != static_cast<uint16_t>(currentSpineIndex) || clipping.orphaned) continue;
     ClippingPageMatch match;
     bool found = false;
     if (clippingHasSourceRange(clipping)) {

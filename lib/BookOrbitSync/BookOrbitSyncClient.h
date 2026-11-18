@@ -117,6 +117,30 @@ class BookOrbitSyncClient {
   static Error uploadPageStats(const std::string& documentHash, const std::string& deviceModel,
                                const BookOrbitStatEvent* events, size_t count);
 
+  /** One file to identify with matchCheck(). */
+  struct MatchQuery {
+    const char* hash;     // KOReader partial MD5, 32 hex chars
+    const char* title;    // label for the server's books to review, or nullptr to send the bare hash
+    const char* authors;  // with title; nullptr or "" when unknown
+  };
+  static constexpr size_t MATCH_CHECK_MAX = 500;  // server-side cap per request
+  static constexpr size_t LIBRARY_VERSION_SIZE = 33;
+
+  /**
+   * Identify files by content hash (POST /plugin/match-check), the call BookOrbit's
+   * KOReader plugin makes to link a device's books to the library. The server resolves a
+   * file's current hash, the older hashes it kept when it rewrote a file or delivered a
+   * converted copy, then the user's manual links. Every hash it cannot resolve is kept as
+   * unmatched; one sent with a title is listed in its "KOReader Books to Review", where it can
+   * be linked by hand, while a bare hash stays out of that list. visit() is called once per
+   * resolved hash, with the book and the file the hash belongs to. outLibraryVersion (at
+   * least LIBRARY_VERSION_SIZE bytes) receives the server's token for its library and links:
+   * a different token means an unmatched hash may now resolve.
+   */
+  static Error matchCheck(const std::string& deviceModel, const MatchQuery* queries, size_t count,
+                          void (*visit)(const char* hash, int64_t bookId, int64_t bookFileId, void* context),
+                          void* context, char* outLibraryVersion);
+
   /**
    * Record a completed sync on the server (POST /plugin/sweeps), the same call BookOrbit's
    * own KOReader plugin makes at the end of a sweep.
@@ -240,4 +264,12 @@ class BookOrbitSyncClient {
 
   /** Transport-layer error from the last request (for diagnostics). */
   static int lastTransportError;
+
+  /**
+   * Set by the last highlight or bookmark exchange when the server listed this document under
+   * `positionIncompatible` (BookOrbit 3.6.0 and later): it knows the book only by an older hash
+   * of its file, so this copy's positions cannot be placed and nothing is exchanged. The
+   * exchange reports the book as unmatched, which records nothing as sent; this says why.
+   */
+  static bool lastPositionIncompatible;
 };

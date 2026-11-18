@@ -18,6 +18,7 @@
 #include "ProtectedPaths.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
 #include "util/BookCacheUtils.h"
+#include "util/BookMoveUtils.h"
 
 namespace {
 // FAT cannot replace atomically. Keep the previous file until publication succeeds.
@@ -651,15 +652,38 @@ void WebDAVHandler::handleMove(WebServer& s) {
     s.send(409, "text/plain", "Move a protected book to an unused filename");
     return;
   }
-  const bool success = dstExists ? replaceFile(srcPath, dstPath) : bookkey::moveFile(srcPath.c_str(), dstPath.c_str());
+
+  bool success = false;
+  bool plainMove = dstExists;
+  if (!plainMove) {
+    HalFile source = Storage.open(srcPath.c_str());
+    plainMove = !source || source.isDirectory();
+    if (source) source.close();
+  }
+  if (!plainMove) {
+    // A file carries its book's path-keyed state (reading position, stats, reader settings,
+    // recent entry) as the web portal's Rename does. When that cannot be done (a target already
+    // holding saved state, a move that changes the book's format such as a client renaming
+    // "x.epub" to "x.epub.bak" before replacing it, or state that failed to move and was rolled
+    // back), the plain move still runs: a client's save must not fail over reading data.
+    const auto migration = BookMoveUtils::renameFilePreservingBookState(srcPath.c_str(), dstPath.c_str());
+    success = migration == BookMoveUtils::RenameMigrationResult::Success ||
+              migration == BookMoveUtils::RenameMigrationResult::KeepRenamed;
+    plainMove = !success && Storage.exists(srcPath.c_str());
+  }
+  if (plainMove) {
+    success = dstExists ? replaceFile(srcPath, dstPath) : bookkey::moveFile(srcPath.c_str(), dstPath.c_str());
+    if (success) {
+      clearBookCache(srcPath.c_str());
+      if (!clearBookCachePreservingUserState(dstPath.c_str(), true)) {
+        LOG_ERR("DAV", "File moved but cache refresh failed: %s", dstPath.c_str());
+        s.send(500, "text/plain", "File moved, but could not refresh cached reading/sync data");
+        return;
+      }
+    }
+  }
 
   if (success) {
-    clearBookCache(srcPath.c_str());
-    if (!clearBookCachePreservingUserState(dstPath.c_str(), true)) {
-      LOG_ERR("DAV", "File moved but cache refresh failed: %s", dstPath.c_str());
-      s.send(500, "text/plain", "File moved, but could not refresh cached reading/sync data");
-      return;
-    }
     ImageFolderIndex::invalidateForPath(srcPath.c_str());
     sdFontSystem.markRegistryDirtyForPath(srcPath.c_str());
     ImageFolderIndex::invalidateForPath(dstPath.c_str());

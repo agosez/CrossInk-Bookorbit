@@ -61,8 +61,14 @@ struct Clipping {
   uint8_t resolvedLayoutBoundaries = 0;
   // Sync keys stay on SD. Their length locates them relative to textOffset.
   uint8_t syncKeyLength = 0;
-  bool uploaded = false;
-  bool scoped = false;
+  // One byte for the three flags: 256 records of 92 bytes fit the heap budget (ClipWordStoreTest).
+  bool uploaded : 1 = false;
+  bool scoped : 1 = false;
+  // The book file was replaced by a copy whose chapter this highlight points into differs
+  // (see BookUpdateMigration): its position no longer locates its text. Still listed, never
+  // drawn, jumped to or synced. Kept beside the record, not in it, in the book's state dir
+  // (orphaned_clippings.bin), so the clipping format and older firmware are unaffected.
+  bool orphaned : 1 = false;
   char chapterTitle[CLIPPING_CHAPTER_TITLE_MAX] = {};
 };
 
@@ -233,6 +239,12 @@ class ClippingStore {
                                    RenameMigration& migration);
   static bool commitRenameMigration(RenameMigration& migration);
   static bool rollbackRenameMigration(RenameMigration& migration);
+  // Marks orphaned every highlight of the EPUB at filePath whose chapter changed when its file
+  // was replaced: chapterChanged[spineIndex] != 0, or a spine index at or past chapterCount.
+  // Earlier marks are kept. Call once the clipping store already follows the new copy.
+  static bool markOrphanedChapters(const std::string& filePath, const uint8_t* chapterChanged, size_t chapterCount);
+  // The content-keyed store of the EPUB whose content hash this is (see BookUpdateMigration).
+  static std::string storePathForHash(const std::string& contentHash);
 
  private:
   static ClippingStore instance;

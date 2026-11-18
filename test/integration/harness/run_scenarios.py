@@ -21,9 +21,11 @@ import hashlib
 import http.server
 import json
 import os
+import posixpath
 import random
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -31,7 +33,11 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -269,6 +275,75 @@ def read_bob_store(path: Path) -> tuple[int, list[dict]]:
     return watermark, out
 
 
+# /.crosspoint/bookorbit_downloads.bin, written and read from docs/file-formats.md
+# rather than from the firmware source, so the scenarios also hold the doc to account.
+DOWNLOAD_INDEX = ".crosspoint/bookorbit_downloads.bin"
+
+
+def download_index_crc() -> int:
+    # The header's CRC32 of the configured server URL, which the firmware keeps verbatim.
+    return zlib.crc32(BASE_URL.encode())
+
+
+def write_download_index(path: Path, entries: list[tuple[int, str, int]], version: int) -> None:
+    """Writes (bookId, sdPath, fileSize) entries as a BOD1 or BOD2 index."""
+    out = bytearray(f"BOD{version}".encode()) + struct.pack("<I", download_index_crc())
+    if version == 1:
+        for book_id, sd_path, size in entries:
+            raw = sd_path.encode()
+            out += struct.pack("<qIH", book_id, size, len(raw)) + raw
+    else:
+        out += struct.pack("<I", len(entries))
+        offset = 12 + 22 * len(entries)
+        for book_id, sd_path, size in entries:
+            raw = sd_path.encode()
+            fnv = 2166136261
+            for b in raw:
+                fnv = ((fnv ^ b) * 16777619) & 0xFFFFFFFF
+            out += struct.pack("<qIIIH", book_id, size, fnv, offset, len(raw))
+            offset += len(raw)
+        for _, sd_path, _ in entries:
+            out += sd_path.encode()
+    path.write_bytes(bytes(out))
+
+
+def read_download_index(path: Path) -> list[tuple[int, str, int]]:
+    """Parses a BOD2 index into (bookId, sdPath, fileSize) entries, checking every field
+    the format documents: magic, server CRC, count, and each path's hash and offset."""
+    data = path.read_bytes()
+    assert data[:4] == b"BOD2", f"download index is not BOD2: {data[:4]!r}"
+    crc, count = struct.unpack_from("<II", data, 4)
+    assert crc == download_index_crc(), "download index records another server"
+    entries = []
+    for i in range(count):
+        book_id, size, fnv, offset, length = struct.unpack_from("<qIIIH", data, 12 + 22 * i)
+        raw = data[offset:offset + length]
+        assert len(raw) == length, f"entry {i} points past the end of the file"
+        expected = 2166136261
+        for b in raw:
+            expected = ((expected ^ b) * 16777619) & 0xFFFFFFFF
+        assert fnv == expected, f"entry {i} path hash does not match its path"
+        entries.append((book_id, raw.decode(), size))
+    assert len(data) == 12 + 22 * count + sum(len(p.encode()) for _, p, _ in entries), \
+        "download index has trailing bytes"
+    return entries
+
+
+def seed_nested_books(fs: "SimFs", count: int) -> list[tuple[int, str, int]]:
+    """Copies `count` library EPUBs into series folders under the download folder, where
+    the catalog's flat scan never looks, so only the download index can list them."""
+    _, library = load_seed()
+    entries = []
+    for i in range(count):
+        source = INTEGRATION / "library" / library[i % len(library)]["file"]
+        sd_path = f"{fs.download_folder}/Series {i // 10:02d}/Book {i:03d}.epub"
+        dest = fs.fs / sd_path.lstrip("/")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+        entries.append((1000 + i, sd_path, dest.stat().st_size))
+    return entries
+
+
 class SimFs:
     """One scenario's isolated SD card."""
 
@@ -368,8 +443,9 @@ class SimFs:
 
 def run_simulator(fs: SimFs, input_script: str, choice: str, timeout_s: int,
                   verbose: bool, wake_into_reader: bool = False,
-                  after_reboot_script: str | None = None) -> str:
+                  after_reboot_script: str | None = None, extra_env: dict[str, str] | None = None) -> str:
     env = os.environ.copy()
+    env.update(extra_env or {})
     env.setdefault("SDL_VIDEODRIVER", "dummy")
     env["CROSSPOINT_SIM_INPUT_SCRIPT"] = input_script
     if after_reboot_script is not None:
@@ -431,6 +507,9 @@ FRESH_BOOK = {
     "highlight_push_backlog": 45,
     "highlight_pull_backlog": 46,
     "highlight_delete_propagates_large": 47,
+    "outdated_copy": 49,
+    "book_update": 48,
+    "book_update_offer": 51,
 }
 
 # Bookmarks dedupe server-side on their converted location (paragraph precision), so a
@@ -1341,7 +1420,7 @@ def scenario_highlight_delete_propagates_large(verbose: bool) -> None:
 def scenario_highlight_delete_guard(verbose: bool) -> None:
     """A lost sync-state store must NOT read as 'every highlight deleted': with
     the store gone, the sync reports no key set and the server keeps everything.
-    This is the destructive-wipe guard in prepareAnnotationBatch."""
+    This is the destructive-wipe guard in BookOrbitHighlightSync::prepare."""
     manifest, books = load_seed()
     book = books[FRESH_BOOK["highlight_delete_guard"]]
     now = int(time.time())
@@ -1834,6 +1913,10 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
         # The legacy flat name must not appear beside it.
         assert downloaded == [f"Downloads/{device_path}"], \
             f"unexpected extra downloads: {downloaded}"
+        # The download index recorded it, in the documented on-card format.
+        index = read_download_index(fs.fs / DOWNLOAD_INDEX)
+        assert index == [(first["id"], f"/Downloads/{device_path}", expected.stat().st_size)], \
+            f"download index does not record the download: {index}"
 
         # Second run on the same card: the offline "On device" category must still
         # find the book now that the template filed it two folders deep. The catalog
@@ -2261,6 +2344,482 @@ def scenario_highlight_mint_outside_paragraph(verbose: bool) -> None:
             f"\"{text}\" stored at {mine[-1]['pos0']} .. {mine[-1]['pos1']} on the server"
 
 
+def scenario_sleep_sync_device_scan(verbose: bool) -> None:
+    """Under the BookOrbit theme, the sleep sync recognises books that reached the card by
+    other means, by content hash through the server's match check, and files them where a
+    catalog download would have. Three sleep syncs on one card, the download folder being
+    the SD root. First: two books copied to /Inbox and the open book move to the paths the
+    server's naming template gives them (the open book's state follows it), a book in /Read
+    stays there, and an EPUB the server does not have is left alone and remembered. Every
+    book identified ends up in the download index; the destinations are read back from that
+    index rather than recomputed here. Second, with the index and the scan's state lost (as
+    when the server URL changes) and a stray copy of one book added: the books already in
+    place are not moved again, the stray copy is deleted and the index is rebuilt. Third,
+    with nothing changed: no book is hashed, and only the remembered file's hash goes to the
+    server, to learn whether its library changed."""
+    manifest, library = load_seed()
+    sim = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                       manifest["kosync"]["password"], SIM_DEVICE_ID)
+    ids = {f["fileHash"]: item["id"] for item in sim.catalog_manifest()
+           for f in item["files"] if f["format"].lower() == "epub"}
+    book_a, book_c, book_d = (library[i] for i in (40, 41, 42))  # outside every seeded range
+    id_a, id_c, id_d = (ids[b["hash"]] for b in (book_a, book_c, book_d))
+    seeded = manifest["progress"][2]
+    id_open = ids[seeded["hash"]]
+
+    def scan_lines(output: str) -> str:
+        return "\n".join(line for line in output.splitlines() if "Device scan" in line)
+
+    def sleep_sync(fs: SimFs) -> str:
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="none", timeout_s=120, verbose=verbose)
+        assert "Sleep sync over" in output, "sleep sync never ran to its end"
+        return output
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        fs.enable_sync_on_sleep()
+        settings = json.loads((fs.crosspoint / "crossink-settings.json").read_text())
+        settings["uiTheme"] = UI_THEME_BOOKORBIT
+        (fs.crosspoint / "crossink-settings.json").write_text(json.dumps(settings))
+        open_path = fs.add_book(INTEGRATION / "library" / seeded["file"])
+        fs.set_open_book(open_path)
+        write_progress_bin(fs.epub_cache_dir(open_path) / "progress.bin", 4, 0, 1)
+
+        def place(book: dict, sd_path: str) -> Path:
+            dest = fs.fs / sd_path.lstrip("/")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(INTEGRATION / "library" / book["file"], dest)
+            return dest
+
+        # 1. Misplaced books move to their catalog location.
+        misplaced_a = place(book_a, "/Inbox/a.epub")
+        misplaced_c = place(book_c, "/Inbox/c.epub")
+        place(book_d, "/Read/d.epub")
+        unknown = fs.fs / "Inbox" / "unknown.epub"
+        unknown.write_bytes(b"not a BookOrbit book " * 200)
+
+        output = sleep_sync(fs)
+        assert "Device scan: asked=5 matched=4 moved=3 duplicates=0 remembered=1" in output, \
+            "first scan differs:\n" + scan_lines(output)
+        index = {book_id: path for book_id, path, _ in read_download_index(fs.fs / DOWNLOAD_INDEX)}
+        assert set(index) == {id_a, id_c, id_d, id_open}, f"download index after the first scan: {index}"
+        assert index[id_d] == "/Read/d.epub", f"a book in /Read was moved to {index[id_d]}"
+        for original, book_id in ((misplaced_a, id_a), (misplaced_c, id_c), (fs.fs / open_path.lstrip("/"), id_open)):
+            assert not original.exists(), f"{original.name} was not moved"
+            assert (fs.fs / index[book_id].lstrip("/")).exists(), f"book {book_id} is not at {index[book_id]}"
+        state = json.loads((fs.crosspoint / "state.json").read_text())
+        assert state["openEpubPath"] == index[id_open], f"the open book's state stayed at {state['openEpubPath']}"
+        assert fs.epub_cache_dir(index[id_open]).exists(), "the open book's cache did not follow it"
+        assert unknown.exists(), "an EPUB the server does not have was touched"
+
+        # 2. With the index and the scan state lost, books in place stay put and a stray copy goes.
+        (fs.fs / DOWNLOAD_INDEX).unlink()
+        (fs.crosspoint / "bookorbit_recognition.bin").unlink()
+        stray_c = place(book_c, "/Inbox/c copy.epub")
+        output = sleep_sync(fs)
+        assert "Device scan: asked=6 matched=5 moved=0 duplicates=1 remembered=1" in output, \
+            "second scan differs:\n" + scan_lines(output)
+        assert not stray_c.exists(), "the stray copy of an in-place book was not deleted"
+        rebuilt = {book_id: path for book_id, path, _ in read_download_index(fs.fs / DOWNLOAD_INDEX)}
+        assert rebuilt == index, f"the rebuilt index differs: {rebuilt} vs {index}"
+        leftovers = sorted(p.name for p in fs.crosspoint.glob("bookorbit_scan*"))
+        assert not leftovers, f"the scan left files behind: {leftovers}"
+
+        # 3. Nothing new: nothing is hashed, and one bare hash asks whether the library changed.
+        output = sleep_sync(fs)
+        assert "new books of" not in output and "Device scan: asked=" not in output, \
+            "an unchanged card was scanned again:\n" + scan_lines(output)
+        probes = [line for line in output.splitlines() if "Match check response" in line]
+        assert len(probes) == 1 and "(1 hashes)" in probes[0], f"unexpected match checks: {probes}"
+
+
+def scenario_home_refresh_device_scan(verbose: bool) -> None:
+    """The Home tile's sync runs the card scan too, in its own network boot: a library book
+    copied to /Inbox moves to its catalog location, a second copy of it is deleted, and the
+    sync ends on a summary of what the scan did before it restarts to Home."""
+    manifest, library = load_seed()
+    sim = KosyncDevice(BASE_URL, manifest["kosync"]["username"],
+                       manifest["kosync"]["password"], SIM_DEVICE_ID)
+    book = library[43]  # outside every seeded range but the collection's
+    book_id = next(item["id"] for item in sim.catalog_manifest()
+                   for f in item["files"] if f["fileHash"] == book["hash"])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        (fs.crosspoint / "crossink-settings.json").write_text(json.dumps({"uiTheme": UI_THEME_BOOKORBIT}))
+        copies = [fs.fs / "Inbox" / "copied.epub", fs.fs / "Inbox" / "copied (1).epub"]
+        for copy in copies:
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(INTEGRATION / "library" / book["file"], copy)
+
+        # With no recent book, the BookOrbit tile is the page's second stop. The run ends on
+        # the timeout: nothing can be scheduled across the two restarts.
+        output = run_simulator(fs, input_script="3000:DOWN:120;4500:CONFIRM:120", choice="none", timeout_s=25,
+                               verbose=verbose)
+        assert "Device scan: asked=2 matched=2 moved=1 duplicates=1 remembered=0" in output, \
+            "the Home refresh's scan differs:\n" + "\n".join(
+                line for line in output.splitlines() if "Device scan" in line)
+        assert "Home refresh: showing the card scan's summary" in output, "the refresh ended without its summary"
+        index = {i: p for i, p, _ in read_download_index(fs.fs / DOWNLOAD_INDEX)}
+        assert book_id in index and (fs.fs / index[book_id].lstrip("/")).exists(), \
+            f"the book was not filed: {index}"
+        assert not any(copy.exists() for copy in copies), "a copy stayed in /Inbox"
+
+
+CATALOG_ROOT_SCRIPT = ";".join([
+    "6000:DOWN", "6500:DOWN", "7000:CONFIRM",  # home menu -> BookOrbit catalog
+    "13000:QUIT",                              # the root counts local books as it builds
+])
+
+
+def scenario_catalog_download_index_migration(verbose: bool) -> None:
+    """An index written by an earlier release (BOD1) is converted on the first catalog
+    visit: the books it lists, filed in series folders the flat scan never visits, are
+    still counted under "On device", and the card now holds the same entries as BOD2
+    with no temporary or backup file left behind."""
+    manifest, _ = load_seed()
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
+        entries = seed_nested_books(fs, 3)
+        write_download_index(fs.fs / DOWNLOAD_INDEX, entries, version=1)
+
+        output = run_simulator(fs, input_script=CATALOG_ROOT_SCRIPT, choice="apply",
+                               timeout_s=60, verbose=verbose)
+        assert "Local scan: kind=on-device count=3" in output, \
+            "'On device' lost the books listed by the BOD1 index"
+        assert read_download_index(fs.fs / DOWNLOAD_INDEX) == entries, \
+            "the migrated index does not hold the BOD1 entries"
+        leftovers = sorted(p.name for p in fs.crosspoint.glob("bookorbit_downloads.*")
+                           if p.suffix != ".bin")
+        assert not leftovers, f"the index rewrite left files behind: {leftovers}"
+
+
+def scenario_catalog_download_index_beyond_legacy_cap(verbose: bool) -> None:
+    """The index now keeps more than the 128 downloads BOD1 was capped at: 150 books
+    in series folders, known only through the index, are all counted under "On
+    device". Before the compact index, the oldest 22 were evicted and went missing."""
+    manifest, _ = load_seed()
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
+        entries = seed_nested_books(fs, 150)
+        write_download_index(fs.fs / DOWNLOAD_INDEX, entries, version=2)
+
+        output = run_simulator(fs, input_script=CATALOG_ROOT_SCRIPT, choice="apply",
+                               timeout_s=60, verbose=verbose)
+        assert "Local scan: kind=on-device count=150" in output, \
+            "'On device' did not count every book the index lists"
+
+
+def rewrite_book_file(manifest: dict, book: dict) -> None:
+    """BookOrbit writes its metadata into the book's file, as editing a book's details does
+    with write-back on: the file's hash changes and the old one stays only as history
+    (`file_write`). A device holding the library's original copy is then answered
+    `positionIncompatible`. Rewriting again on a re-run keeps that original hash in history."""
+    admin = AdminClient(BASE_URL)
+    admin.login(manifest["user"]["username"], manifest["user"]["password"])
+    ids = admin.find_book_ids([book["title"], Path(book["file"]).stem])
+    assert ids, f"the server does not list {book['file']}"
+    result = request_json("POST", admin.api(f"/books/{next(iter(ids.values()))}/write-and-rename"),
+                          admin._headers(), {}, ok=(200, 201))
+    assert result.get("write", {}).get("status") == "success", f"metadata write-back failed: {result}"
+
+
+def scenario_outdated_copy_holds_changes(verbose: bool) -> None:
+    """The device holds the library's original copy of a book whose file BookOrbit has since
+    rewritten. BookOrbit 3.6.0+ answers both exchanges with positionIncompatible, HTTP 200 and
+    no result, and keeps nothing: the device must not count its highlight or bookmark as sent
+    (v1.6.1+bookorbit.7 did, and never sent them again), and the sync still ends normally."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["outdated_copy"]]
+    rewrite_book_file(manifest, book)
+    probe = verify_device(manifest, "outdated")
+    reply = probe.exchange_annotations(book["hash"], keys=[], keys_complete=False, changes=[])
+    if book["hash"] not in reply.get("positionIncompatible", []):
+        print("  (skipped: this server does not answer positionIncompatible)")
+        return
+    now = int(time.time())
+    text = f"Outdated copy highlight {now}"
+    bookmark_pos = "/body/DocFragment[3]/body/p[1]/text().0"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        write_clipping_store(fs.clippings_store(book["hash"]), book.get("title", ""),
+                             book.get("author", ""), sim_path,
+                             [{"spine": 1, "paragraph": 2, "timestamp": 4545,
+                               "text": text, "chapter": "Chapter", "wordCount": len(text.split())}])
+        write_boa_store(fs.state_dir(book["hash"]) / ANNOTATION_STORE, 0, [{
+            "timestamp": 4545, "identityEpoch": now, "spine": 1, "paragraph": 2,
+            "pos0": "/body/DocFragment[2]/body/p[2]/text().0",
+            "pos1": f"/body/DocFragment[2]/body/p[2]/text().{len(text)}",
+        }])
+        write_bookmark_store(fs.bookmarks_store(book["hash"]), book.get("title", ""),
+                             book.get("author", ""), sim_path,
+                             [{"spine": 2, "progress": 0.25, "timestamp": now,
+                               "chapter": "Chapter", "paragraph": 1, "snippet": "Outdated copy bookmark"}])
+        write_bob_store(fs.state_dir(book["hash"]) / BOOKMARK_STORE, 0, [{
+            "timestamp": now, "identityEpoch": now, "spine": 2, "pos": bookmark_pos,
+        }])
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "sync never reached its end marker"
+        assert re.search(r"Highlight exchange result=0 \(http=20\d, unmatched=1, incompatible=1", output), \
+            "the highlight exchange did not take the reply for an outdated copy"
+        assert re.search(r"Bookmark upload result=0 \(http=20\d, unmatched=1, incompatible=1", output), \
+            "the bookmark exchange did not take the reply for an outdated copy"
+        highlight_watermark, records = read_boa_store(fs.state_dir(book["hash"]) / ANNOTATION_STORE)
+        assert highlight_watermark < now and records, \
+            f"the highlight was counted as sent (watermark {highlight_watermark})"
+        bookmark_watermark, _ = read_bob_store(fs.state_dir(book["hash"]) / BOOKMARK_STORE)
+        assert bookmark_watermark < now, f"the bookmark was counted as sent (watermark {bookmark_watermark})"
+
+
+def free_portal_port() -> int:
+    """A port for the portal's HTTP server whose next one, the WebSocket server's, is free too."""
+    with contextlib.closing(socket.socket()) as http, contextlib.closing(socket.socket()) as websocket:
+        http.bind(("127.0.0.1", 0))
+        port = http.getsockname()[1]
+        websocket.bind(("127.0.0.1", port + 1))
+        return port
+
+
+@contextlib.contextmanager
+def file_transfer_portal(fs: SimFs, verbose: bool):
+    """The simulator booted straight into the file transfer screen's hotspot mode (boot target
+    6, payload 2), its web portal and WebDAV on a local port. Yields the portal's base URL."""
+    port = free_portal_port()
+    env = os.environ.copy()
+    env.update(SDL_VIDEODRIVER="dummy", CROSSPOINT_SIM_SD=str(fs.fs), CROSSPOINT_SIM_HTTP_PORT=str(port),
+               CROSSPOINT_SIM_SILENT_REBOOT_MAGIC=str(0xC1EAB007), CROSSPOINT_SIM_SILENT_REBOOT_TARGET="6",
+               CROSSPOINT_SIM_SILENT_REBOOT_PAYLOAD="2")
+    for name in ("CROSSPOINT_SIM_INPUT_SCRIPT", "CROSSINK_SIMULATOR_SMOKE_TEST",
+                 "CROSSINK_SIM_BOOKORBIT_CHOICE", "CROSSINK_SIM_BOOKORBIT_QUIT_AFTER_SYNC"):
+        env.pop(name, None)
+    url = f"http://127.0.0.1:{port}"
+    log_path = fs.root / "simulator.log"
+    with log_path.open("w") as log:
+        process = subprocess.Popen([str(PROGRAM)], cwd=fs.root, env=env, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 45
+            while True:
+                try:
+                    with urllib.request.urlopen(url + "/", timeout=1) as response:
+                        if response.status == 200:
+                            break
+                except (OSError, urllib.error.URLError):
+                    assert process.poll() is None and time.monotonic() < deadline, \
+                        "the simulator's web portal never started"
+                    time.sleep(0.1)
+            yield url
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            if verbose:
+                print(log_path.read_text(errors="replace"))
+
+
+def portal_request(method: str, url: str, data: bytes | None = None,
+                   headers: dict[str, str] | None = None) -> tuple[int, str]:
+    request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    try:
+        response = urllib.request.urlopen(request, timeout=20)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        return response.getcode(), response.read().decode()
+
+
+def scenario_web_move_keeps_book_state(verbose: bool) -> None:
+    """Moving a book from the file transfer page (POST /move) or over WebDAV (MOVE) carries
+    its path-keyed state to the new path: the reading position in its render cache and its
+    recent entry. Both used to clear the cache and leave that state behind. WebDAV still
+    moves a book the state cannot follow, such as a client renaming x.epub to x.epub.bak
+    before saving over it."""
+    manifest, books = load_seed()
+    position = (3, 7, 20)
+    names = ("Portal.epub", "Dav.epub", "Backup.epub")
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"])
+        (fs.fs / "Moved").mkdir()
+        recent = []
+        for index, name in enumerate(names):
+            sim_path = f"/books/{name}"
+            shutil.copy2(INTEGRATION / "library" / books[index]["file"], fs.fs / "books" / name)
+            write_progress_bin(fs.epub_cache_dir(sim_path) / "progress.bin", *position)
+            recent.append({"path": sim_path, "title": f"Title of {name}", "author": "Author"})
+        (fs.crosspoint / "recent.json").write_text(json.dumps({"books": recent}))
+
+        with file_transfer_portal(fs, verbose) as url:
+            form = urllib.parse.urlencode({"path": "/books/Portal.epub", "dest": "/Moved"}).encode()
+            status, body = portal_request("POST", url + "/move", form,
+                                          {"Content-Type": "application/x-www-form-urlencoded"})
+            assert status == 200, f"portal move failed: {status} {body}"
+            status, body = portal_request("MOVE", url + "/books/Dav.epub",
+                                          headers={"Destination": url + "/Moved/Dav.epub", "Overwrite": "F"})
+            assert status == 201, f"WebDAV move failed: {status} {body}"
+            status, body = portal_request("MOVE", url + "/books/Backup.epub",
+                                          headers={"Destination": url + "/books/Backup.epub.bak"})
+            assert status == 201, f"WebDAV move to a non-book name failed: {status} {body}"
+
+        recent_paths = [b["path"] for b in json.loads((fs.crosspoint / "recent.json").read_text())["books"]]
+        for name in names[:2]:
+            old, new = f"/books/{name}", f"/Moved/{name}"
+            assert (fs.fs / new.lstrip("/")).exists() and not (fs.fs / old.lstrip("/")).exists(), \
+                f"{name} did not move"
+            progress = read_progress_bin(fs.epub_cache_dir(new) / "progress.bin")
+            assert progress and (progress["spine"], progress["page"]) == position[:2], \
+                f"{name}'s reading position did not follow it: {progress}"
+            assert not fs.epub_cache_dir(old).exists(), f"{name}'s old cache was left behind"
+            assert new in recent_paths and old not in recent_paths, \
+                f"{name}'s recent entry did not follow it: {recent_paths}"
+        assert (fs.fs / "books/Backup.epub.bak").exists() and not (fs.fs / "books/Backup.epub").exists(), \
+            "the WebDAV rename to a non-book name did not happen"
+
+
+def epub_spine_entries(path: Path) -> list[str]:
+    """The ZIP entry names an EPUB's spine reads, in reading order."""
+    with zipfile.ZipFile(path) as z:
+        container = ET.fromstring(z.read("META-INF/container.xml"))
+        opf_path = next(e.get("full-path") for e in container.iter() if e.tag.endswith("rootfile"))
+        opf = ET.fromstring(z.read(opf_path))
+    base = posixpath.dirname(opf_path)
+    manifest = {e.get("id"): e.get("href") for e in opf.iter() if e.tag.endswith("}item")}
+    return [posixpath.normpath(posixpath.join(base, manifest[e.get("idref")]))
+            for e in opf.iter() if e.tag.endswith("}itemref")]
+
+
+def write_older_copy(source: Path, dest: Path, changed_entry: str) -> None:
+    """Another copy of the same book, as an older file of it: one chapter's markup differs
+    (its CRC-32 with it), every other entry is byte-identical. The mimetype stays first and
+    stored, as the EPUB container requires."""
+    with zipfile.ZipFile(source) as src, zipfile.ZipFile(dest, "w") as out:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename == changed_entry:
+                data = data.replace(b"</body>", b"<p>A paragraph only the older copy had.</p></body>", 1)
+            out.writestr(info, data, compress_type=info.compress_type)
+
+
+def scenario_book_update_carries_state(verbose: bool) -> None:
+    """A catalog re-download replaced a book's copy by the library's, and the device was reset
+    before the copy it replaced was carried across (it still waits at <book>.old). The next sync
+    of the book finishes it first, here one started from Home, which loads the book without the
+    reader: the highlights and BookOrbit state move from the old copy's hash to the new one's,
+    the highlight in the chapter the copies disagree on is orphaned (not sent), the one in an
+    unchanged chapter is sent, and the old copy is gone. (book_update_offer covers the reader.)"""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["book_update"]]
+    source = INTEGRATION / "library" / book["file"]
+    spine = epub_spine_entries(source)
+    assert len(spine) >= 3, f"{book['file']} has too few chapters for this scenario"
+    now = int(time.time())
+    kept_text = f"Kept highlight {now}"
+    orphan_text = f"Orphaned highlight {now}"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        old_copy = fs.fs / (sim_path.lstrip("/") + ".old")
+        write_older_copy(source, old_copy, spine[2])
+        old_hash = partial_md5(old_copy)
+        assert old_hash != book["hash"], "the older copy did not get a hash of its own"
+
+        clippings = []
+        records = []
+        for timestamp, spine_index, text in ((4646, 1, kept_text), (4747, 2, orphan_text)):
+            clippings.append({"spine": spine_index, "paragraph": 1, "timestamp": timestamp,
+                              "text": text, "chapter": "Chapter", "wordCount": len(text.split())})
+            fragment = f"/body/DocFragment[{spine_index + 1}]/body/p[1]/text()"
+            records.append({"timestamp": timestamp, "identityEpoch": now, "spine": spine_index,
+                            "paragraph": 1, "pos0": f"{fragment}.0", "pos1": f"{fragment}.{len(text)}"})
+        write_clipping_store(fs.clippings_store(old_hash), book.get("title", ""), book.get("author", ""),
+                             sim_path, clippings)
+        # Watermark past both: what v1.6.1+bookorbit.7 left after an exchange it misread.
+        write_boa_store(fs.state_dir(old_hash) / ANNOTATION_STORE, now + 60, records)
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload",
+                               timeout_s=120, verbose=verbose)
+        assert "sync scenario finished" in output, "sync never reached its end marker"
+
+        assert not old_copy.exists(), "the replaced copy was left on the card"
+        assert not fs.clippings_store(old_hash).exists(), "the highlights stayed with the old copy"
+        moved = {c["text"] for c in read_clipping_store(fs.clippings_store(book["hash"]))}
+        assert {kept_text, orphan_text} <= moved, f"highlights missing from the new copy: {moved}"
+        state = fs.state_dir(book["hash"])
+        assert not (state / "replaced_chapters.bin").exists(), "the chapter comparison never ran"
+        orphans = (state / "orphaned_clippings.bin").read_bytes()
+        assert orphans[:4] == b"OCL1" and struct.unpack_from("<H", orphans, 4)[0] == 1, \
+            f"expected exactly one orphaned highlight: {orphans!r}"
+        assert struct.unpack_from("<IHH", orphans, 6) == (4747, 2, 1), "the wrong highlight was orphaned"
+        watermark, _ = read_boa_store(state / ANNOTATION_STORE)
+        assert now <= watermark < now + 60, f"the watermark was not rewound and advanced: {watermark}"
+
+    texts = {a["text"] for a in annotation_adds(verify_device(manifest, "bkupd"), book["hash"])}
+    assert kept_text in texts, f"the highlight in an unchanged chapter was not sent: {texts}"
+    assert orphan_text not in texts, "the orphaned highlight was sent"
+
+
+def scenario_book_update_offer(verbose: bool) -> None:
+    """The whole update, as a user takes it. BookOrbit rewrites a book's file; the device,
+    holding the library's original copy (copied to the card: the download index does not know
+    it), syncs a highlight. The sync takes the positionIncompatible reply, finds the book through
+    the match check, and offers the update at its end; the scripted run accepts it. The catalog
+    downloads the library's file over the copy and reopens the book, whose highlight followed it
+    to the new copy's hash. A second sync then sends that highlight."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["book_update_offer"]]
+    rewrite_book_file(manifest, book)
+    probe = verify_device(manifest, "updoffer")
+    reply = probe.exchange_annotations(book["hash"], keys=[], keys_complete=False, changes=[])
+    if book["hash"] not in reply.get("positionIncompatible", []):
+        print("  (skipped: this server does not answer positionIncompatible)")
+        return
+    now = int(time.time())
+    text = f"Highlight carried by the update {now}"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        write_clipping_store(fs.clippings_store(book["hash"]), book.get("title", ""),
+                             book.get("author", ""), sim_path,
+                             [{"spine": 1, "paragraph": 2, "timestamp": 5151,
+                               "text": text, "chapter": "Chapter", "wordCount": len(text.split())}])
+        write_boa_store(fs.state_dir(book["hash"]) / ANNOTATION_STORE, 0, [{
+            "timestamp": 5151, "identityEpoch": now, "spine": 1, "paragraph": 2,
+            "pos0": "/body/DocFragment[2]/body/p[2]/text().0",
+            "pos1": f"/body/DocFragment[2]/body/p[2]/text().{len(text)}",
+        }])
+
+        # Sync, offer, catalog download and the reader reopening the book: nothing ends that
+        # chain, so the run stops on its timeout and the card tells how far it went.
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload", timeout_s=75,
+                               verbose=verbose, extra_env={"CROSSINK_SIM_BOOKORBIT_UPDATE": "1"})
+        assert "Restarting into the catalog to update" in output, "the sync did not offer the update"
+        assert "Downloading file" in output, "the catalog did not download the library's copy"
+        book_file = fs.fs / sim_path.lstrip("/")
+        new_hash = partial_md5(book_file)
+        assert new_hash != book["hash"], "the copy on the card was not replaced"
+        assert not Path(str(book_file) + ".old").exists(), "the replaced copy was left on the card"
+        assert not fs.clippings_store(book["hash"]).exists(), "the highlight stayed with the old copy"
+        moved = {c["text"] for c in read_clipping_store(fs.clippings_store(new_hash))}
+        assert text in moved, f"the highlight did not follow the update: {moved}"
+        assert not (fs.state_dir(new_hash) / "replaced_chapters.bin").exists(), \
+            "the reopened book never compared its chapters"
+        assert not (fs.state_dir(new_hash) / "orphaned_clippings.bin").exists(), \
+            "a metadata write-back changed no chapter, yet a highlight was orphaned"
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload", timeout_s=90,
+                               verbose=verbose)
+        assert "sync scenario finished" in output, "the second sync never reached its end marker"
+        assert "incompatible=1" not in output, "the updated copy is still outdated for the server"
+
+    texts = {a["text"] for a in annotation_adds(verify_device(manifest, "updoffer2"), new_hash)}
+    assert text in texts, f"the highlight was not sent after the update: {texts}"
+
+
 SCENARIOS = {
     "catalog_collections_browse": scenario_catalog_collections_browse,
     "catalog_empty_listing_back": scenario_catalog_empty_listing_back,
@@ -2269,6 +2828,10 @@ SCENARIOS = {
     "catalog_download_naming": scenario_catalog_download_naming,
     "catalog_book_actions": scenario_catalog_book_actions,
     "catalog_deep_listing": scenario_catalog_deep_listing,
+    "catalog_download_index_migration": scenario_catalog_download_index_migration,
+    "catalog_download_index_beyond_legacy_cap": scenario_catalog_download_index_beyond_legacy_cap,
+    "sleep_sync_device_scan": scenario_sleep_sync_device_scan,
+    "home_refresh_device_scan": scenario_home_refresh_device_scan,
     "catalog_hides_non_epub": scenario_catalog_hides_non_epub,
     "catalog_sort_filter": scenario_catalog_sort_filter,
     "catalog_sections_and_shelf": scenario_catalog_sections_and_shelf,
@@ -2299,6 +2862,10 @@ SCENARIOS = {
     "bookmark_pull": scenario_bookmark_pull,
     "bookmark_delete_all_propagates": scenario_bookmark_delete_all_propagates,
     "bookmark_push": scenario_bookmark_push,
+    "outdated_copy_holds_changes": scenario_outdated_copy_holds_changes,
+    "web_move_keeps_book_state": scenario_web_move_keeps_book_state,
+    "book_update_carries_state": scenario_book_update_carries_state,
+    "book_update_offer": scenario_book_update_offer,
 }
 
 

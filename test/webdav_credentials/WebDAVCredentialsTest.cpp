@@ -239,12 +239,23 @@ bool moveFile(const char* from, const char* to) {
   return Storage.rename(from, to);
 }
 }  // namespace bookkey
+namespace BookMoveUtils {
+enum class RenameMigrationResult { Success, RolledBack, KeepRenamed, InvalidBookType, DestinationStateExists };
+int renames = 0;
+// Production migrates the book's reader state around bookkey::moveFile, which carries its key.
+RenameMigrationResult renameFilePreservingBookState(const std::string& from, const std::string& to) {
+  ++renames;
+  return bookkey::moveFile(from.c_str(), to.c_str()) ? RenameMigrationResult::Success
+                                                     : RenameMigrationResult::RolledBack;
+}
+}  // namespace BookMoveUtils
 #include "Production.inc"
 
 void reset() {
   Storage = {};
   bookkey::sidecars.clear();
   bookkey::moves = 0;
+  BookMoveUtils::renames = 0;
   Storage.files = {{"/", {true, ""}},
                    {"/.crosspoint", {true, ""}},
                    {"/.crosspoint/wifi.json", {false, "secret"}},
@@ -352,7 +363,8 @@ int main() {
   assert(request(handler, HTTP_MOVE, "/books/book.epub", "/books/target.epub").status == 409);
   assert(Storage.mutations == 0 && bookkey::moves == 0);
   assert(request(handler, HTTP_MOVE, "/books/book.epub", "/books/new.epub").status == 201);
-  assert(bookkey::moves == 1);
+  // A move to a free name carries the book's reader state, as Rename does.
+  assert(bookkey::moves == 1 && BookMoveUtils::renames == 1);
   reset();
   // Existing replacement rollback stays intact.
   Storage.files["/books/target.epub"] = {false, "original"};
@@ -362,6 +374,8 @@ int main() {
   Storage.failRename.clear();
   assert(request(handler, HTTP_MOVE, "/books/book.epub", "/books/target.epub").status == 204);
   assert(Storage.files.at("/books/target.epub").data == "book");
+  // A replacement keeps the target's own state.
+  assert(BookMoveUtils::renames == 0);
   assert(request(handler, HTTP_COPY, "/books/target.epub", "/books/copy.epub").status == 201);
   assert(request(handler, HTTP_DELETE, "/books/copy.epub").status == 204);
   // Ordinary tilde names remain valid PUT destinations.

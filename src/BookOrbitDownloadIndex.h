@@ -14,9 +14,11 @@
  * source of truth.
  *
  * Backed by /.crosspoint/bookorbit_downloads.bin (see docs/file-formats.md). The
- * index is loaded lazily on first use and freed with unload(); the catalog
- * activity, and book renames/moves through relocate(), all run on the main task,
- * so access is not locked.
+ * index is loaded lazily on first use and freed with unload(). Only fixed-size
+ * records live in RAM (24 bytes per book); paths stay in the file and are read
+ * back when a lookup needs one, which is what lets the index hold hundreds of
+ * books (thousands with PSRAM). The catalog activity, and book renames/moves
+ * through relocate(), all run on the main task, so access is not locked.
  * Book ids are scoped to one server: the file records the configured server URL
  * and is discarded when it no longer matches.
  */
@@ -24,7 +26,7 @@ namespace BookOrbitDownloadIndex {
 
 // Fetches the recorded on-device path for a catalog book. Returns false when the
 // book was never recorded or its file is gone or replaced (the stale entry is
-// dropped and the index file updated).
+// dropped, and the index file updated on the next write or on unload()).
 bool lookup(int64_t bookId, std::string& outPath);
 
 // Records where a catalog download landed. The file's current size is stored for
@@ -33,23 +35,33 @@ void record(int64_t bookId, const std::string& path);
 
 // Visits every recorded download whose file is still there, unchanged. This is what
 // lets the catalog list its own downloads wherever the server's file naming template
-// filed them, without walking the card.
+// filed them, without walking the card. visit must not call back into the index.
 void forEachExisting(void (*visit)(int64_t bookId, const std::string& path, void* context), void* context);
 
 // True when some recorded download claims this exact path. Lets a directory scan
 // skip files the index already listed, without a second pass to de-duplicate.
 bool hasPath(const std::string& path);
 
+// The catalog book a recorded download at this exact path came from. Unlike lookup(), the
+// file's size is not checked: the caller is about to replace that copy, typically because
+// the server's file changed after it was downloaded.
+bool bookIdForPath(const std::string& path, int64_t& outBookId);
+
 // Follows a recorded download that was renamed or moved on the device, so the catalog
 // still finds it. No-op when oldPath was never a catalog download. Leaves the index
 // unloaded: the file browser and the reader call this, and neither keeps it around.
 void relocate(const std::string& oldPath, const std::string& newPath);
 
+// Hash of a path as the index stores it (32-bit FNV-1a), for callers keeping their own
+// record of paths beside it.
+uint32_t pathHash(const std::string& path);
+
 // Downloads recorded for the configured server, without checking their files: a book
 // deleted outside the catalog stays counted until a lookup finds it gone.
 size_t recordedCount();
 
-// Frees the in-RAM copy; the next lookup or record reloads it from the SD card.
+// Saves any stale entries lookup() dropped, then frees the in-RAM copy; the next
+// lookup or record reloads it from the SD card.
 void unload();
 
 }  // namespace BookOrbitDownloadIndex

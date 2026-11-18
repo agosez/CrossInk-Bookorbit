@@ -118,6 +118,10 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   // The download was started from a BookOrbit Home shelf: whatever its outcome, it ends
   // on Home rather than on the listing it was fetched through.
   bool downloadFromHome = false;
+  // The book a sync sent this session to update (BookOrbitCatalogLink::replacePath): the
+  // session ends by reopening it rather than on Home, the download done or not.
+  std::string reopenPath;
+  void leaveCatalog();
 
   // Current book-list context, used to page and to return to the same list after a download.
   BookOrbitBookQuery listQuery;

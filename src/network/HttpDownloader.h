@@ -68,6 +68,12 @@ class HttpDownloader {
     bool stageAsPart = false;
     // Opt-in asset contract: success also requires deleting the transaction backup.
     bool requireBackupCleanup = false;
+    // With stageAsPart: leave the file the download replaced at "<destPath>.old" for the
+    // caller, which must remove it. A replaced book's highlights and sync state are keyed by
+    // its content, and moving them needs the old copy beside the new one (BookUpdateMigration,
+    // which also picks up one a reset left behind). The next staged download to destPath
+    // removes a leftover (DownloadFileSwap::recover), so a caller resumes it before that.
+    bool keepReplaced = false;
     // Checks the finished file before it is accepted (and, with stageAsPart,
     // before it replaces destPath). Returning false fails the download and
     // removes the file. Catches bodies cut short without a Content-Length.
