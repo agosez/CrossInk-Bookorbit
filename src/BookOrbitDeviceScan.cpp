@@ -142,6 +142,18 @@ uint32_t fileSizeOf(const std::string& path) {
 bool (*buildCancelledBy)() = nullptr;
 bool buildCancelled(void*) { return buildCancelledBy != nullptr && buildCancelledBy(); }
 
+void report(const BookOrbitDeviceScan::Progress* progress, const BookOrbitDeviceScan::Step step, const size_t done,
+            const size_t total) {
+  if (progress != nullptr && progress->report != nullptr) progress->report(progress->context, step, done, total);
+}
+
+void reportBuild(void* context, const library::BuildProgress& build) {
+  report(static_cast<const BookOrbitDeviceScan::Progress*>(context),
+         build.phase == library::BuildPhase::Organizing ? BookOrbitDeviceScan::Step::SortingCard
+                                                        : BookOrbitDeviceScan::Step::ReadingCard,
+         build.books, 0);
+}
+
 // --- prepare() ---------------------------------------------------------------------------
 
 struct Known {
@@ -151,7 +163,8 @@ struct Known {
 
 // Rebuilds the Library index when the card may have changed since it was built, as the
 // Library itself would on its next visit; a cancelled or failed build leaves the previous one.
-bool openLibraryIndex(library::LibraryIndexFile& index, bool (*cancelled)()) {
+bool openLibraryIndex(library::LibraryIndexFile& index, bool (*cancelled)(),
+                      const BookOrbitDeviceScan::Progress* progress) {
   const bool metadata = SETTINGS.libraryUseMetadata != 0;
   if (!library::libraryIndexNeedsRefresh() && index.open(library::libraryIndexPath()) &&
       index.header().metadataEnabled == static_cast<uint8_t>(metadata)) {
@@ -161,7 +174,10 @@ bool openLibraryIndex(library::LibraryIndexFile& index, bool (*cancelled)()) {
   const unsigned long startMs = millis();
   library::BuildStats stats;
   library::BuildCallbacks callbacks;
+  callbacks.context = const_cast<BookOrbitDeviceScan::Progress*>(progress);
   callbacks.cancelRequested = buildCancelled;
+  callbacks.progress = reportBuild;
+  report(progress, BookOrbitDeviceScan::Step::ReadingCard, 0, 0);
   buildCancelledBy = cancelled;
   const bool built = library::buildLibraryIndex("/", stats, metadata, &callbacks);
   buildCancelledBy = nullptr;
@@ -172,12 +188,12 @@ bool openLibraryIndex(library::LibraryIndexFile& index, bool (*cancelled)()) {
 
 }  // namespace
 
-void BookOrbitDeviceScan::prepare(bool (*cancelled)()) {
+void BookOrbitDeviceScan::prepare(bool (*cancelled)(), const Progress* progress) {
   Storage.remove(WORK_PATH);
   if (!BOOKORBIT_STORE.hasCredentials()) return;
   const unsigned long startMs = millis();
   library::LibraryIndexFile index;
-  if (!openLibraryIndex(index, cancelled)) return;
+  if (!openLibraryIndex(index, cancelled, progress)) return;
 
   FsFile stateFile;
   StateHeader state;
@@ -223,6 +239,7 @@ void BookOrbitDeviceScan::prepare(bool (*cancelled)()) {
   std::string author;
   bool ok = true;
   const uint16_t books = index.bookCount();
+  report(progress, Step::Hashing, 0, books);
   for (uint16_t i = 0; i < books && ok; i++) {
     if (cancelled != nullptr && cancelled()) {
       ok = false;
@@ -255,6 +272,7 @@ void BookOrbitDeviceScan::prepare(bool (*cancelled)()) {
     record.pathHash = pathHash;
     ok = writeRecord(work, record, path, title, author);
     header.count++;
+    report(progress, Step::Hashing, i + 1u, books);
   }
   BookOrbitDownloadIndex::unload();
   header.watermark = watermark;
@@ -285,6 +303,9 @@ struct Item {
 
 struct Run {
   bool (*cancelled)();
+  const BookOrbitDeviceScan::Progress* progress = nullptr;
+  size_t progressDone = 0;
+  size_t progressTotal = 0;
   Item items[BATCH];
   size_t count = 0;
   FsFile state;  // STATE_TMP_PATH
@@ -441,6 +462,7 @@ bool checkBatch(Run& run) {
       run.matched++;
       file(run, item);
     }
+    report(run.progress, BookOrbitDeviceScan::Step::Filing, ++run.progressDone, run.progressTotal);
   }
   return !run.failed;
 }
@@ -496,7 +518,7 @@ bool rememberedMayResolve(Run& run, FsFile& file, const StateHeader& state) {
 
 }  // namespace
 
-void BookOrbitDeviceScan::run(bool (*cancelled)()) {
+BookOrbitDeviceScan::Summary BookOrbitDeviceScan::run(bool (*cancelled)(), const Progress* progress) {
   const unsigned long startMs = millis();
   StateHeader state;
   {
@@ -509,22 +531,23 @@ void BookOrbitDeviceScan::run(bool (*cancelled)()) {
                         work.read(&workHeader, sizeof(workHeader)) == static_cast<int>(sizeof(workHeader)) &&
                         memcmp(workHeader.magic, WORK_MAGIC, sizeof(WORK_MAGIC)) == 0;
   if (!haveWork && work) work.close();
-  if (!haveWork && state.count == 0) return;
+  if (!haveWork && state.count == 0) return {};
 
   // A dozen paths and titles: heap, not the loop task's 8 KB stack.
   auto run = makeUniqueNoThrow<Run>();
   if (!run) {
     LOG_ERR("BookOrbit", "Device scan out of memory");
     if (haveWork) work.close();
-    return;
+    return {};
   }
   run->cancelled = cancelled;
+  run->progress = progress;
   if (!haveWork) {
     // The usual case once the card is known: nothing new, so nothing is written.
     FsFile remembered;
     const bool worthIt = openState(remembered, state) && rememberedMayResolve(*run, remembered, state);
     if (remembered) remembered.close();
-    if (!worthIt) return;
+    if (!worthIt) return {};
   }
 
   StateHeader next = state;
@@ -536,11 +559,15 @@ void BookOrbitDeviceScan::run(bool (*cancelled)()) {
     LOG_ERR("BookOrbit", "Device scan cannot write %s", STATE_TMP_PATH);
     run->state.close();
     if (haveWork) work.close();
-    return;
+    return {};
   }
 
   // New books first: their answers carry the server's token, which tells whether the
   // remembered files are worth asking about again.
+  if (haveWork) {
+    run->progressTotal = workHeader.count;
+    report(progress, Step::Filing, 0, run->progressTotal);
+  }
   const bool workDone = haveWork && checkFile(*run, work, workHeader.count, true, true);
   if (haveWork) work.close();
   const bool reask =
@@ -549,6 +576,11 @@ void BookOrbitDeviceScan::run(bool (*cancelled)()) {
   if (state.count > 0) {
     FsFile remembered;
     if (openState(remembered, state)) {
+      if (reask) {
+        run->progressDone = 0;
+        run->progressTotal = state.count;
+        report(progress, Step::Filing, 0, run->progressTotal);
+      }
       rememberedDone = checkFile(*run, remembered, state.count, false, reask);
       remembered.close();
     }
@@ -575,4 +607,5 @@ void BookOrbitDeviceScan::run(bool (*cancelled)()) {
           static_cast<unsigned>(run->asked), static_cast<unsigned>(run->matched), static_cast<unsigned>(run->moved),
           static_cast<unsigned>(run->duplicates), static_cast<unsigned>(run->remembered),
           workDone || !haveWork ? "" : " incomplete", millis() - startMs);
+  return Summary{run->matched, run->moved, run->duplicates};
 }

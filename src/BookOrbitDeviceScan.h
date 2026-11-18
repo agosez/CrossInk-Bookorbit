@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+
 /**
  * Recognises BookOrbit books that reached the SD card by other means than this catalog
  * (copied over USB, sent by another app, downloaded by another reader), files them where
@@ -27,12 +30,34 @@
  */
 namespace BookOrbitDeviceScan {
 
+// What a pass is busy with, for a screen to show. Reported only when there is work: a card
+// with nothing new reports nothing.
+enum class Step : uint8_t {
+  ReadingCard,  // the Library index is rebuilt; `done` counts the books found so far
+  SortingCard,  // the Library index is written
+  Hashing,      // prepare(): `done` of the Library's `total` books gone through
+  Filing,       // run(): `done` of the `total` books found asked about and filed
+};
+
+// Called often (once per book): the receiver decides when to repaint.
+struct Progress {
+  void* context = nullptr;
+  void (*report)(void* context, Step step, size_t done, size_t total) = nullptr;
+};
+
+// What run() did to the card.
+struct Summary {
+  size_t recognised = 0;  // books the server identified, now in the download index
+  size_t moved = 0;       // of those, books moved to where a catalog download would be
+  size_t duplicates = 0;  // copies deleted because the book was already filed
+};
+
 // Offline half, before Wi-Fi: rebuilds the Library index when the card changed since it was
 // built, then hashes the books that arrived since the last pass into a work file for run().
-void prepare(bool (*cancelled)());
+void prepare(bool (*cancelled)(), const Progress* progress = nullptr);
 
 // Online half, with Wi-Fi up: identifies what prepare() found (and, when the server's
 // library changed, the files it did not recognise before), then files the recognised books.
-void run(bool (*cancelled)());
+Summary run(bool (*cancelled)(), const Progress* progress = nullptr);
 
 }  // namespace BookOrbitDeviceScan
