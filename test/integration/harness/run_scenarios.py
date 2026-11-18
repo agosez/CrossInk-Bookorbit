@@ -21,6 +21,7 @@ import hashlib
 import http.server
 import json
 import os
+import posixpath
 import random
 import re
 import shutil
@@ -34,6 +35,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 import zlib
 from pathlib import Path
 
@@ -440,8 +443,9 @@ class SimFs:
 
 def run_simulator(fs: SimFs, input_script: str, choice: str, timeout_s: int,
                   verbose: bool, wake_into_reader: bool = False,
-                  after_reboot_script: str | None = None) -> str:
+                  after_reboot_script: str | None = None, extra_env: dict[str, str] | None = None) -> str:
     env = os.environ.copy()
+    env.update(extra_env or {})
     env.setdefault("SDL_VIDEODRIVER", "dummy")
     env["CROSSPOINT_SIM_INPUT_SCRIPT"] = input_script
     if after_reboot_script is not None:
@@ -504,6 +508,8 @@ FRESH_BOOK = {
     "highlight_pull_backlog": 46,
     "highlight_delete_propagates_large": 47,
     "outdated_copy": 49,
+    "book_update": 48,
+    "book_update_offer": 51,
 }
 
 # Bookmarks dedupe server-side on their converted location (paragraph precision), so a
@@ -2675,6 +2681,145 @@ def scenario_web_move_keeps_book_state(verbose: bool) -> None:
             "the WebDAV rename to a non-book name did not happen"
 
 
+def epub_spine_entries(path: Path) -> list[str]:
+    """The ZIP entry names an EPUB's spine reads, in reading order."""
+    with zipfile.ZipFile(path) as z:
+        container = ET.fromstring(z.read("META-INF/container.xml"))
+        opf_path = next(e.get("full-path") for e in container.iter() if e.tag.endswith("rootfile"))
+        opf = ET.fromstring(z.read(opf_path))
+    base = posixpath.dirname(opf_path)
+    manifest = {e.get("id"): e.get("href") for e in opf.iter() if e.tag.endswith("}item")}
+    return [posixpath.normpath(posixpath.join(base, manifest[e.get("idref")]))
+            for e in opf.iter() if e.tag.endswith("}itemref")]
+
+
+def write_older_copy(source: Path, dest: Path, changed_entry: str) -> None:
+    """Another copy of the same book, as an older file of it: one chapter's markup differs
+    (its CRC-32 with it), every other entry is byte-identical. The mimetype stays first and
+    stored, as the EPUB container requires."""
+    with zipfile.ZipFile(source) as src, zipfile.ZipFile(dest, "w") as out:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename == changed_entry:
+                data = data.replace(b"</body>", b"<p>A paragraph only the older copy had.</p></body>", 1)
+            out.writestr(info, data, compress_type=info.compress_type)
+
+
+def scenario_book_update_carries_state(verbose: bool) -> None:
+    """A catalog re-download replaced a book's copy by the library's, and the device was reset
+    before the copy it replaced was carried across (it still waits at <book>.old). The next sync
+    of the book finishes it first, here one started from Home, which loads the book without the
+    reader: the highlights and BookOrbit state move from the old copy's hash to the new one's,
+    the highlight in the chapter the copies disagree on is orphaned (not sent), the one in an
+    unchanged chapter is sent, and the old copy is gone. (book_update_offer covers the reader.)"""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["book_update"]]
+    source = INTEGRATION / "library" / book["file"]
+    spine = epub_spine_entries(source)
+    assert len(spine) >= 3, f"{book['file']} has too few chapters for this scenario"
+    now = int(time.time())
+    kept_text = f"Kept highlight {now}"
+    orphan_text = f"Orphaned highlight {now}"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        old_copy = fs.fs / (sim_path.lstrip("/") + ".old")
+        write_older_copy(source, old_copy, spine[2])
+        old_hash = partial_md5(old_copy)
+        assert old_hash != book["hash"], "the older copy did not get a hash of its own"
+
+        clippings = []
+        records = []
+        for timestamp, spine_index, text in ((4646, 1, kept_text), (4747, 2, orphan_text)):
+            clippings.append({"spine": spine_index, "paragraph": 1, "timestamp": timestamp,
+                              "text": text, "chapter": "Chapter", "wordCount": len(text.split())})
+            fragment = f"/body/DocFragment[{spine_index + 1}]/body/p[1]/text()"
+            records.append({"timestamp": timestamp, "identityEpoch": now, "spine": spine_index,
+                            "paragraph": 1, "pos0": f"{fragment}.0", "pos1": f"{fragment}.{len(text)}"})
+        write_clipping_store(fs.clippings_store(old_hash), book.get("title", ""), book.get("author", ""),
+                             sim_path, clippings)
+        # Watermark past both: what v1.6.1+bookorbit.7 left after an exchange it misread.
+        write_boa_store(fs.state_dir(old_hash) / ANNOTATION_STORE, now + 60, records)
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload",
+                               timeout_s=120, verbose=verbose)
+        assert "sync scenario finished" in output, "sync never reached its end marker"
+
+        assert not old_copy.exists(), "the replaced copy was left on the card"
+        assert not fs.clippings_store(old_hash).exists(), "the highlights stayed with the old copy"
+        moved = {c["text"] for c in read_clipping_store(fs.clippings_store(book["hash"]))}
+        assert {kept_text, orphan_text} <= moved, f"highlights missing from the new copy: {moved}"
+        state = fs.state_dir(book["hash"])
+        assert not (state / "replaced_chapters.bin").exists(), "the chapter comparison never ran"
+        orphans = (state / "orphaned_clippings.bin").read_bytes()
+        assert orphans[:4] == b"OCL1" and struct.unpack_from("<H", orphans, 4)[0] == 1, \
+            f"expected exactly one orphaned highlight: {orphans!r}"
+        assert struct.unpack_from("<IHH", orphans, 6) == (4747, 2, 1), "the wrong highlight was orphaned"
+        watermark, _ = read_boa_store(state / ANNOTATION_STORE)
+        assert now <= watermark < now + 60, f"the watermark was not rewound and advanced: {watermark}"
+
+    texts = {a["text"] for a in annotation_adds(verify_device(manifest, "bkupd"), book["hash"])}
+    assert kept_text in texts, f"the highlight in an unchanged chapter was not sent: {texts}"
+    assert orphan_text not in texts, "the orphaned highlight was sent"
+
+
+def scenario_book_update_offer(verbose: bool) -> None:
+    """The whole update, as a user takes it. BookOrbit rewrites a book's file; the device,
+    holding the library's original copy (copied to the card: the download index does not know
+    it), syncs a highlight. The sync takes the positionIncompatible reply, finds the book through
+    the match check, and offers the update at its end; the scripted run accepts it. The catalog
+    downloads the library's file over the copy and reopens the book, whose highlight followed it
+    to the new copy's hash. A second sync then sends that highlight."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["book_update_offer"]]
+    rewrite_book_file(manifest, book)
+    probe = verify_device(manifest, "updoffer")
+    reply = probe.exchange_annotations(book["hash"], keys=[], keys_complete=False, changes=[])
+    if book["hash"] not in reply.get("positionIncompatible", []):
+        print("  (skipped: this server does not answer positionIncompatible)")
+        return
+    now = int(time.time())
+    text = f"Highlight carried by the update {now}"
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        write_clipping_store(fs.clippings_store(book["hash"]), book.get("title", ""),
+                             book.get("author", ""), sim_path,
+                             [{"spine": 1, "paragraph": 2, "timestamp": 5151,
+                               "text": text, "chapter": "Chapter", "wordCount": len(text.split())}])
+        write_boa_store(fs.state_dir(book["hash"]) / ANNOTATION_STORE, 0, [{
+            "timestamp": 5151, "identityEpoch": now, "spine": 1, "paragraph": 2,
+            "pos0": "/body/DocFragment[2]/body/p[2]/text().0",
+            "pos1": f"/body/DocFragment[2]/body/p[2]/text().{len(text)}",
+        }])
+
+        # Sync, offer, catalog download and the reader reopening the book: nothing ends that
+        # chain, so the run stops on its timeout and the card tells how far it went.
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload", timeout_s=75,
+                               verbose=verbose, extra_env={"CROSSINK_SIM_BOOKORBIT_UPDATE": "1"})
+        assert "Restarting into the catalog to update" in output, "the sync did not offer the update"
+        assert "Downloading file" in output, "the catalog did not download the library's copy"
+        book_file = fs.fs / sim_path.lstrip("/")
+        new_hash = partial_md5(book_file)
+        assert new_hash != book["hash"], "the copy on the card was not replaced"
+        assert not Path(str(book_file) + ".old").exists(), "the replaced copy was left on the card"
+        assert not fs.clippings_store(book["hash"]).exists(), "the highlight stayed with the old copy"
+        moved = {c["text"] for c in read_clipping_store(fs.clippings_store(new_hash))}
+        assert text in moved, f"the highlight did not follow the update: {moved}"
+        assert not (fs.state_dir(new_hash) / "replaced_chapters.bin").exists(), \
+            "the reopened book never compared its chapters"
+        assert not (fs.state_dir(new_hash) / "orphaned_clippings.bin").exists(), \
+            "a metadata write-back changed no chapter, yet a highlight was orphaned"
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="upload", timeout_s=90,
+                               verbose=verbose)
+        assert "sync scenario finished" in output, "the second sync never reached its end marker"
+        assert "incompatible=1" not in output, "the updated copy is still outdated for the server"
+
+    texts = {a["text"] for a in annotation_adds(verify_device(manifest, "updoffer2"), new_hash)}
+    assert text in texts, f"the highlight was not sent after the update: {texts}"
+
+
 SCENARIOS = {
     "catalog_collections_browse": scenario_catalog_collections_browse,
     "catalog_empty_listing_back": scenario_catalog_empty_listing_back,
@@ -2719,6 +2864,8 @@ SCENARIOS = {
     "bookmark_push": scenario_bookmark_push,
     "outdated_copy_holds_changes": scenario_outdated_copy_holds_changes,
     "web_move_keeps_book_state": scenario_web_move_keeps_book_state,
+    "book_update_carries_state": scenario_book_update_carries_state,
+    "book_update_offer": scenario_book_update_offer,
 }
 
 
