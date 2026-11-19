@@ -16,10 +16,11 @@ Based on CrossInk v1.6.1.
 
 ### Changed
 
-- The BookOrbit catalog now remembers where up to 512 downloaded books landed (2048 on the X4 Pro and reTerminal Sticky), up from 128. Beyond 128 downloads, older books filed in the server's series folders used to lose their on-device dot and drop out of "On device"; they now keep both, and the BookOrbit count on the Library page's card tile (BookOrbit theme) no longer stops at 128. The existing record is converted automatically the first time it is read. The "On device" list itself still shows at most 200 books.
+- The BookOrbit catalog now remembers where up to 512 downloaded books landed (2048 on the X4 Pro and reTerminal Sticky), up from 128. Beyond 128 downloads, older books filed in the server's series folders used to lose their on-device dot and drop out of "On device"; they now keep both, and the BookOrbit count on the Library page's card tile (BookOrbit theme) no longer stops at 128. The existing record is converted automatically the first time it is read.
 
 ### Fixed
 
+- The BookOrbit catalog's "On device" list now shows every book instead of stopping at 200, and its count on the catalog's first page no longer stops there either. The list is sorted on the SD card and read a page at a time, as the server's listings are, so a long one no longer takes the reader's memory (based on a contribution by MasonNight).
 - A BookOrbit sync no longer counts highlights and bookmarks as sent for a book whose copy on the reader differs from the library's file. BookOrbit rewrites a book's file when its details are edited, and from then on (BookOrbit 3.6.0 and later) it takes no highlights or bookmarks from the older copy. v1.6.1+bookorbit.7 counted them as sent anyway, so they never went again; v1.6.1+bookorbit.8 kept them on the reader without saying why. The sync now keeps them for later and says "Your library has a newer copy".
 - Downloading a book again from the BookOrbit catalog, over a copy that differs from the new one, no longer leaves its highlights, bookmarks and BookOrbit sync state behind with the old copy.
 - Moving a book with the file transfer page or over WebDAV now keeps its reading position, reading stats, reader settings and place in recent books, as renaming it already did.
