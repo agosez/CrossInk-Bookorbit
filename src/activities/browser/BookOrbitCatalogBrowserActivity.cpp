@@ -403,7 +403,8 @@ void BookOrbitCatalogBrowserActivity::onWifiSelectionComplete(const bool connect
     // A sync sent this one to replace the open book's outdated copy: back to that book after,
     // whatever the outcome.
     reopenPath = link.replacePath;
-    downloadBook(link.bookId, link.title, link.replacePath);
+    // A shelf book is selected as a catalog row is: a copy already at its place opens.
+    downloadBook(link.bookId, link.title, link.replacePath, /*openExisting=*/link.replacePath.empty());
     return;
   }
   if (!loadRoot(/*allowNetwork=*/false)) {
@@ -1211,7 +1212,7 @@ void BookOrbitCatalogBrowserActivity::showDownloadScreen(const std::string& titl
 }
 
 void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const std::string& title,
-                                                   const std::string& replacePath) {
+                                                   const std::string& replacePath, const bool openExisting) {
   showDownloadScreen(title);
 
   BookOrbitBookDetail detail;
@@ -1237,6 +1238,22 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
   // so a failure or a cancel never costs the user the copy they had, and a new book
   // never sits half-written under its own name.
   const std::string finalPath = replacePath.empty() ? catalogBookPath(detail, epubFile) : replacePath;
+  // A book another app sent or a copy over USB put at the very path the server's naming
+  // template gives it is not in the download index, so its row was not marked. The details
+  // name that path and the library file's size: a file there of that size is this book. It
+  // opens instead of downloading again (on the X3/X4, a restart too), and the index records
+  // it for the next listings. A different size downloads, and the update replaces it.
+  if (openExisting && epubFile.sizeBytes > 0) {
+    FsFile existing = Storage.open(finalPath.c_str());  // quiet when there is none, the usual case
+    const bool same = existing && !existing.isDirectory() && existing.fileSize64() == epubFile.sizeBytes;
+    existing.close();
+    if (same) {
+      LOG_INF("BookOrbit", "Book %lld is already at %s, opening it", static_cast<long long>(bookId), finalPath.c_str());
+      BookOrbitDownloadIndex::record(bookId, finalPath);
+      openLocalBook(finalPath);
+      return;
+    }
+  }
   // Create the download folder and, when the server's naming template nests the book
   // ("Sprawl/<book>.epub"), every folder it asks for. mkdir's pFlag creates the
   // missing parents in one call, so this covers both at once.
@@ -1555,7 +1572,7 @@ void BookOrbitCatalogBrowserActivity::activateSelected() {
       if (entry.onDevice) {
         openLocalBook(entry.path);
       } else {
-        downloadBook(entry.bookId, entry.title);
+        downloadBook(entry.bookId, entry.title, "", /*openExisting=*/true);
       }
       break;
   }

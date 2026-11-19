@@ -1879,7 +1879,7 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
         # A configured download folder: the template's folders hang off it, and
         # neither it nor they exist on this card yet.
         fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
-        script = ";".join([
+        script = first_book_script = ";".join([
             "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
             "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> All books (8th row,
             "12050:DOWN", "12400:DOWN", "12750:DOWN",     #   after the facet sections,
@@ -1935,6 +1935,22 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
         output = run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
         assert "Local scan: kind=on-device count=1" in output, \
             "'On device' did not find the downloaded book inside the template's folders"
+
+        # Third run: the same file, as another app or a copy over USB would leave it at the
+        # template's path, unknown to the index (here a full one of other books), so its row
+        # is not marked. Confirm finds it through the book's details and opens it rather than
+        # downloading it again, and the index records it after the books it already held.
+        book_path = f"/Downloads/{device_path}"
+        others = [(-1 - i, f"/Downloads/Older/Book {i}.epub", 10) for i in range(135)]
+        write_download_index(fs.fs / DOWNLOAD_INDEX, others, version=2)
+        output = run_simulator(fs, input_script=first_book_script, choice="apply", timeout_s=90,
+                               verbose=verbose, after_reboot_script="6000:QUIT")
+        assert "Restarting into the download of book" not in output, "the copy in place downloaded again"
+        assert f"is already at {book_path}, opening it" in output, "Confirm did not find the copy in place"
+        assert read_download_index(fs.fs / DOWNLOAD_INDEX) == others + [
+            (first["id"], book_path, expected.stat().st_size)], "the index did not record the copy after the others"
+        state = json.loads((fs.crosspoint / "state.json").read_text())
+        assert state.get("openEpubPath") == book_path, "Confirm did not open the copy in place"
 
 
 def scenario_catalog_large_local_list(verbose: bool) -> None:

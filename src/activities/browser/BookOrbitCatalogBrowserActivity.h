@@ -285,7 +285,10 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   void performSearch(const std::string& query);
   // replacePath: re-download over that existing on-device file instead of the
   // server's path; the old copy is only swapped out once the new one is complete.
-  void downloadBook(int64_t bookId, const std::string& title, const std::string& replacePath = "");
+  // openExisting: a file already at the server's path with the size of the library's file
+  // is this book, put on the card by other means; it is opened instead (selecting a book).
+  void downloadBook(int64_t bookId, const std::string& title, const std::string& replacePath = "",
+                    bool openExisting = false);
   void showDownloadScreen(const std::string& title);
   // Saves the download and the listing, then restarts into the BOOKORBIT_DOWNLOAD
   // boot. False when the download runs in place instead: on S3 boards, and for a

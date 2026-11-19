@@ -17,6 +17,7 @@ Based on CrossInk v1.6.1.
 ### Changed
 
 - The BookOrbit catalog now remembers where up to 512 downloaded books landed (2048 on the X4 Pro and reTerminal Sticky), up from 128. Beyond 128 downloads, older books filed in the server's series folders used to lose their on-device dot and drop out of "On device"; they now keep both, and the BookOrbit count on the Library page's card tile (BookOrbit theme) no longer stops at 128. The existing record is converted automatically the first time it is read.
+- Selecting a book in the BookOrbit catalog, or on a BookOrbit theme shelf, that is already on the card where your server's file naming template puts it, sent there by another app or copied over USB, now opens that copy instead of downloading it again, and the catalog marks it as on the device from then on. The file there must have the size of the library's file; a different one is downloaded over as before (based on a contribution by MasonNight).
 
 ### Fixed
 
