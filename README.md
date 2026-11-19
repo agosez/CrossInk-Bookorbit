@@ -228,7 +228,7 @@ When the Library's **List View** is **Expanded**, a book list is split into sect
 
 **Want to Read** lists the books you most recently marked as want to read in BookOrbit: the shelf BookOrbit's own KOReader plugin shows, a dozen books at most, in the order you marked them. It appears after the server's sections when your server offers that shelf. BookOrbit's catalog cannot filter a whole list by that status, so it is a shelf rather than a filter choice.
 
-In **On device** and **In progress**, Confirm opens the book in the reader instead of downloading it.
+In **On device** and **In progress**, Confirm opens the book in the reader instead of downloading it. **On device** is sorted by file name on the SD card and read a page at a time, so it lists every book, however many the card holds.
 
 On the X3 and X4, the reader restarts briefly before it opens the catalog and before each download, so the secure connection gets the memory it needs; leaving the catalog restarts it once more. A long listing keeps only the pages around the one on screen in memory and reloads the others from the SD card as you scroll back.
 

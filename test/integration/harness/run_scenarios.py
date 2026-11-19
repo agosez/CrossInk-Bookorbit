@@ -1937,6 +1937,53 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
             "'On device' did not find the downloaded book inside the template's folders"
 
 
+def scenario_catalog_large_local_list(verbose: bool) -> None:
+    """"On device" lists a card past the 200 rows it used to stop at: 135 books in a series
+    folder known only through the download index, one indexed book in the download folder
+    itself (listed once), and the rest copied flat into the download folder, /Read and the
+    SD root, 210 in all. The root counts them; the list opens on its first page, Up from the
+    top wraps to the last row by opening the last page, Down wraps back to the first, and the
+    row window never holds more than three pages. Confirm on the last row opens Book 210,
+    which only a natural sort puts there, after Book 21; its list files are gone with it."""
+    manifest, library = load_seed()
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
+        indexed = []
+        for number in range(210, 0, -1):
+            folder = "Downloads/Series" if number <= 135 else ("Read", "Downloads", "")[number % 3]
+            book = fs.fs / folder / f"Book {number}.epub"
+            book.parent.mkdir(parents=True, exist_ok=True)
+            if number == 210:  # the one the run opens
+                shutil.copyfile(INTEGRATION / "library" / library[0]["file"], book)
+            else:
+                book.write_bytes(b"EPUB placeholder")
+            if number <= 136:
+                indexed.append((number, "/" + book.relative_to(fs.fs).as_posix(), book.stat().st_size))
+        write_download_index(fs.fs / DOWNLOAD_INDEX, indexed, version=2)
+
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",             # home menu -> BookOrbit catalog
+            "11500:UP", "11900:UP", "12300:UP", "12700:CONFIRM",  # root, from its first row -> On device
+            "15500:UP",                                           # wrap to the last row
+            "16000:DOWN",                                         # wrap back to the first
+            "16500:UP", "17000:CONFIRM",                          # last row -> open it
+            "24000:QUIT",                                         # only reached if it did not open
+        ])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose,
+                               after_reboot_script="6000:QUIT")
+        assert "Local scan: kind=on-device count=210" in output, "the root did not count all 210 books once"
+        pages = [(int(page), int(rows)) for page, rows in
+                 re.findall(r"On device page (\d+): (\d+) rows in memory", output)]
+        # Page 10 may come in front of the last page, which holds less than a screen.
+        assert [page for page, _ in pages if page != 10] == [1, 11, 1, 11], f"unexpected page loads: {pages}"
+        assert max(rows for _, rows in pages) <= 60, f"the row window grew past three pages: {pages}"
+        state = json.loads((fs.crosspoint / "state.json").read_text())
+        assert state.get("openEpubPath") == "/Read/Book 210.epub", \
+            f"the last row is not Book 210: {state.get('openEpubPath')}"
+        leftovers = sorted(p.name for p in fs.crosspoint.glob("bookorbit_local.*"))
+        assert not leftovers, f"the list's files outlived it: {leftovers}"
+
+
 def scenario_catalog_book_actions(verbose: bool) -> None:
     """A catalog book's action menu, opened by holding Confirm, and what Confirm does
     once the book is on the device. Four runs on one card, each on the first book of
@@ -2837,6 +2884,7 @@ SCENARIOS = {
     "catalog_deep_listing": scenario_catalog_deep_listing,
     "catalog_download_index_migration": scenario_catalog_download_index_migration,
     "catalog_download_index_beyond_legacy_cap": scenario_catalog_download_index_beyond_legacy_cap,
+    "catalog_large_local_list": scenario_catalog_large_local_list,
     "sleep_sync_device_scan": scenario_sleep_sync_device_scan,
     "home_refresh_device_scan": scenario_home_refresh_device_scan,
     "catalog_hides_non_epub": scenario_catalog_hides_non_epub,
