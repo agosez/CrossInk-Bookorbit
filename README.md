@@ -217,6 +217,8 @@ In a server book list, **Confirm** downloads the book into the download folder c
 
 The file is named by **your server's KOReader file naming template** — BookOrbit's _Settings → Koreader → File Naming_, the same template its own KOReader plugin follows — so a book can land inside a series folder, for instance. BookOrbit resolves the template and tells the device where the file belongs; a per-device override set on the server is honoured too, and any folder it asks for is created under your download folder. If your account has no template, BookOrbit's default applies, which files books under `Series/` and `Standalone/`. Books downloaded before this behaviur existed are left where they are.
 
+A book that reached the card some other way, sent by another app or copied over USB, has no dot even when it sits exactly where the template files it: only a book's details say where that is. Confirm finds it there, and when the file has the size of your library's, opens it instead of downloading it again and marks it from then on.
+
 A server book list (a root section, the books of an author, series, collection, library or SmartScope, or search results) can be sorted and filtered, as the Library is sorted:
 
 - **Sort** — date added, title, author (by last name), recently read or series. The first row of the picker flips the direction (A-Z or Z-A); a newly picked order starts in its natural direction, newest first for dates.
