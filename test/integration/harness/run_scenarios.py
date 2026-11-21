@@ -463,10 +463,12 @@ def run_simulator(fs: SimFs, input_script: str, choice: str, timeout_s: int,
     # Stream to a file: the output survives a timeout kill, and a forked curl
     # inheriting a PIPE cannot wedge the harness on read.
     log_path = fs.root / "simulator.log"
+    signal_number = 0
     with log_path.open("w") as log:
         try:
-            subprocess.run([str(PROGRAM)], cwd=fs.root, env=env,
-                           stdout=log, stderr=subprocess.STDOUT, timeout=timeout_s)
+            result = subprocess.run([str(PROGRAM)], cwd=fs.root, env=env,
+                                    stdout=log, stderr=subprocess.STDOUT, timeout=timeout_s)
+            signal_number = -result.returncode if result.returncode < 0 else 0
         except subprocess.TimeoutExpired:
             # Scenarios end via a scripted QUIT; a timeout is survivable as long
             # as the sync had time to finish — the assertions decide.
@@ -474,6 +476,11 @@ def run_simulator(fs: SimFs, input_script: str, choice: str, timeout_s: int,
     output = log_path.read_text(errors="replace")
     if verbose:
         print(output)
+    # A signal leaves no text behind ("Segmentation fault" is the shell's), and the
+    # scenario's own assertions would then blame whatever the run did not reach.
+    if signal_number:
+        last = output.rstrip().splitlines()[-1:] or ["(no output)"]
+        raise AssertionError(f"the simulator died on signal {signal_number} after: {last[0][:160]}")
     for pattern in CRASH_PATTERNS:
         if pattern in output:
             raise AssertionError(f"crash pattern in simulator output: {pattern}")
