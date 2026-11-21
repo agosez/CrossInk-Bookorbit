@@ -45,7 +45,7 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
     std::string path;      // SD path: LOCAL_BOOK entries, and BOOK entries already on the device
     int64_t bookId = 0;
     bool onDevice = false;  // BOOK entries: a matching file already exists on the device (at `path`)
-    uint16_t page = 0;      // server page the row came from; 0 for the root and the on-device lists
+    uint16_t page = 0;      // listing page the row came from; 0 for the root and In progress
     // Length of `title` before its " (count)" badge, 0 when it has none. A listing opened
     // from the row is titled without it: its header counts what the listing holds.
     uint16_t badgeAt = 0;
@@ -98,8 +98,8 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   PendingDownload pendingDownload;
   ButtonNavigator buttonNavigator;
   BrowserState state = BrowserState::LOADING;
-  // The rows in memory: a whole root or on-device list, or a window of a few
-  // consecutive server pages of a book or facet listing. Every scroll position
+  // The rows in memory: a whole root or In progress list, or a window of a few
+  // consecutive pages of a book or facet listing, or of the On device list. Every scroll position
   // (selectorIndex, topIndex) counts rows from the start of the listing, so a page
   // dropped from the window changes no index; entries[0] is row windowStart.
   std::vector<Entry> entries;
@@ -138,6 +138,9 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   // The book list is an on-device one (On device, In progress): no server query behind
   // it, so nothing to sort or filter.
   bool listIsLocal = false;
+  // The book list is On device, paged from the files BookOrbitLocalBooks keeps on the card
+  // for it, which go when the listing does.
+  bool onDeviceListing = false;
   // Set while the listing is freed for a download's heap headroom, cleared once a
   // listing loads again. Distinguishes "rebuild the list Back should return to"
   // from a listing that genuinely loaded empty, where Back must navigate up
@@ -152,9 +155,10 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   // The facet row a book list was opened from, which Back returns to.
   int facetSelectorIndex = 0;
   int facetTopIndex = 0;
-  // Book counts of the on-device root entries, as last counted for their badges: what
-  // opening one reserves rows for.
-  size_t localOnDeviceCount = 0;
+  // Book counts of the on-device root entries, for their badges. On device is counted once
+  // a session (-1 until then, and after a download or deletion changed it); In progress at
+  // each root, and opening it reserves that many rows.
+  int localOnDeviceCount = -1;
   size_t localInProgressCount = 0;
 
   freeink::ui::GfxRendererTarget uiTarget;  // must precede `app`: the app holds a reference to it
@@ -238,7 +242,10 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   bool loadRoot(bool allowNetwork = true);
   // By value: callers pass a row's own section id, and the listing it opens replaces that row.
   void loadLocalBooks(std::string kind);
-  size_t collectLocalBooks(const std::string& kind, std::vector<Entry>* sink);
+  size_t collectInProgressBooks(std::vector<Entry>* sink);
+  void loadOnDeviceBooks();
+  // A page of the On device list, joining the window as a server page would (see PageLoad).
+  bool loadOnDevicePage(int page, PageLoad load);
   bool loadFacetEntries(const std::string& sectionId, const std::string& title, int page,
                         PageLoad load = PageLoad::Open, bool allowNetwork = true);
   bool loadBooks(const BookOrbitBookQuery& query, const std::string& title, int page, bool fromFacet,
@@ -250,7 +257,7 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   Entry* entryAt(int row);
   bool hasMorePages() const;
   // Empties the rows for a new listing that will hold about `rows`, giving back a
-  // larger block a previous on-device listing left behind.
+  // larger block a previous In progress listing left behind.
   void startListing(size_t rows);
   // Room for `count` blank rows of server page `page`; returns the index of the first.
   size_t placePageRows(PageLoad load, size_t count, uint16_t page);
@@ -278,7 +285,10 @@ class BookOrbitCatalogBrowserActivity final : public Activity {
   void performSearch(const std::string& query);
   // replacePath: re-download over that existing on-device file instead of the
   // server's path; the old copy is only swapped out once the new one is complete.
-  void downloadBook(int64_t bookId, const std::string& title, const std::string& replacePath = "");
+  // openExisting: a file already at the server's path with the size of the library's file
+  // is this book, put on the card by other means; it is opened instead (selecting a book).
+  void downloadBook(int64_t bookId, const std::string& title, const std::string& replacePath = "",
+                    bool openExisting = false);
   void showDownloadScreen(const std::string& title);
   // Saves the download and the listing, then restarts into the BOOKORBIT_DOWNLOAD
   // boot. False when the download runs in place instead: on S3 boards, and for a

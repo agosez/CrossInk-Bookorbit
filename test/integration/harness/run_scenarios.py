@@ -468,10 +468,12 @@ def run_simulator(fs: SimFs, input_script: str, choice: str, timeout_s: int,
     # Stream to a file: the output survives a timeout kill, and a forked curl
     # inheriting a PIPE cannot wedge the harness on read.
     log_path = fs.root / "simulator.log"
+    signal_number = 0
     with log_path.open("w") as log:
         try:
-            subprocess.run([str(PROGRAM)], cwd=fs.root, env=env,
-                           stdout=log, stderr=subprocess.STDOUT, timeout=timeout_s)
+            result = subprocess.run([str(PROGRAM)], cwd=fs.root, env=env,
+                                    stdout=log, stderr=subprocess.STDOUT, timeout=timeout_s)
+            signal_number = -result.returncode if result.returncode < 0 else 0
         except subprocess.TimeoutExpired:
             # Scenarios end via a scripted QUIT; a timeout is survivable as long
             # as the sync had time to finish — the assertions decide.
@@ -479,6 +481,11 @@ def run_simulator(fs: SimFs, input_script: str, choice: str, timeout_s: int,
     output = log_path.read_text(errors="replace")
     if verbose:
         print(output)
+    # A signal leaves no text behind ("Segmentation fault" is the shell's), and the
+    # scenario's own assertions would then blame whatever the run did not reach.
+    if signal_number:
+        last = output.rstrip().splitlines()[-1:] or ["(no output)"]
+        raise AssertionError(f"the simulator died on signal {signal_number} after: {last[0][:160]}")
     for pattern in CRASH_PATTERNS:
         if pattern in output:
             raise AssertionError(f"crash pattern in simulator output: {pattern}")
@@ -1877,7 +1884,7 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
         # A configured download folder: the template's folders hang off it, and
         # neither it nor they exist on this card yet.
         fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
-        script = ";".join([
+        script = first_book_script = ";".join([
             "6000:DOWN", "6500:DOWN", "7000:CONFIRM",     # home menu -> BookOrbit catalog
             "11000:DOWN", "11350:DOWN", "11700:DOWN",     # root -> All books (8th row,
             "12050:DOWN", "12400:DOWN", "12750:DOWN",     #   after the facet sections,
@@ -1933,6 +1940,69 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
         output = run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose)
         assert "Local scan: kind=on-device count=1" in output, \
             "'On device' did not find the downloaded book inside the template's folders"
+
+        # Third run: the same file, as another app or a copy over USB would leave it at the
+        # template's path, unknown to the index (here a full one of other books), so its row
+        # is not marked. Confirm finds it through the book's details and opens it rather than
+        # downloading it again, and the index records it after the books it already held.
+        book_path = f"/Downloads/{device_path}"
+        others = [(-1 - i, f"/Downloads/Older/Book {i}.epub", 10) for i in range(135)]
+        write_download_index(fs.fs / DOWNLOAD_INDEX, others, version=2)
+        output = run_simulator(fs, input_script=first_book_script, choice="apply", timeout_s=90,
+                               verbose=verbose, after_reboot_script="6000:QUIT")
+        assert "Restarting into the download of book" not in output, "the copy in place downloaded again"
+        assert f"is already at {book_path}, opening it" in output, "Confirm did not find the copy in place"
+        assert read_download_index(fs.fs / DOWNLOAD_INDEX) == others + [
+            (first["id"], book_path, expected.stat().st_size)], "the index did not record the copy after the others"
+        state = json.loads((fs.crosspoint / "state.json").read_text())
+        assert state.get("openEpubPath") == book_path, "Confirm did not open the copy in place"
+
+
+def scenario_catalog_large_local_list(verbose: bool) -> None:
+    """"On device" lists a card past the 200 rows it used to stop at: 135 books in a series
+    folder known only through the download index, one indexed book in the download folder
+    itself (listed once), and the rest copied flat into the download folder, /Read and the
+    SD root, 210 in all. The root counts them; the list opens on its first page, Up from the
+    top wraps to the last row by opening the last page, Down wraps back to the first, and the
+    row window never holds more than three pages. Confirm on the last row opens Book 210,
+    which only a natural sort puts there, after Book 21; its list files are gone with it."""
+    manifest, library = load_seed()
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")
+        indexed = []
+        for number in range(210, 0, -1):
+            folder = "Downloads/Series" if number <= 135 else ("Read", "Downloads", "")[number % 3]
+            book = fs.fs / folder / f"Book {number}.epub"
+            book.parent.mkdir(parents=True, exist_ok=True)
+            if number == 210:  # the one the run opens
+                shutil.copyfile(INTEGRATION / "library" / library[0]["file"], book)
+            else:
+                book.write_bytes(b"EPUB placeholder")
+            if number <= 136:
+                indexed.append((number, "/" + book.relative_to(fs.fs).as_posix(), book.stat().st_size))
+        write_download_index(fs.fs / DOWNLOAD_INDEX, indexed, version=2)
+
+        script = ";".join([
+            "6000:DOWN", "6500:DOWN", "7000:CONFIRM",             # home menu -> BookOrbit catalog
+            "11500:UP", "11900:UP", "12300:UP", "12700:CONFIRM",  # root, from its first row -> On device
+            "15500:UP",                                           # wrap to the last row
+            "16000:DOWN",                                         # wrap back to the first
+            "16500:UP", "17000:CONFIRM",                          # last row -> open it
+            "24000:QUIT",                                         # only reached if it did not open
+        ])
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=60, verbose=verbose,
+                               after_reboot_script="6000:QUIT")
+        assert "Local scan: kind=on-device count=210" in output, "the root did not count all 210 books once"
+        pages = [(int(page), int(rows)) for page, rows in
+                 re.findall(r"On device page (\d+): (\d+) rows in memory", output)]
+        # Page 10 may come in front of the last page, which holds less than a screen.
+        assert [page for page, _ in pages if page != 10] == [1, 11, 1, 11], f"unexpected page loads: {pages}"
+        assert max(rows for _, rows in pages) <= 60, f"the row window grew past three pages: {pages}"
+        state = json.loads((fs.crosspoint / "state.json").read_text())
+        assert state.get("openEpubPath") == "/Read/Book 210.epub", \
+            f"the last row is not Book 210: {state.get('openEpubPath')}"
+        leftovers = sorted(p.name for p in fs.crosspoint.glob("bookorbit_local.*"))
+        assert not leftovers, f"the list's files outlived it: {leftovers}"
 
 
 def scenario_catalog_book_actions(verbose: bool) -> None:
@@ -2835,6 +2905,7 @@ SCENARIOS = {
     "catalog_deep_listing": scenario_catalog_deep_listing,
     "catalog_download_index_migration": scenario_catalog_download_index_migration,
     "catalog_download_index_beyond_legacy_cap": scenario_catalog_download_index_beyond_legacy_cap,
+    "catalog_large_local_list": scenario_catalog_large_local_list,
     "sleep_sync_device_scan": scenario_sleep_sync_device_scan,
     "home_refresh_device_scan": scenario_home_refresh_device_scan,
     "catalog_hides_non_epub": scenario_catalog_hides_non_epub,
