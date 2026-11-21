@@ -1400,7 +1400,7 @@ void XtcReaderActivity::renderStatusBarOverlay(const StatusBarOverlayPosition po
 
 void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   // Pre-rendered XTCH shades need the image waveform, not the text-only AA mode.
-  const ReaderUtils::ReaderRefreshScope readerRefresh(renderer, true, false);
+  const ReaderUtils::ReaderRefreshScope readerRefresh(renderer, GfxRenderer::RefreshContent::Image);
   const uint16_t pageWidth = xtc->getPageWidth();
   const uint16_t pageHeight = xtc->getPageHeight();
   const uint8_t bitDepth = xtc->getBitDepth();
@@ -1445,7 +1445,9 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
       return;
     }
 
-    if (pagesUntilFullRefresh <= 1) {
+    if (renderer.combinesGrayscaleBase()) {
+      ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, ReaderUtils::PageRefresh::GrayscaleBase);
+    } else if (pagesUntilFullRefresh <= 1) {
       renderer.displayBuffer(pagesUntilFullRefresh < 0 ? manualScreenRefreshMode() : HalDisplay::HALF_REFRESH);
       renderer.preconditionGrayscale();
       pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();

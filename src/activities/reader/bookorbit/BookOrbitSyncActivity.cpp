@@ -887,8 +887,8 @@ void BookOrbitSyncActivity::renderResult(const Rect& screen, const ThemeMetrics&
   // sender's engine and is not comparable with the local card drawn beside it.
   const BookOrbitSyncScreens::ProgressCard remote{tr(STR_SYNC_REMOTE_TITLE), remoteProgress.device.c_str(),
                                                   remotePageStr, remoteChapter.c_str(), remoteLocalPercent};
-  const BookOrbitSyncScreens::ProgressCard local{tr(STR_STATS_THIS_DEVICE_SCREEN), nullptr, localPageStr, localChapter.c_str(),
-                                                 localProgress.percentage};
+  const BookOrbitSyncScreens::ProgressCard local{tr(STR_STATS_THIS_DEVICE_SCREEN), nullptr, localPageStr,
+                                                 localChapter.c_str(), localProgress.percentage};
   BookOrbitSyncScreens::drawResult(renderer, screen, metrics, top, remote, local, selectedOption,
                                    mappedInput.hasTouchHardware());
   drawHints(tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));

@@ -33,6 +33,8 @@ struct Envelope {
 // CROSSINK_SIM_ASSET_CATALOG_KEY (the smoke test signs its fixtures with a throwaway key).
 // Returns nullptr when it holds, else the reason, for the log.
 const char* verify(const char* text, size_t length, AssetCatalog::Kind kind, Envelope& out);
+// One of the envelope's hex digests as bytes; false unless it is 64 lowercase hex digits.
+bool decodeDigest(const char (&hex)[65], uint8_t (&out)[32]);
 const char* verifyWithKey(const char* text, size_t length, AssetCatalog::Kind kind,
                           const uint8_t (&publicKey)[PUBLIC_KEY_BYTES], Envelope& out);
 }  // namespace AssetCatalogSignature

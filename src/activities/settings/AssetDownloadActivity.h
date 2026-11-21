@@ -32,11 +32,10 @@ class AssetDownloadActivity final : public Activity {
   enum class Pending { None, Fetch, Download, Overwrite, Activate, Restart, Exit, Install };
   AssetCatalog::Kind kind_;
   uint8_t wantedIndex_;
-  std::unique_ptr<AssetCatalog::Catalog> catalog_;
+  AssetCatalog::Selection selection_;
   AssetDownloadService::Source source_;
   OptionPopup popup_;
   Pending pending_ = Pending::None;
-  int selected_ = 0;
   bool busy_ = false;
   bool catalogReady_ = false;
   bool restartRequired_ = false;
@@ -64,7 +63,9 @@ class AssetDownloadActivity final : public Activity {
   void confirmOverwrite();
   // Fetches "<catalog>.sig", checks it signs these catalog bytes, and records the snapshot
   // index digests it vouches for. Sets incompatible when the signature itself is refused.
-  bool verifySignature(const char* catalogRelative, const uint8_t (&digest)[32], bool& incompatible);
+  // Also copies the digests the envelope signs for the companion indexes into catalog.
+  bool verifySignature(const char* catalogRelative, const uint8_t (&digest)[32], AssetCatalog::Metadata& catalog,
+                       bool& incompatible);
   void fetch();
   void download();
   void activate();

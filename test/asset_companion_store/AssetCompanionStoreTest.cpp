@@ -10,11 +10,20 @@ using AssetDownloadService::Result;
 std::map<std::string, std::string> responses;
 std::function<void(const std::string&)> beforeDownload, afterDownload;
 int downloads = 0;
+std::map<std::string, int> requests;
+std::function<HttpDownloader::DownloadError(const std::string&)> injectedResult;
+std::function<bool(const std::string&)> truncateStream;
 bool cancel = false;
 HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& url, const std::string& dest,
                                                              ProgressCallback progress, bool*, const std::string&,
                                                              const std::string&, DownloadOptions options) {
   ++downloads;
+  ++requests[url];
+  if (injectedResult) {
+    const auto result = injectedResult(url);
+    if (result != OK) return result;
+  }
+  assert(options.httpReceiveBufferSize == 1024);
   assert(options.transport == Transport::ESP_HTTP && options.bufferSize == 1024 && options.maxBytes == 2097152);
   assert(options.maxRedirects == 2 && options.checkFreeSpace && options.stageAsPart && options.requireBackupCleanup);
   assert(options.allowUrl(url, options.urlContext));
@@ -34,7 +43,7 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   }
   if (options.validateWithContext && !options.validateWithContext(partial, options.validationContext)) {
     files.erase(partial);
-    return FILE_ERROR;
+    return HTTP_ERROR;
   }
   return DownloadFileSwap::publish(dest, true) ? OK : FILE_ERROR;
 }
@@ -43,6 +52,12 @@ HttpDownloader::DownloadError HttpDownloader::streamUrl(const std::string& url, 
                                                         const std::string&, DownloadOptions options,
                                                         HttpRequestDiagnostics*) {
   ++downloads;
+  ++requests[url];
+  if (injectedResult) {
+    const auto result = injectedResult(url);
+    if (result != OK) return result;
+  }
+  assert(options.httpReceiveBufferSize == 1024);
   assert(options.transport == Transport::ESP_HTTP && options.bufferSize == 1024 && options.maxBytes == 2097152);
   assert(options.maxRedirects == 2 && options.allowUrl(url, options.urlContext));
   if (beforeDownload) beforeDownload(url);
@@ -54,6 +69,7 @@ HttpDownloader::DownloadError HttpDownloader::streamUrl(const std::string& url, 
     const size_t count = std::min(size_t(1024), bytes.size() - at);
     if (!data(reinterpret_cast<const uint8_t*>(bytes.data()) + at, count)) return ABORTED;
     at += count;
+    if (truncateStream && truncateStream(url)) return HTTP_ERROR;
     if (progress) progress(at, bytes.size());
   }
   if (afterDownload) afterDownload(url);
@@ -92,6 +108,9 @@ void reset() {
   failRead = failWrite = failClose = failSync = failIteration = cancel = false;
   totalCapacity = 64 * 1024 * 1024;
   downloads = 0;
+  requests.clear();
+  injectedResult = {};
+  truncateStream = {};
   beforeDownload = {};
   afterDownload = {};
   catalog = {};
@@ -122,11 +141,14 @@ void fixture() {
 }
 // The catalog's signed envelope vouches for both indexes; by default it covers what is served.
 void signIndexes() {
-  const std::pair<char*, const char*> fields[] = {{catalog.noticesSha256, "notices.json"},
-                                                  {catalog.sourcesSha256, "sources.json"}};
+  const std::pair<uint8_t*, const char*> fields[] = {{catalog.noticesSha256, "notices.json"},
+                                                     {catalog.sourcesSha256, "sources.json"}};
   for (const auto& [field, name] : fields) {
     const auto served = responses.find(base + prefix + name);
-    std::strcpy(field, served == responses.end() ? "" : digest(served->second).c_str());
+    std::memset(field, 0, 32);
+    if (served != responses.end()) {
+      SHA256(reinterpret_cast<const unsigned char*>(served->second.data()), served->second.size(), field);
+    }
   }
 }
 Result run(bool sign = true) {
@@ -182,7 +204,8 @@ int main() {
     fixture();
     prior();
     if (unsigned_) {
-      catalog.noticesSha256[0] = catalog.sourcesSha256[0] = '\0';
+      std::memset(catalog.noticesSha256, 0, sizeof(catalog.noticesSha256));
+      std::memset(catalog.sourcesSha256, 0, sizeof(catalog.sourcesSha256));
     } else {
       signIndexes();
       responses[base + prefix + "sources.json"] =
@@ -396,6 +419,68 @@ int main() {
     }
   };
   assert(run() == Result::Invalid);
+  assertPrior();
+  // Retry only the failed companion, rehashing the replacement before commit.
+  reset();
+  fixture();
+  prior();
+  const auto archiveUrl = base + prefix + "source/archive.zip";
+  beforeDownload = [&](const auto& url) {
+    if (url == archiveUrl) responses[url] = requests[url] == 1 ? "corrupt" : "archive";
+  };
+  assert(run() == Result::Ok && requests[archiveUrl] == 2);
+  assert(requests[base + prefix + "source/LICENSE"] == 1);
+  assert(files.at(root() + "/source/archive.zip") == "archive");
+  // Persistent corruption exhausts exactly three file attempts, preserving old data.
+  reset();
+  fixture();
+  prior();
+  responses[archiveUrl] = "corrupt";
+  assert(run() == Result::Invalid && requests[archiveUrl] == 3);
+  assertPrior();
+  // Interrupted indexes restart without accumulating duplicate byte counts/references.
+  reset();
+  fixture();
+  const auto noticesUrl = base + prefix + "notices.json";
+  injectedResult = [&](const auto& url) {
+    return url == noticesUrl && requests[url] < 3 ? HttpDownloader::HTTP_ERROR : HttpDownloader::OK;
+  };
+  assert(run() == Result::Ok && requests[noticesUrl] == 3);
+  assert(files.at(root() + "/notices.json") == responses[noticesUrl]);
+  reset();
+  fixture();
+  // Fail after actually writing an index chunk, then restart from byte zero.
+  responses[noticesUrl] += std::string(2048, ' ');
+  truncateStream = [&](const auto& url) { return url == noticesUrl && requests[url] == 1; };
+  assert(run() == Result::Ok && requests[noticesUrl] == 2);
+  assert(files.at(root() + "/notices.json") == responses[noticesUrl]);
+  reset();
+  fixture();
+  prior();
+  truncateStream = [&](const auto& url) { return url == noticesUrl; };
+  assert(run() == Result::Network && requests[noticesUrl] == 3);
+  assertPrior();
+  // Terminal HTTP auth, local I/O, cancellation and disk space failures never retry.
+  for (auto error : {HttpDownloader::UNAUTHORIZED, HttpDownloader::FILE_ERROR, HttpDownloader::ABORTED,
+                     HttpDownloader::INSUFFICIENT_SPACE}) {
+    reset();
+    fixture();
+    prior();
+    injectedResult = [&](const auto& url) { return url == archiveUrl ? error : HttpDownloader::OK; };
+    assert(run() != Result::Ok && requests[archiveUrl] == 1);
+    assertPrior();
+  }
+  reset();
+  fixture();
+  prior();
+  injectedResult = [&](const auto& url) {
+    if (url == archiveUrl) {
+      cancel = true;
+      return HttpDownloader::HTTP_ERROR;
+    }
+    return HttpDownloader::OK;
+  };
+  assert(run() == Result::Cancelled && requests[archiveUrl] == 1);
   assertPrior();
   // 32 raw references and exact 8MiB duplicate-counted boundary, dedup to 16.
   reset();

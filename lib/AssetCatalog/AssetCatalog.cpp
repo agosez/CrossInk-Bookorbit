@@ -60,7 +60,8 @@ Parser::Parser(Catalog& catalog, const Options& options) : catalog_(catalog), op
   // Reset in place; avoid a large temporary on the constrained device stack.
   catalog_.count = 0;
   catalog_.revision[0] = catalog_.source[0] = catalog_.keyset[0] = '\0';
-  catalog_.noticesSha256[0] = catalog_.sourcesSha256[0] = '\0';
+  std::memset(catalog_.noticesSha256, 0, sizeof(catalog_.noticesSha256));
+  std::memset(catalog_.sourcesSha256, 0, sizeof(catalog_.sourcesSha256));
   catalog_.kind = options.expectedKind;
   catalog_.channel = options.expectedChannel;
   if (options_.expectedKind == Kind::Translation &&
@@ -431,7 +432,7 @@ bool Parser::endRoot() {
   state_ = State::Done;
   return true;
 }
-bool immutableAssetPath(const Catalog& catalog, const Entry& entry, char* output, size_t capacity) {
+bool immutableAssetPath(const Metadata& catalog, const Entry& entry, char* output, size_t capacity) {
   if (!output || !capacity) return false;
   const bool hyphenation = catalog.kind == Kind::Hyphenation;
   const int size =

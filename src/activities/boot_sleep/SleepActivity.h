@@ -26,8 +26,10 @@ class SleepActivity final : public Activity {
         sleepPopupOrientation(sleepPopupOrientation),
         pass(pass) {}
   void onEnter() override;
+  void showSleepPopup();
   // Whether this screen is independent of the outgoing activity's saves.
   bool rendersBeforeExit() const;
+  bool hasMonochromeFrame() const { return monochromeFrame; }
 
  private:
   void renderSleepScreen();
@@ -56,10 +58,12 @@ class SleepActivity final : public Activity {
   void renderLastScreenSleepScreen() const;
   void renderBlankSleepScreen() const;
   void renderOverlaySleepScreen(Bitmap* cover = nullptr) const;
+  mutable bool monochromeFrame = false;
   bool canSnapshotOverlayBackground = false;
-  bool overlayBackgroundBufferStored = false;
   // Redraw only: the recorded overlay background is already in the frame buffer.
   bool overlayBackgroundLoaded = false;
+  bool overlayBackgroundAvailable = false;
+  bool sleepPopupShown = false;
   std::string currentBookPath;
   bool fromTimeout = false;
   GfxRenderer::Orientation sleepPopupOrientation = GfxRenderer::Orientation::Portrait;

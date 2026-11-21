@@ -83,6 +83,10 @@ bool parseKey(const char* hex, uint8_t (&out)[PUBLIC_KEY_BYTES]) {
 }
 }  // namespace
 
+bool decodeDigest(const char (&hex)[65], uint8_t (&out)[32]) {
+  return std::strlen(hex) == 64 && decodeHex(hex, 64, out, sizeof(out));
+}
+
 const char* verifyWithKey(const char* text, const size_t length, const AssetCatalog::Kind kind,
                           const uint8_t (&publicKey)[PUBLIC_KEY_BYTES], Envelope& out) {
   out = {};
