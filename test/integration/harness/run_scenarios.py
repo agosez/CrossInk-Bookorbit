@@ -53,7 +53,10 @@ SIM_MAC = bytes([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01])
 SIM_DEVICE_ID = "crossink-" + SIM_MAC.hex()
 
 SHORT_PWRBTN_SLEEP = 1  # CrossPointSettings::SHORT_PWRBTN::SLEEP
-SHORT_PWRBTN_BOOKORBIT_SYNC = 37  # CrossPointSettings::SHORT_PWRBTN::BOOKORBIT_SYNC
+SHORT_PWRBTN_BOOKORBIT_SYNC = 41  # CrossPointSettings::SHORT_PWRBTN::BOOKORBIT_SYNC
+# The numbering those values follow (BOOKORBIT_SHORTCUT_IDS_CURRENT). CrossInk v2.0.0 renumbered
+# the actions: 37, BookOrbit Sync on v1.6.1, is Back Home there, which never starts a sync.
+BOOKORBIT_SHORTCUT_IDS = 3
 SYNC_BEHAVIOR_SMART = 1
 UI_THEME_BOOKORBIT = 8
 BOOKORBIT_SYNC_FAILED = 7  # BookOrbitSyncActivity::SYNC_FAILED
@@ -364,6 +367,7 @@ class SimFs:
         }))
         (self.crosspoint / "crossink-settings.json").write_text(json.dumps({
             "shortPwrBtn": SHORT_PWRBTN_BOOKORBIT_SYNC,
+            "bookOrbitShortcutIds": BOOKORBIT_SHORTCUT_IDS,
         }))
         # A saved network lets the minimal network boot connect on its own (the
         # sim WiFi stub accepts anything); without one the sync parks on the
@@ -381,6 +385,7 @@ class SimFs:
         (self.crosspoint / "bookorbit.json").write_text(json.dumps(bookorbit))
         (self.crosspoint / "crossink-settings.json").write_text(json.dumps({
             "shortPwrBtn": SHORT_PWRBTN_SLEEP,
+            "bookOrbitShortcutIds": BOOKORBIT_SHORTCUT_IDS,
         }))
 
     def write_sync_marker(self, book_hash: str, timestamp: int,
