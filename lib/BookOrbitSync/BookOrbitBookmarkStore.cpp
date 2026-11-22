@@ -13,26 +13,35 @@ constexpr char STORE_FILENAME[] = "/bookorbit_bookmarks.bin";
 // 4-byte magic + 4-byte watermark, then one length-prefixed record per bookmark. A file whose
 // magic does not match is discarded on read and rewritten on the next put; the reader
 // re-stamps positions as chapters are visited.
-constexpr char STORE_MAGIC[4] = {'B', 'O', 'B', '1'};
+constexpr char STORE_MAGIC[4] = {'B', 'O', 'B', '2'};
+// The same layout, written by builds whose received bookmarks replaced each other (see
+// BookOrbitBookmarkStore::isFirstVersion).
+constexpr char LEGACY_STORE_MAGIC[4] = {'B', 'O', 'B', '1'};
 constexpr size_t POS_MAX = 512;
 
 std::string storePath(const std::string& bookCachePath) { return bookCachePath + STORE_FILENAME; }
 
-bool readFile(const std::string& path, uint32_t& outWatermark, std::vector<BookOrbitBookmarkRecord>& out) {
+// outLegacy is left false when the file is missing or unreadable: the next write starts it anew.
+bool readFile(const std::string& path, uint32_t& outWatermark, std::vector<BookOrbitBookmarkRecord>& out,
+              bool& outLegacy) {
   outWatermark = 0;
+  outLegacy = false;
   out.clear();
 
   FsFile f;
   if (!Storage.openFileForRead("BOB", path, f)) return false;
 
   char magic[sizeof(STORE_MAGIC)] = {};
-  if (f.read(magic, sizeof(magic)) != static_cast<int>(sizeof(magic)) ||
-      memcmp(magic, STORE_MAGIC, sizeof(magic)) != 0 || !serialization::tryReadPod(f, outWatermark)) {
+  const bool magicRead = f.read(magic, sizeof(magic)) == static_cast<int>(sizeof(magic));
+  const bool legacy = magicRead && memcmp(magic, LEGACY_STORE_MAGIC, sizeof(magic)) == 0;
+  if (!magicRead || (!legacy && memcmp(magic, STORE_MAGIC, sizeof(magic)) != 0) ||
+      !serialization::tryReadPod(f, outWatermark)) {
     f.close();
     LOG_ERR("BOB", "Discarding unreadable bookmark store: %s", path.c_str());
     outWatermark = 0;
     return false;
   }
+  outLegacy = legacy;
 
   while (out.size() < BookOrbitBookmarkStore::MAX_RECORDS) {
     BookOrbitBookmarkRecord record;
@@ -55,14 +64,16 @@ bool readFile(const std::string& path, uint32_t& outWatermark, std::vector<BookO
   return true;
 }
 
-bool writeFile(const std::string& path, const uint32_t watermark, const std::vector<BookOrbitBookmarkRecord>& records) {
+bool writeFile(const std::string& path, const uint32_t watermark, const std::vector<BookOrbitBookmarkRecord>& records,
+               const bool legacy) {
   FsFile f;
   if (!Storage.openFileForWrite("BOB", path, f)) {
     LOG_ERR("BOB", "Failed to open bookmark store for write: %s", path.c_str());
     return false;
   }
 
-  bool ok = f.write(STORE_MAGIC, sizeof(STORE_MAGIC)) == static_cast<int>(sizeof(STORE_MAGIC)) &&
+  const char* magic = legacy ? LEGACY_STORE_MAGIC : STORE_MAGIC;
+  bool ok = f.write(magic, sizeof(STORE_MAGIC)) == static_cast<int>(sizeof(STORE_MAGIC)) &&
             serialization::tryWritePod(f, watermark);
   for (const BookOrbitBookmarkRecord& record : records) {
     if (!ok) break;
@@ -91,8 +102,9 @@ bool BookOrbitBookmarkStore::put(const std::string& bookCachePath, const BookOrb
 
   const std::string path = storePath(bookCachePath);
   uint32_t watermark = 0;
+  bool legacy = false;
   std::vector<BookOrbitBookmarkRecord> records;
-  readFile(path, watermark, records);  // a missing or corrupt file simply starts a new one
+  readFile(path, watermark, records, legacy);  // a missing or corrupt file simply starts a new one
 
   const auto existing = std::find_if(records.begin(), records.end(), [&](const BookOrbitBookmarkRecord& r) {
     return r.timestamp == record.timestamp && r.spineIndex == record.spineIndex;
@@ -107,28 +119,31 @@ bool BookOrbitBookmarkStore::put(const std::string& bookCachePath, const BookOrb
     records.push_back(record);
   }
 
-  return writeFile(path, watermark, records);
+  return writeFile(path, watermark, records, legacy);
 }
 
 bool BookOrbitBookmarkStore::readAll(const std::string& bookCachePath, std::vector<BookOrbitBookmarkRecord>& out) {
   uint32_t watermark = 0;
-  return readFile(storePath(bookCachePath), watermark, out);
+  bool legacy = false;
+  return readFile(storePath(bookCachePath), watermark, out, legacy);
 }
 
 uint32_t BookOrbitBookmarkStore::readWatermark(const std::string& bookCachePath) {
   uint32_t watermark = 0;
+  bool legacy = false;
   std::vector<BookOrbitBookmarkRecord> records;
-  readFile(storePath(bookCachePath), watermark, records);
+  readFile(storePath(bookCachePath), watermark, records, legacy);
   return watermark;
 }
 
 bool BookOrbitBookmarkStore::advanceWatermark(const std::string& bookCachePath, const uint32_t timestamp) {
   const std::string path = storePath(bookCachePath);
   uint32_t watermark = 0;
+  bool legacy = false;
   std::vector<BookOrbitBookmarkRecord> records;
-  if (!readFile(path, watermark, records)) return false;
+  if (!readFile(path, watermark, records, legacy)) return false;
   if (timestamp <= watermark) return true;
-  return writeFile(path, timestamp, records);
+  return writeFile(path, timestamp, records, legacy);
 }
 
 bool BookOrbitBookmarkStore::markExchanged(const std::string& bookCachePath) {
@@ -138,17 +153,35 @@ bool BookOrbitBookmarkStore::markExchanged(const std::string& bookCachePath) {
 bool BookOrbitBookmarkStore::rewindWatermark(const std::string& bookCachePath) {
   const std::string path = storePath(bookCachePath);
   uint32_t watermark = 0;
+  bool legacy = false;
   std::vector<BookOrbitBookmarkRecord> records;
-  if (!readFile(path, watermark, records)) return true;  // nothing was ever sent from it
+  if (!readFile(path, watermark, records, legacy)) return true;  // nothing was ever sent from it
   if (watermark <= BOOKORBIT_EXCHANGED_WATERMARK) return true;
-  return writeFile(path, BOOKORBIT_EXCHANGED_WATERMARK, records);
+  return writeFile(path, BOOKORBIT_EXCHANGED_WATERMARK, records, legacy);
+}
+
+bool BookOrbitBookmarkStore::isFirstVersion(const std::string& bookCachePath) {
+  uint32_t watermark = 0;
+  bool legacy = false;
+  std::vector<BookOrbitBookmarkRecord> records;
+  return readFile(storePath(bookCachePath), watermark, records, legacy) && legacy;
+}
+
+bool BookOrbitBookmarkStore::moveToCurrentVersion(const std::string& bookCachePath) {
+  const std::string path = storePath(bookCachePath);
+  uint32_t watermark = 0;
+  bool legacy = false;
+  std::vector<BookOrbitBookmarkRecord> records;
+  if (!readFile(path, watermark, records, legacy) || !legacy) return true;
+  return writeFile(path, watermark, records, /*legacy=*/false);
 }
 
 bool BookOrbitBookmarkStore::retain(const std::string& bookCachePath, const std::vector<uint32_t>& keepTimestamps) {
   const std::string path = storePath(bookCachePath);
   uint32_t watermark = 0;
+  bool legacy = false;
   std::vector<BookOrbitBookmarkRecord> records;
-  if (!readFile(path, watermark, records)) return false;
+  if (!readFile(path, watermark, records, legacy)) return false;
 
   std::vector<BookOrbitBookmarkRecord> kept;
   kept.reserve(records.size());
@@ -160,5 +193,5 @@ bool BookOrbitBookmarkStore::retain(const std::string& bookCachePath, const std:
   if (kept.size() == records.size()) return true;
 
   LOG_INF("BOB", "Dropping %u bookmark record(s) whose bookmark is gone", (unsigned)(records.size() - kept.size()));
-  return writeFile(path, watermark, kept);
+  return writeFile(path, watermark, kept, legacy);
 }

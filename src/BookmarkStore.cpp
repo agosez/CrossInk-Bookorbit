@@ -429,7 +429,7 @@ void BookmarkStore::unload() {
 
 BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float progress, int pageCount,
                                                     const char* chapterTitle, uint16_t paragraphIndex,
-                                                    const char* snippet) {
+                                                    const char* snippet, const uint32_t timestamp) {
   if (!writable) {
     LOG_ERR("BKS", "Cannot add bookmarks after an unsuccessful load");
     return AddResult::Unavailable;
@@ -463,7 +463,8 @@ BookmarkStore::AddResult BookmarkStore::addBookmark(uint16_t spineIndex, float p
   // Real UTC epoch when the clock is plausible (WallClock corrects RTC-less devices), 0
   // otherwise. BookOrbit sync keys a bookmark's identity on its creation datetime and joins
   // its position record back through this field; the on-disk format always had it.
-  if (!WallClock::now(bm.timestamp)) {
+  bm.timestamp = timestamp;
+  if (bm.timestamp == 0 && !WallClock::now(bm.timestamp)) {
     bm.timestamp = 0;
   }
   snprintf(bm.chapterTitle, sizeof(bm.chapterTitle), "%s", chapterTitle ? chapterTitle : "");
@@ -495,6 +496,15 @@ void BookmarkStore::removeBookmarkForPage(uint16_t spineIndex, float pageProgres
 bool BookmarkStore::stampMissingTimestamp(const size_t index, const uint32_t timestamp) {
   if (!writable || index >= bookmarks.size() || timestamp == 0 || bookmarks[index].timestamp != 0) return false;
   bookmarks[index].timestamp = timestamp;
+  dirty = true;
+  saveToFile();
+  return true;
+}
+
+bool BookmarkStore::relocateBookmark(const size_t index, const float progress, const uint16_t paragraphIndex) {
+  if (!writable || index >= bookmarks.size()) return false;
+  bookmarks[index].progress = progress;
+  bookmarks[index].paragraphIndex = paragraphIndex;
   dirty = true;
   saveToFile();
   return true;

@@ -62,6 +62,21 @@ class BookOrbitBookmarkStore {
   static bool rewindWatermark(const std::string& bookCachePath);
 
   /**
+   * True for a readable store still in the first version of the file (BOB1). The builds writing
+   * it placed every received bookmark at its chapter's start, where each replaced the bookmarks
+   * already there (#120): once such a store has been through an exchange, this copy may have
+   * acknowledged bookmarks to the server and lost them since, and a complete key set would now
+   * delete them there. BookOrbitBookmarkSync asks the server for all of them again, once.
+   *
+   * Every write keeps the version it read, so a position minted in the reader cannot cancel that;
+   * only moveToCurrentVersion() moves a file on.
+   */
+  static bool isFirstVersion(const std::string& bookCachePath);
+
+  // True when there is nothing to move: no store, or one already current.
+  static bool moveToCurrentVersion(const std::string& bookCachePath);
+
+  /**
    * Drop records whose bookmark no longer exists locally. Orphans would fill the file and,
    * worse, describe bookmarks to the server that this device no longer holds.
    */
