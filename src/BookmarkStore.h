@@ -53,13 +53,18 @@ class BookmarkStore {
                    const std::string& bookType);
   void unload();
 
+  // Replaces any bookmark already on the page that progress and pageCount describe; a pageCount
+  // of 0 replaces none. timestamp 0 stamps the bookmark from WallClock (0 when the clock is not
+  // plausible); BookOrbit sync passes its own, so bookmarks received together stay distinct.
   AddResult addBookmark(uint16_t spineIndex, float progress, int pageCount, const char* chapterTitle,
-                        uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr);
+                        uint16_t paragraphIndex = UINT16_MAX, const char* snippet = nullptr, uint32_t timestamp = 0);
   void removeBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   bool removeBookmarkAt(size_t index);
   // Assigns a creation timestamp to a bookmark that predates timestamp stamping (field was
   // written as 0). BookOrbit sync joins its position records through this field.
   bool stampMissingTimestamp(size_t index, uint32_t timestamp);
+  // Moves a bookmark within its chapter, keeping its identity (timestamp) and labels.
+  bool relocateBookmark(size_t index, float progress, uint16_t paragraphIndex);
   bool hasBookmarkForPage(uint16_t spineIndex, float pageProgress, int pageCount);
   const std::vector<Bookmark>& getBookmarks() const { return bookmarks; }
 

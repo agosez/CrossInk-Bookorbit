@@ -31,7 +31,8 @@ class BookOrbitBookmarkSync {
   void exchange();
 
   bool hasIncoming() const { return !incomingBookmarks.empty(); }
-  // The section cache gives a received bookmark its page when that chapter is cached.
+  // Streams each received bookmark's chapter to place it, in the lent framebuffer (see
+  // placeReceivedBookmark): no RenderLock may be held by the caller.
   void applyIncoming(const std::shared_ptr<Epub>& epub, GfxRenderer& renderer);
 
   uint16_t sent() const { return bookmarksSent; }
@@ -51,6 +52,10 @@ class BookOrbitBookmarkSync {
   bool pendingBookmarkKeysComplete = false;
   BookOrbitSidecarState pendingBookmarkSidecar = BookOrbitSidecarState::Unstated;
   bool bookmarkStoreUnmarked = false;
+  // See BookOrbitBookmarkStore::isFirstVersion(). The store moves on after this exchange; when it
+  // has been through one before, this exchange first asks the server for every bookmark again.
+  bool firstVersionStore = false;
+  bool recoveringReceived = false;
   std::vector<BookOrbitIncomingBookmark> incomingBookmarks;
   uint16_t bookmarksSent = 0;
   uint16_t bookmarksAdded = 0;

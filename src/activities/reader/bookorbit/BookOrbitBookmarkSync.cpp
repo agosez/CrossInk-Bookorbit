@@ -1,7 +1,9 @@
 #include "BookOrbitBookmarkSync.h"
 
 #include <Epub.h>
+#include <GfxRenderer.h>
 #include <Logging.h>
+#include <WallClock.h>
 
 #include <algorithm>
 
@@ -10,8 +12,8 @@
 #include "BookOrbitSyncClient.h"
 #include "BookmarkStore.h"
 #include "CrossPointSettings.h"
-#include "Epub/Section.h"
 #include "ProgressMapper.h"
+#include "activities/RenderLock.h"
 #include "util/BookContentId.h"
 
 namespace {
@@ -20,6 +22,90 @@ namespace {
 // confirmed 404 for the rest of this boot, so an older BookOrbit is asked exactly once
 // instead of paying up to three 404s on every sync.
 bool s_bookmarkRouteUnsupported = false;
+
+// See placeReceivedBookmark(): fine enough that the page it gets is the fraction itself.
+constexpr int PLACEMENT_PAGES = 10000;
+
+struct ReceivedPlace {
+  float progress;
+  uint16_t paragraphIndex;
+};
+
+/**
+ * Where a received bookmark sits in its chapter: the fraction of the chapter's text before it,
+ * which is what a Bookmark keeps, and the paragraph the layout numbers it with, which the reader
+ * jumps through.
+ *
+ * Neither comes out of the xpointer itself: its p[N] counts the siblings under the last element,
+ * not the chapter's paragraphs (see ProgressMapper::parseXPointerLocation), and nothing here knows
+ * the chapter's pages -- a book just downloaded has no layout at all. So the chapter is streamed
+ * and the xpointer's ancestry walked, as for a received reading position
+ * (BookOrbitRemotePosition). The mapper answers in pages of a count it is given; asked for
+ * PLACEMENT_PAGES, its page is the fraction to within 1/PLACEMENT_PAGES.
+ *
+ * The inflater's state and window (~43 KB) do not fit beside the open TLS session on the X3/X4,
+ * so they take the framebuffer, lent as the reader lends it to mint a position. The render task
+ * is held off meanwhile: it would draw into the inflater. What the stream leaves there is never
+ * shown, since every screen of this sync clears the buffer before drawing and the sleep sync
+ * draws the sleep screen again at its end. Should the read still fail, the bookmark keeps the
+ * chapter's start and the xpointer's paragraph hint.
+ */
+ReceivedPlace placeReceivedBookmark(const std::shared_ptr<Epub>& epub, GfxRenderer& renderer, const int spineIndex,
+                                    const std::string& pos, const uint16_t paragraphHint) {
+  CrossPointPosition located{};
+  {
+    RenderLock lock;
+    GfxRenderer::FrameBufferLoan loan(renderer);
+    located = ProgressMapper::toCrossPoint(epub, KOReaderPosition{pos, 0.0f}, spineIndex, PLACEMENT_PAGES);
+  }
+  if (located.spineIndex != spineIndex) return {0.0f, paragraphHint};
+  return {static_cast<float>(located.pageNumber) / static_cast<float>(PLACEMENT_PAGES),
+          located.hasParagraphIndex ? located.paragraphIndex : paragraphHint};
+}
+
+/**
+ * A timestamp for a bookmark received now that no bookmark or record of this book holds
+ * (BOOKMARKS must be loaded).
+ *
+ * The timestamp is what joins a bookmark to its position record, and BookOrbitBookmarkStore::put
+ * replaces the record of the same timestamp and chapter. Bookmarks received in one sync all took
+ * the same second of WallClock, so each record replaced the one before and only the last bookmark
+ * kept an identity. So each takes the latest second not already used, counting back from now: a
+ * second already past cannot be taken by a bookmark made later.
+ */
+uint32_t freeBookmarkTimestamp(const uint32_t now, const std::vector<BookOrbitBookmarkRecord>& records) {
+  const auto& bookmarks = BOOKMARKS.getBookmarks();
+  const auto taken = [&](const uint32_t timestamp) {
+    return std::any_of(bookmarks.begin(), bookmarks.end(),
+                       [timestamp](const Bookmark& bookmark) { return bookmark.timestamp == timestamp; }) ||
+           std::any_of(records.begin(), records.end(),
+                       [timestamp](const BookOrbitBookmarkRecord& record) { return record.timestamp == timestamp; });
+  };
+  uint32_t timestamp = now;
+  while (timestamp > 1 && taken(timestamp)) timestamp--;
+  return timestamp;
+}
+
+/**
+ * Places again a bookmark the server offers back that still sits at its chapter's very start,
+ * where the builds before #120's fix put every bookmark they received (BOOKMARKS must be loaded).
+ * One made here on its chapter's first page sits there too, and placing it again keeps it there.
+ */
+void replaceIfAtChapterStart(const std::shared_ptr<Epub>& epub, GfxRenderer& renderer,
+                             const BookOrbitBookmarkRecord& record) {
+  const auto& bookmarks = BOOKMARKS.getBookmarks();
+  for (size_t i = 0; i < bookmarks.size(); i++) {
+    const Bookmark& bookmark = bookmarks[i];
+    if (bookmark.timestamp != record.timestamp || bookmark.spineIndex != record.spineIndex) continue;
+    if (bookmark.progress != 0.0f) return;
+    const ReceivedPlace place =
+        placeReceivedBookmark(epub, renderer, record.spineIndex, record.pos, bookmark.paragraphIndex);
+    if (place.progress != bookmark.progress || place.paragraphIndex != bookmark.paragraphIndex) {
+      BOOKMARKS.relocateBookmark(i, place.progress, place.paragraphIndex);
+    }
+    return;
+  }
+}
 }  // namespace
 
 void BookOrbitBookmarkSync::prepare(const bool serverAcceptsSidecar) {
@@ -30,6 +116,8 @@ void BookOrbitBookmarkSync::prepare(const bool serverAcceptsSidecar) {
   pendingBookmarkKeysComplete = false;
   pendingBookmarkSidecar = BookOrbitSidecarState::Unstated;
   bookmarkStoreUnmarked = false;
+  firstVersionStore = false;
+  recoveringReceived = false;
 
   const std::string stateDir = BookContentId::bookStateDir(epubPath);
   std::vector<BookOrbitBookmarkRecord> records;
@@ -37,6 +125,10 @@ void BookOrbitBookmarkSync::prepare(const bool serverAcceptsSidecar) {
   // before, so a missing or unreadable one must suppress deletion propagation, not feed it.
   const bool syncedHereBefore = BookOrbitBookmarkStore::readAll(stateDir, records);
   const uint32_t watermark = BookOrbitBookmarkStore::readWatermark(stateDir);
+  firstVersionStore = syncedHereBefore && BookOrbitBookmarkStore::isFirstVersion(stateDir);
+  // Only an exchanged store can have received anything. Without the sidecar state there is no
+  // way to ask for the lost ones again: the store just moves on.
+  recoveringReceived = firstVersionStore && watermark != 0 && serverAcceptsSidecar;
 
   if (!BOOKMARKS.loadForBook(epubPath, "", "", "epub")) {
     LOG_ERR("BookOrbit", "Could not read bookmarks; they will not sync");
@@ -91,7 +183,11 @@ void BookOrbitBookmarkSync::prepare(const bool serverAcceptsSidecar) {
   // annotations, only once a readable store proves this book has synced bookmarks before: a
   // lost store must not read as "every bookmark deleted" (see BookOrbitHighlightSync::prepare).
   const bool everyBookmarkHasAPosition = records.size() >= syncableCount;
-  if (!syncedHereBefore) {
+  if (recoveringReceived) {
+    // A bookmark deleted here since the last sync comes back with the rest: the price of not
+    // deleting, on the server, the received bookmarks this copy lost.
+    LOG_INF("BookOrbit", "Bookmark store predates the received-bookmark fix; asking the server for every bookmark");
+  } else if (!syncedHereBefore) {
     LOG_INF("BookOrbit", "No bookmark sync history for this book; deletions will not propagate this sync");
   } else if (records.size() <= MAX_KEYS_PER_SYNC && everyBookmarkHasAPosition) {
     pendingBookmarkKeysComplete = BookOrbitKeySet::build(records, pendingBookmarkKeys);
@@ -101,7 +197,11 @@ void BookOrbitBookmarkSync::prepare(const bool serverAcceptsSidecar) {
   }
 
   // The server applies the same lost-copy rule to bookmarks (see BookOrbitHighlightSync::prepare).
-  pendingBookmarkSidecar = bookOrbitSidecarState(syncedHereBefore, watermark, localBookmarkCount, serverAcceptsSidecar);
+  // New also unlinks this device from every bookmark of the book, so one this sync cannot take
+  // stays offered to the next ones, and no later key set deletes it.
+  pendingBookmarkSidecar =
+      recoveringReceived ? BookOrbitSidecarState::New
+                         : bookOrbitSidecarState(syncedHereBefore, watermark, localBookmarkCount, serverAcceptsSidecar);
   bookmarkStoreUnmarked = syncedHereBefore && watermark == 0;
 
   LOG_INF("BookOrbit", "Prepared %u bookmark(s) for upload, %u key(s) (watermark=%lu, sidecar=%d)",
@@ -153,6 +253,11 @@ void BookOrbitBookmarkSync::exchange() {
   } else if (bookmarkStoreUnmarked) {
     BookOrbitBookmarkStore::markExchanged(stateDir);
   }
+  // The server holds this request: whatever it re-offered and this sync does not apply stays
+  // offered to the next one.
+  if (firstVersionStore && !BookOrbitBookmarkStore::moveToCurrentVersion(stateDir)) {
+    LOG_ERR("BookOrbit", "Bookmark store not moved to the current version; the next sync asks for everything again");
+  }
   bookmarksSent = static_cast<uint16_t>(pendingBookmarks.size());
   pendingBookmarks.clear();
 }
@@ -170,6 +275,13 @@ void BookOrbitBookmarkSync::applyIncoming(const std::shared_ptr<Epub>& epub, Gfx
   const std::string stateDir = BookContentId::bookStateDir(epubPath);
   std::vector<BookOrbitBookmarkRecord> records;
   BookOrbitBookmarkStore::readAll(stateDir, records);
+  // Worked out before the records this apply adds join the list (see the watermark at the end).
+  const uint32_t watermark = BookOrbitBookmarkStore::readWatermark(stateDir);
+  const bool localStillPending =
+      std::any_of(records.begin(), records.end(),
+                  [watermark](const BookOrbitBookmarkRecord& record) { return record.identityEpoch > watermark; });
+  uint32_t now = 0;
+  const bool clockPlausible = WallClock::now(now);
 
   uint32_t newestMintedIdentity = 0;
   size_t addedCount = 0;
@@ -210,6 +322,7 @@ void BookOrbitBookmarkSync::applyIncoming(const std::shared_ptr<Epub>& epub, Gfx
         ack.pos = record.pos;
         appliedAcks.push_back(std::move(ack));
         duplicate = true;
+        replaceIfAtChapterStart(epub, renderer, record);
       }
       break;
     }
@@ -229,19 +342,11 @@ void BookOrbitBookmarkSync::applyIncoming(const std::shared_ptr<Epub>& epub, Gfx
       continue;
     }
 
-    // The paragraph hint gives the page through the section LUT when that chapter's cache
-    // exists; without it the bookmark still lands in the right chapter at its start, and the
-    // paragraph anchor lets the reader refine the jump later.
-    float progress = 0.0f;
-    int pageCount = 1;
-    if (paragraphHint != UINT16_MAX) {
-      Section tempSection(epub, spineIndex, renderer);
-      const auto page = tempSection.getPageForParagraphIndex(paragraphHint);
-      if (page.has_value() && tempSection.pageCount > 0) {
-        pageCount = tempSection.pageCount;
-        progress = static_cast<float>(*page) / static_cast<float>(tempSection.pageCount);
-      }
-    }
+    // No plausible clock: no identity can be minted, so the apply cannot be linked. The next
+    // sync, which starts with an NTP refresh, retries it.
+    if (!clockPlausible) continue;
+
+    const ReceivedPlace place = placeReceivedBookmark(epub, renderer, spineIndex, incoming.pos, paragraphHint);
 
     const char* chapterTitle = nullptr;
     std::string titleStr;
@@ -253,23 +358,22 @@ void BookOrbitBookmarkSync::applyIncoming(const std::shared_ptr<Epub>& epub, Gfx
       chapterTitle = incoming.title.c_str();
     }
 
-    if (BOOKMARKS.addBookmark(static_cast<uint16_t>(spineIndex), progress, pageCount, chapterTitle, paragraphHint,
-                              incoming.title.c_str()) != BookmarkStore::AddResult::Added) {
+    // A page count of 0: a received bookmark replaces none. The server has already merged its
+    // copies of one place (it dedupes on the converted location, the loop above on the
+    // xpointer), and a bookmark replaced here would vanish after this device acknowledged it,
+    // so the next sync's complete key set would delete it on the server as well.
+    const uint32_t timestamp = freeBookmarkTimestamp(now, records);
+    if (BOOKMARKS.addBookmark(static_cast<uint16_t>(spineIndex), place.progress, /*pageCount=*/0, chapterTitle,
+                              place.paragraphIndex, incoming.title.c_str(),
+                              timestamp) != BookmarkStore::AddResult::Added) {
       LOG_ERR("BookOrbit", "Could not store server bookmark %lu", static_cast<unsigned long>(incoming.serverId));
       continue;  // unacknowledged: retried next sync
-    }
-    const Bookmark& stored = BOOKMARKS.getBookmarks().back();
-    if (stored.timestamp == 0) {
-      // No plausible clock: no identity can be minted, so the apply cannot be linked. Roll the
-      // bookmark back and let the next sync (which starts with an NTP refresh) retry.
-      BOOKMARKS.removeBookmarkAt(BOOKMARKS.getBookmarks().size() - 1);
-      continue;
     }
 
     // Bookmarks invert the annotation convention: the DEVICE mints the identity and reports it.
     BookOrbitBookmarkRecord record;
-    record.timestamp = stored.timestamp;
-    record.identityEpoch = stored.timestamp;
+    record.timestamp = timestamp;
+    record.identityEpoch = timestamp;
     record.spineIndex = static_cast<uint16_t>(spineIndex);
     record.pos = incoming.pos;  // the server's pos verbatim, so both sides hash the same string
     BookOrbitBookmarkStore::put(stateDir, record);
@@ -282,6 +386,8 @@ void BookOrbitBookmarkSync::applyIncoming(const std::shared_ptr<Epub>& epub, Gfx
       ack.pos = record.pos;
       appliedAcks.push_back(std::move(ack));
     }
+    // Seen by the entries after this one: the dedupe above and freeBookmarkTimestamp().
+    records.push_back(std::move(record));
   }
 
   BOOKMARKS.unload();
@@ -290,10 +396,6 @@ void BookOrbitBookmarkSync::applyIncoming(const std::shared_ptr<Epub>& epub, Gfx
   // the next sync; the server just told us about them, so cover them -- unless older local
   // records still wait to upload.
   if (newestMintedIdentity > 0) {
-    const uint32_t watermark = BookOrbitBookmarkStore::readWatermark(stateDir);
-    const bool localStillPending =
-        std::any_of(records.begin(), records.end(),
-                    [watermark](const BookOrbitBookmarkRecord& record) { return record.identityEpoch > watermark; });
     if (!localStillPending) {
       BookOrbitBookmarkStore::advanceWatermark(stateDir, newestMintedIdentity);
     } else {

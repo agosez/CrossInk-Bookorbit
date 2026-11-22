@@ -637,7 +637,18 @@ on the device.
 
 ## `bookorbit_bookmarks.bin`
 
-### Version 1
+### Version 2
+
+Version 2 has the layout of version 1 and only changes the magic. Builds writing version 1
+placed every bookmark received from the server at its chapter's start, where each replaced the
+bookmarks already there (issue #120): a version 1 file that has been through an exchange may
+describe a copy that acknowledged bookmarks to the server and lost them since. Its next sync
+asks the server for every bookmark of the book again (`sidecarState: "new"`, with an incomplete
+key set) instead of reporting a key set that would delete them there, then moves the file to
+version 2. A version 1 file never exchanged, or synced with a server that predates
+`sidecarState`, moves on without that. Every other write keeps the version the file had, so a
+position minted in the reader cannot cancel the recovery. Builds that only know version 1
+discard a version 2 file as unreadable.
 
 `bookorbit_bookmarks.bin` lives beside `bookorbit_annotations.bin` in the book's
 content-keyed state directory (`/.crosspoint/book_<contentHash>/`) and holds what BookOrbit
@@ -648,7 +659,9 @@ coordinate the section cache stores per page), and never recomputed.
 
 Records join back to their `Bookmark` by `timestamp` plus `spineIndex`; `timestamp` is a
 real UTC epoch, stamped by `BookmarkStore::addBookmark` from WallClock (bookmarks from
-older builds carry 0 and gain a timestamp through the reader's backfill). `identityEpoch`
+older builds carry 0 and gain a timestamp through the reader's backfill). A bookmark received
+from the server takes the latest second that no bookmark or record of the book holds, counting
+back from now, so bookmarks received in one sync keep a record each. `identityEpoch`
 is the datetime the server keys on: equal to `timestamp` for a bookmark made on the
 device, and the identity this device MINTED at apply time for one received from the
 server -- bookmarks invert the annotation convention, the device owns the identity and
@@ -659,7 +672,7 @@ Binary layout (all little-endian):
 The watermark marks a file that has been through an exchange the same way as in
 `bookorbit_annotations.bin`.
 
-- `[0-3]` magic + version: ASCII `BOB1`
+- `[0-3]` magic + version: ASCII `BOB2` (`BOB1` for version 1)
 - `[4-7]` `watermark` (`uint32_t`, newest identityEpoch the server has accepted; `1` after an exchange that sent nothing; `0` until the first exchange)
 - Repeated variable-length records:
   - `[0-3]` `timestamp` (`uint32_t`, the bookmark's creation epoch; part of the join key)

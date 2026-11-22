@@ -248,9 +248,10 @@ def read_boa_store(path: Path) -> tuple[int, list[dict]]:
     return watermark, out
 
 
-def write_bob_store(path: Path, watermark: int, records: list[dict]) -> None:
-    """BookOrbit bookmark sync-state store ("BOB1")."""
-    blob = b"BOB1" + struct.pack("<I", watermark)
+def write_bob_store(path: Path, watermark: int, records: list[dict], magic: bytes = b"BOB2") -> None:
+    """BookOrbit bookmark sync-state store. BOB1, the same layout, is what builds before the
+    fix for issue #120 wrote (see BookOrbitBookmarkStore::isFirstVersion)."""
+    blob = magic + struct.pack("<I", watermark)
     for r in records:
         pos = r["pos"].encode()
         blob += struct.pack("<IIHH", r["timestamp"], r["identityEpoch"], r["spine"], len(pos))
@@ -263,7 +264,7 @@ def read_bob_store(path: Path) -> tuple[int, list[dict]]:
     if not path.exists():
         return 0, []
     raw = path.read_bytes()
-    assert raw[:4] == b"BOB1", f"unexpected bookmark store magic in {path}"
+    assert raw[:4] in (b"BOB1", b"BOB2"), f"unexpected bookmark store magic in {path}"
     (watermark,) = struct.unpack_from("<I", raw, 4)
     offset, out = 8, []
     while offset < len(raw):
@@ -273,6 +274,15 @@ def read_bob_store(path: Path) -> tuple[int, list[dict]]:
         offset += pos_len
         out.append({"timestamp": ts, "identityEpoch": epoch, "spine": spine, "pos": pos})
     return watermark, out
+
+
+def bob_store_magic(path: Path) -> bytes:
+    return path.read_bytes()[:4] if path.exists() else b""
+
+
+def bookmark_key(datetime: str, pos: str) -> str:
+    """A bookmark's identity, md5(datetime | pos) (bookOrbitAnnotationKey)."""
+    return hashlib.md5(f"{datetime}|{pos}".encode()).hexdigest()
 
 
 # /.crosspoint/bookorbit_downloads.bin, written and read from docs/file-formats.md
@@ -517,6 +527,8 @@ FRESH_BOOK = {
     "outdated_copy": 49,
     "book_update": 48,
     "book_update_offer": 51,
+    "bookmark_pull_same_chapter": 50,
+    "bookmark_recover_lost": 52,
 }
 
 # Bookmarks dedupe server-side on their converted location (paragraph precision), so a
@@ -1660,6 +1672,121 @@ def scenario_bookmark_delete_all_propagates(verbose: bool) -> None:
     adds = bookmark_adds(verify_device(manifest, "bmdelall"), book["hash"])
     assert not any(a["pos"] in positions for a in adds), \
         f"deleted bookmarks still on server: {[a['pos'] for a in adds]}"
+
+
+def scenario_bookmark_pull_same_chapter(verbose: bool) -> None:
+    """Several bookmarks another reader made in ONE chapter all arrive, each at its own
+    place, and survive the next sync on the server too (issue #120). They used to land at
+    the chapter's start, where each one replaced the one before it, and the next sync's
+    complete key set then deleted the replaced ones on the server."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["bookmark_pull_same_chapter"]]
+    now = int(time.time())
+    # Different paragraphs: the server dedupes bookmarks on their converted location.
+    positions = [f"/body/DocFragment[2]/body/p[{p}]/text().0" for p in (2, 6, 10)]
+    reset_sim_bookmarks(manifest, book["hash"])
+    peer = peer_device(manifest)
+    peer.exchange_bookmarks(book["hash"], keys=[], keys_complete=False,
+                            changes=[{"datetime": kodatetime(now + i), "pos": pos}
+                                     for i, pos in enumerate(positions)])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, _, _ = make_fs(tmp, manifest, book)
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "first sync never finished"
+
+        _, records = read_bob_store(fs.state_dir(book["hash"]) / BOOKMARK_STORE)
+        assert sorted(r["pos"] for r in records) == sorted(positions), \
+            f"a received bookmark has no position record: {records}"
+        assert len({r["timestamp"] for r in records}) == len(records), \
+            f"received bookmarks share a timestamp, so their records collide: {records}"
+        bookmarks = sorted(read_bookmark_store(fs.bookmarks_store(book["hash"])), key=lambda b: b["progress"])
+        assert len(bookmarks) == len(positions) and all(b["spine"] == 1 for b in bookmarks), \
+            f"the bookmarks of chapter 2 did not all arrive: {bookmarks}"
+        assert len({b["progress"] for b in bookmarks}) == len(positions), \
+            f"the received bookmarks were not placed apart: {bookmarks}"
+        # p[2], p[6], p[10] are the chapter's 2nd, 6th and 10th paragraphs (all under <body>).
+        assert [b["paragraph"] for b in bookmarks] == [2, 6, 10], \
+            f"the received bookmarks lost their paragraphs: {bookmarks}"
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "second sync never finished"
+        assert len(read_bookmark_store(fs.bookmarks_store(book["hash"]))) == len(positions), \
+            "the second sync changed the local bookmarks"
+
+    adds = bookmark_adds(verify_device(manifest, "bmsamechapter"), book["hash"])
+    kept = {a["pos"] for a in adds}
+    assert all(pos in kept for pos in positions), \
+        f"bookmarks deleted on the server by the second sync: {sorted(set(positions) - kept)}"
+
+
+def scenario_bookmark_recover_lost(verbose: bool) -> None:
+    """A copy left by the builds before #120's fix gets its lost bookmarks back instead of
+    deleting them on the server. Those builds acknowledged three bookmarks of one chapter in the
+    same second, kept only the last one, at the chapter's start, and wrote a BOB1 store: its
+    complete key set would now delete the two others on the server. The first sync asks for
+    everything again (sidecarState new); the bookmark this device made must not come back twice."""
+    manifest, books = load_seed()
+    book = books[FRESH_BOOK["bookmark_recover_lost"]]
+    now = int(time.time())
+    received = [f"/body/DocFragment[2]/body/p[{p}]/text().0" for p in (2, 6, 10)]
+    own = "/body/DocFragment[4]/body/p[3]/text().0"
+    reset_sim_bookmarks(manifest, book["hash"])
+    peer_device(manifest).exchange_bookmarks(book["hash"], keys=[], keys_complete=False,
+                                             changes=[{"datetime": kodatetime(now + i), "pos": pos}
+                                                      for i, pos in enumerate(received)])
+
+    # The old build, as the simulator's device: its own bookmark went up, then the three came
+    # down and were acknowledged with identities minted in one second.
+    sim = KosyncDevice(BASE_URL, manifest["kosync"]["username"], manifest["kosync"]["password"], SIM_DEVICE_ID)
+    sim.auth()
+    own_epoch, applied_epoch = now - 1200, now - 600
+    sim.exchange_bookmarks(book["hash"], keys=[], keys_complete=False,
+                           changes=[{"datetime": kodatetime(own_epoch), "pos": own}])
+    offered = [a for a in bookmark_adds(sim, book["hash"]) if a["pos"] in received]
+    assert sorted(a["pos"] for a in offered) == sorted(received), f"setup: not offered to the device: {offered}"
+    applied_dt = kodatetime(applied_epoch)
+    sim.exchange_bookmarks_ack(book["hash"], applied=[
+        {"serverId": a["serverId"], "status": "applied", "key": bookmark_key(applied_dt, a["pos"]),
+         "datetime": applied_dt, "pos": a["pos"]} for a in offered])
+
+    with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
+        fs, sim_path, _ = make_fs(tmp, manifest, book)
+        store = fs.state_dir(book["hash"]) / BOOKMARK_STORE
+        survivor = received[-1]
+        write_bookmark_store(fs.bookmarks_store(book["hash"]), "", "", sim_path, [
+            {"spine": 3, "progress": 0.5, "timestamp": own_epoch, "paragraph": 3, "snippet": "Own bookmark"},
+            {"spine": 1, "progress": 0.0, "timestamp": applied_epoch, "paragraph": 10, "snippet": "Bookmark"},
+        ])
+        write_bob_store(store, applied_epoch, [
+            {"timestamp": own_epoch, "identityEpoch": own_epoch, "spine": 3, "pos": own},
+            {"timestamp": applied_epoch, "identityEpoch": applied_epoch, "spine": 1, "pos": survivor},
+        ], magic=b"BOB1")
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "first sync never finished"
+        assert bob_store_magic(store) == b"BOB2", f"the store was not moved on: {bob_store_magic(store)}"
+        bookmarks = read_bookmark_store(fs.bookmarks_store(book["hash"]))
+        chapter = sorted((b for b in bookmarks if b["spine"] == 1), key=lambda b: b["progress"])
+        assert [b["paragraph"] for b in chapter] == [2, 6, 10], f"the lost bookmarks did not come back: {bookmarks}"
+        assert all(b["progress"] > 0.0 for b in chapter), f"a bookmark still sits at its chapter's start: {chapter}"
+        assert sum(1 for b in bookmarks if b["spine"] == 3) == 1, f"this device's bookmark came back twice: {bookmarks}"
+        _, records = read_bob_store(store)
+        assert sorted(r["pos"] for r in records) == sorted(received + [own]), f"records: {records}"
+        assert len({r["timestamp"] for r in records}) == len(records), f"records share a timestamp: {records}"
+
+        output = run_simulator(fs, input_script="6000:POWER:120", choice="apply",
+                               timeout_s=90, verbose=verbose)
+        assert "sync scenario finished" in output, "second sync never finished"
+        assert len(read_bookmark_store(fs.bookmarks_store(book["hash"]))) == len(bookmarks), \
+            "the second sync changed the local bookmarks"
+
+    kept = {a["pos"] for a in bookmark_adds(verify_device(manifest, "bmrecover"), book["hash"])}
+    assert all(pos in kept for pos in received + [own]), \
+        f"bookmarks deleted on the server: {sorted(set(received + [own]) - kept)}"
 
 
 def scenario_catalog_collections_browse(verbose: bool) -> None:
@@ -2932,6 +3059,8 @@ SCENARIOS = {
     "highlight_reoffer_no_duplicate": scenario_highlight_reoffer_no_duplicate,
     "bookmark_pull": scenario_bookmark_pull,
     "bookmark_delete_all_propagates": scenario_bookmark_delete_all_propagates,
+    "bookmark_pull_same_chapter": scenario_bookmark_pull_same_chapter,
+    "bookmark_recover_lost": scenario_bookmark_recover_lost,
     "bookmark_push": scenario_bookmark_push,
     "outdated_copy_holds_changes": scenario_outdated_copy_holds_changes,
     "web_move_keeps_book_state": scenario_web_move_keeps_book_state,
