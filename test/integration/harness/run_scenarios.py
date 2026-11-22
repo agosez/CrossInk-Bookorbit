@@ -62,6 +62,7 @@ UI_THEME_BOOKORBIT = 8
 BOOKORBIT_SYNC_FAILED = 7  # BookOrbitSyncActivity::SYNC_FAILED
 SYNC_MARKER_MAGIC = 0x424F5359  # "BOSY", BookOrbitSmartSync::MARKER_MAGIC
 SYNC_MARKER_FILE = "bookorbit_sync.bin"
+BOOT_TARGET_BOOKORBIT_DOWNLOAD = 34  # NetworkBootTarget::BOOKORBIT_DOWNLOAD, src/SilentRestart.h
 
 CRASH_PATTERNS = ("Assertion failed", "Segmentation fault", "AddressSanitizer",
                   "UndefinedBehaviorSanitizer", "std::bad_alloc")
@@ -81,29 +82,58 @@ def obfuscate_to_base64(plaintext: str) -> str:
     return base64.b64encode(xored).decode()
 
 
+PROGRESS_RECORD_BYTES = 20
+PROGRESS_RECORD_MARKER = 0xC5
+
+
 def write_progress_bin(path: Path, spine: int, page: int, page_count: int,
                        visible_text_offset: int | None = None) -> None:
-    """The reader's 6/10-byte progress format (see EpubReaderUtils.h)."""
+    """Seeds a position in the reader's legacy 6/10-byte record, which the firmware
+    still reads. Its versioned records win over legacy ones, so the other save slot
+    (progress.bin.bak, see ProgressRecord.h) goes: the seeded position is the book's."""
     data = struct.pack("<HHH", spine, page, page_count)
     if visible_text_offset is not None:
         data += struct.pack("<I", visible_text_offset)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+    path.with_name(path.name + ".bak").unlink(missing_ok=True)
 
 
-def read_progress_bin(path: Path) -> dict | None:
+def _read_progress_slot(path: Path) -> tuple[str, int, dict] | None:
+    """One save slot as (kind, sequence, fields), decoded like progress_record::decode."""
     if not path.exists():
         return None
     raw = path.read_bytes()
-    if len(raw) not in (4, 6, 10):
+    if len(raw) == PROGRESS_RECORD_BYTES:
+        if (raw[10] != PROGRESS_RECORD_MARKER or raw[11] & ~1
+                or struct.unpack_from("<I", raw, 16)[0] != zlib.crc32(raw[:16])):
+            return None
+        kind, seq, has_count, has_offset = "versioned", struct.unpack_from("<I", raw, 12)[0], True, bool(raw[11] & 1)
+    elif len(raw) in (4, 6, 10):
+        kind, seq, has_count, has_offset = "legacy", 0, len(raw) >= 6, len(raw) == 10
+    else:
         return None
     spine, page = struct.unpack_from("<HH", raw)
     out = {"spine": spine, "page": page}
-    if len(raw) >= 6:
+    if has_count:
         out["pageCount"] = struct.unpack_from("<H", raw, 4)[0]
-    if len(raw) == 10:
+    if has_offset:
         out["visibleTextOffset"] = struct.unpack_from("<I", raw, 6)[0]
-    return out
+    return kind, seq, out
+
+
+def read_progress_bin(path: Path) -> dict | None:
+    """The position the reader would load from progress.bin and progress.bin.bak: the
+    newer versioned slot (sequence compared modulo 2^32), else the legacy record."""
+    slots = [s for s in (_read_progress_slot(path), _read_progress_slot(path.with_name(path.name + ".bak"))) if s]
+    versioned = [s for s in slots if s[0] == "versioned"]
+    if len(versioned) == 2:
+        primary, backup = versioned
+        backup_newer = 0 < ((backup[1] - primary[1]) & 0xFFFFFFFF) < 0x80000000
+        return (backup if backup_newer else primary)[2]
+    if versioned:
+        return versioned[0][2]
+    return slots[0][2] if slots else None
 
 
 # --- reader-store serialization (formats mirror src/ClippingStore.cpp,
@@ -153,15 +183,23 @@ def write_clipping_store(path: Path, title: str, author: str, book_path: str,
 
 
 def read_clipping_store(path: Path) -> list[dict]:
+    """Reads clipping stores v3 to v7, the one the firmware writes (src/ClippingStore.cpp).
+    v5 adds deleted-clipping ids after the header and a sync key plus flags per record,
+    v7 a u32 source range after tableSelection."""
     if not path.exists():
         return []
     raw = path.read_bytes()
     version, count = struct.unpack_from("<BH", raw, 0)
-    assert version in (3, 4), f"unexpected clipping store version {version} in {path}"
+    assert 3 <= version <= 7, f"unexpected clipping store version {version} in {path}"
     offset = 3
     title, offset = _read_str(raw, offset)
     author, offset = _read_str(raw, offset)
     book_path, offset = _read_str(raw, offset)
+    if version >= 5:
+        (deleted_count,) = struct.unpack_from("<H", raw, offset)
+        offset += 2
+        for _ in range(deleted_count):
+            _, offset = _read_str(raw, offset)
     out = []
     for _ in range(count):
         spine, _sp, _ep, _pc, _sw, _ew, word_count, paragraph = struct.unpack_from("<8H", raw, offset)
@@ -170,6 +208,11 @@ def read_clipping_store(path: Path) -> list[dict]:
         offset += 8
         if version >= 4:
             offset += 2  # tableSelection (u16), irrelevant to the exchanged text
+        if version >= 7:
+            offset += 8  # sourceStart, sourceEnd (u32 each)
+        if version >= 5:
+            _, offset = _read_str(raw, offset)  # sync key
+            offset += 1  # flags: uploaded, scoped
         chapter = raw[offset:offset + CHAPTER_TITLE_MAX].split(b"\0", 1)[0].decode(errors="replace")
         offset += CHAPTER_TITLE_MAX
         (text_len,) = struct.unpack_from("<H", raw, offset)
@@ -1899,7 +1942,8 @@ def scenario_catalog_download_naming(verbose: bool) -> None:
                                after_reboot_script="12000:QUIT")
         assert "Restarting into the download of book" in output, "the download did not restart first"
         resumed = output.index("Restarting into the download of book")
-        assert "Minimal network boot ready: target=10" in output[resumed:], "no download boot after the restart"
+        assert f"Minimal network boot ready: target={BOOT_TARGET_BOOKORBIT_DOWNLOAD}" in output[resumed:], \
+            "no download boot after the restart"
         assert "Downloading file" in output[resumed:], "the download boot did not run the transfer"
         assert not (fs.crosspoint / "bookorbit_download.json").exists(), "the download was left to resume"
 
@@ -2025,7 +2069,7 @@ def scenario_catalog_book_actions(verbose: bool) -> None:
     hold_first_book = "16000:CONFIRM:1500"  # past the 1 s threshold: opens the menu
     # The menu logs the FileBrowserAction it returns: without that, a hold that
     # simply downloaded on release (the old behaviour) would pass steps 1 and 2.
-    action_download, action_redownload, action_delete = 22, 23, 0
+    action_download, action_redownload, action_delete = 65, 66, 0  # FileBrowserActionActivity.h
     # A download restarts into a boot of its own (the X4 profile has no PSRAM),
     # which drops the first script: this one ends that boot.
     after_download = "12000:QUIT"
