@@ -22,7 +22,6 @@ merging .crosspoint with what is already there.
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import random
 import re
@@ -41,7 +40,8 @@ INTEGRATION = Path(__file__).resolve().parent
 sys.path.insert(0, str(INTEGRATION / "seed"))
 sys.path.insert(0, str(INTEGRATION / "harness"))
 from kosync import BASE_URL, AdminClient, KosyncDevice, kodatetime, partial_md5  # noqa: E402
-from run_scenarios import load_seed, write_boa_store, write_clipping_store  # noqa: E402
+from formats import obfuscate, write_boa_store, write_clipping_store  # noqa: E402
+from server import load_seed  # noqa: E402
 
 XHTML = "{http://www.w3.org/1999/xhtml}"
 KIT_PEER_ID = "crossink-device-kit-peer"
@@ -189,16 +189,6 @@ def reading_events(count: int, now: int, rng: random.Random) -> bytes:
     return bytes(blob)
 
 
-def obfuscate(mac: bytes, plaintext: str) -> str:
-    """obfuscation::obfuscateToBase64 for a given device: "CPV1" + FNV1a32(MAC || plaintext)
-    + plaintext, XOR MAC, base64. The MAC is the ESP32 base MAC, the Wi-Fi station one."""
-    h = 2166136261
-    for b in mac + plaintext.encode():
-        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
-    payload = b"CPV1" + struct.pack("<I", h) + plaintext.encode()
-    return base64.b64encode(bytes(c ^ mac[i % len(mac)] for i, c in enumerate(payload))).decode()
-
-
 # --- Caddy ------------------------------------------------------------------------------
 
 
@@ -317,7 +307,7 @@ def main() -> None:
             raise SystemExit(f"not a MAC: {args.mac}")
         (out / "bookorbit.json").write_text(json.dumps({
             "username": manifest["kosync"]["username"],
-            "password_obf": obfuscate(mac, manifest["kosync"]["password"]),
+            "password_obf": obfuscate(manifest["kosync"]["password"], mac),
             "serverUrl": url,
             "syncBehavior": 1,
         }, indent=2))
