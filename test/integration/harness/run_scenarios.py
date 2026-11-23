@@ -2234,7 +2234,7 @@ def scenario_catalog_deep_listing(verbose: bool) -> None:
     window holds that book's row, and that walking back reloads an earlier page in
     front of the window from the list cache."""
     manifest, _ = load_seed()
-    window_rows = 3 * 20  # MAX_WINDOW_PAGES + the page on its way in, of PAGE_SIZE rows
+    window_rows = 3 * 20  # BookOrbitCatalogWindow::MAX_PAGES + the page on its way in, of PAGE_SIZE rows
 
     with tempfile.TemporaryDirectory(prefix="crossink-integ-") as tmp:
         fs = SimFs(Path(tmp), manifest["kosync"], download_folder="/Downloads")

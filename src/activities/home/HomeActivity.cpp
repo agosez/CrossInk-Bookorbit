@@ -39,7 +39,7 @@
 #include "RecentBooksStore.h"
 #include "SavedItemsHomeActivity.h"
 #include "SilentRestart.h"
-#include "activities/browser/BookOrbitCatalogLink.h"
+#include "activities/browser/bookorbit/BookOrbitCatalogLink.h"
 #include "components/UITheme.h"
 #include "components/themes/bookorbit/BookOrbitHomeLayout.h"
 #include "components/themes/dashboard/DashboardTheme.h"
