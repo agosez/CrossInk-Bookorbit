@@ -1227,7 +1227,6 @@ void HomeActivity::activateBookOrbitStop(const BookOrbitHomeUi::Stop& stop) {
       if (book == nullptr) break;
       std::string path;
       const bool onCard = BookOrbitDownloadIndex::lookup(book->id, path);
-      BookOrbitDownloadIndex::unload();
       if (onCard) {
         onSelectBook(path);
       } else {

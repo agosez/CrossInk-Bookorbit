@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "network/BookOrbitCatalogClient.h"
 #include "network/HttpDownloader.h"
@@ -45,6 +46,10 @@ class Reporter {
  * best-effort convenience marker.
  */
 bool findOnDevice(int64_t bookId, const std::string& title, const std::string& author, std::string& outPath);
+
+// findOnDevice() for a page of books, with one pass over the download index for all of them:
+// outPaths[i] is where books[i] is, or empty. outPaths holds books.size() strings.
+void findOnDevice(const std::vector<BookOrbitCatalogBook>& books, std::string* outPaths);
 
 // The book's EPUB file among its formats; false when it has none.
 bool findEpubFile(const BookOrbitBookDetail& detail, BookOrbitCatalogFile& outFile);

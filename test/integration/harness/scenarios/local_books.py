@@ -60,6 +60,22 @@ def scenario_catalog_download_index_beyond_legacy_cap() -> None:
             "'On device' did not count every book the index lists"
 
 
+def scenario_catalog_download_index_beyond_ram_cap() -> None:
+    """The index no longer stops at the 512 downloads a device without PSRAM kept in RAM
+    (the simulator has none): 520 books in series folders, known only through the index,
+    are all counted under "On device", and the visit leaves all 520 entries on the card.
+    Before, the oldest 8 were dropped when the index was loaded and saved."""
+    manifest, _ = load_seed()
+    with sd_card(manifest, download_folder="/Downloads") as fs:
+        entries = seed_nested_books(fs, 520)
+        fs.write_download_index(entries, version=2)
+
+        output = run_simulator(fs, input_script=CATALOG_ROOT, choice="apply", timeout_s=90)
+        assert "Local scan: kind=on-device count=520" in output, \
+            "'On device' did not count every book the index lists"
+        assert fs.read_download_index() == entries, "the visit dropped index entries"
+
+
 def scenario_catalog_large_local_list() -> None:
     """"On device" lists a card past the 200 rows it used to stop at: 135 books in a series
     folder known only through the download index, one indexed book in the download folder

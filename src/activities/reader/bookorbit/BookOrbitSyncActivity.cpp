@@ -196,7 +196,6 @@ void BookOrbitSyncActivity::returnToReader() {
 void BookOrbitSyncActivity::resolveUpdateBook() {
   int64_t bookId = 0;
   if (!BookOrbitDownloadIndex::bookIdForPath(epubPath, bookId)) bookId = 0;
-  BookOrbitDownloadIndex::unload();
   if (bookId == 0) {
     // Not a catalog download (copied to the card, or the index lost it): the server still
     // resolves this copy's older hash to its book. A bare hash stays out of Books to Review.

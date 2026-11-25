@@ -4,6 +4,7 @@
 #include <HalStorage.h>
 #include <LibraryBuilder.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <ZipFile.h>
 
 #include <algorithm>
@@ -34,10 +35,9 @@ constexpr char STAGED_DOWNLOAD_SUFFIX[] = ".part";
 std::string catalogBookFilename(const std::string& title, const std::string& author) {
   return BookOrbitDevicePath::catalogFilename("", title, author);
 }
-}  // namespace
 
-bool findOnDevice(const int64_t bookId, const std::string& title, const std::string& author, std::string& outPath) {
-  if (BookOrbitDownloadIndex::lookup(bookId, outPath)) return true;
+// The filename heuristic behind the download index (see findOnDevice()).
+bool findByFilename(const std::string& title, const std::string& author, std::string& outPath) {
   const std::string filename = catalogBookFilename(title, author);
   const std::string& folder = BOOKORBIT_STORE.getDownloadFolder();
   // Candidates are built aside: outPath is a listed row's own path, and most catalog
@@ -51,6 +51,30 @@ bool findOnDevice(const int64_t bookId, const std::string& title, const std::str
   if (found(filename) || found(READ_FOLDER_PREFIX + filename)) return true;
   std::string().swap(outPath);  // re-checked after a delete: release the old path too
   return false;
+}
+}  // namespace
+
+bool findOnDevice(const int64_t bookId, const std::string& title, const std::string& author, std::string& outPath) {
+  return BookOrbitDownloadIndex::lookup(bookId, outPath) || findByFilename(title, author, outPath);
+}
+
+void findOnDevice(const std::vector<BookOrbitCatalogBook>& books, std::string* outPaths) {
+  const size_t count = books.size();
+  if (count == 0 || outPaths == nullptr) return;
+  // A page of ids: runtime-sized, so neither stack nor static storage fits.
+  auto ids = makeUniqueNoThrow<int64_t[]>(count);
+  if (ids) {
+    for (size_t i = 0; i < count; i++) ids[i] = books[i].id;
+    BookOrbitDownloadIndex::lookupAll(
+        ids.get(), count,
+        [](const size_t i, const std::string& path, void* context) { static_cast<std::string*>(context)[i] = path; },
+        outPaths);
+  } else {
+    LOG_ERR("BookOrbit", "Out of memory marking %u books on the device", static_cast<unsigned>(count));
+  }
+  for (size_t i = 0; i < count; i++) {
+    if (outPaths[i].empty()) findByFilename(books[i].title, books[i].author, outPaths[i]);
+  }
 }
 
 bool findEpubFile(const BookOrbitBookDetail& detail, BookOrbitCatalogFile& outFile) {

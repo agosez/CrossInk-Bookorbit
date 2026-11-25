@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <utility>
 
-#include "BookOrbitCatalogDownload.h"
 #include "RecentBooksStore.h"
 #include "activities/reader/BookReadingStats.h"
 #include "components/HeaderDate.h"
@@ -128,10 +127,15 @@ void setFacet(Entry& entry, BookOrbitFacetEntry&& facet) {
   entry.seriesId = std::move(facet.seriesId);
 }
 
-void setBook(Entry& entry, BookOrbitCatalogBook&& book) {
+void setBook(Entry& entry, BookOrbitCatalogBook&& book, std::string&& devicePath) {
   entry.type = Entry::Type::BOOK;
   entry.bookId = book.id;
-  entry.onDevice = BookOrbitCatalogDownload::findOnDevice(book.id, book.title, book.author, entry.path);
+  entry.onDevice = !devicePath.empty();
+  if (entry.onDevice) {
+    entry.path = std::move(devicePath);
+  } else {
+    std::string().swap(entry.path);  // a reused row: release its old path too
+  }
   entry.title = std::move(book.title);
   entry.subtitle = std::move(book.author);
   // The list section the sort files the book under. The day is formatted once, here:

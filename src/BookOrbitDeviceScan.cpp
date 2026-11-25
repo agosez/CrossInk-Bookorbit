@@ -41,6 +41,9 @@ constexpr size_t HASH_LEN = 32;
 // Books per match check: the batch and its request stay within a few KB beside the TLS
 // session on an X3/X4, and a wake press waits for at most one batch.
 constexpr size_t BATCH = 12;
+// Library books looking for new ones are checked against the download index this many at a
+// time, one pass over it each (see BookOrbitDownloadIndex).
+constexpr size_t CANDIDATES = 32;
 constexpr uint16_t FIRST_SEEN_SATURATED = 0xFFFE;  // the Library's arrival counter stops there
 
 // Books hashed per pass, which bounds the time a sync spends on a card full of new books;
@@ -233,48 +236,82 @@ void BookOrbitDeviceScan::prepare(bool (*cancelled)(), const Progress* progress)
   uint16_t stride = 0;
   if (checkpoints) index.buildFolderCheckpoints(checkpoints.get(), stride);
 
+  // A Library book that may be new: arrived since the last pass, an EPUB, not one the server
+  // already did not recognise. Its record is read again for the title once it is hashed.
+  struct Candidate {
+    uint16_t ordinal;
+    uint16_t firstSeen;
+    uint32_t fileSize;
+    uint32_t pathHash;
+  };
+  struct Candidates {
+    Candidate items[CANDIDATES];
+    std::string paths[CANDIDATES];
+    bool claimed[CANDIDATES];
+    size_t count;
+  };
+  // A batch of paths: heap, not the loop task's 8 KB stack.
+  auto batch = makeUniqueNoThrow<Candidates>();
+  bool ok = static_cast<bool>(batch);
+  if (!ok) LOG_ERR("BookOrbit", "Device scan out of memory");
+
   uint16_t watermark = next;  // lowered to the first arrival left for the next pass
-  std::string path;
   std::string title;
   std::string author;
-  bool ok = true;
+  library::ClixRecord entry;
   const uint16_t books = index.bookCount();
   report(progress, Step::Hashing, 0, books);
-  for (uint16_t i = 0; i < books && ok; i++) {
-    if (cancelled != nullptr && cancelled()) {
-      ok = false;
-      break;
+  for (uint16_t i = 0; i < books && ok;) {
+    batch->count = 0;
+    for (; i < books && batch->count < CANDIDATES; i++) {
+      if (cancelled != nullptr && cancelled()) {
+        ok = false;
+        break;
+      }
+      std::string& path = batch->paths[batch->count];
+      if (!index.readRecord(i, entry) || entry.firstSeen < state.watermark) continue;
+      if (!index.readPath(entry, path, checkpoints.get(), stride) || path.size() > PATH_MAX_LEN ||
+          !FsHelpers::hasEpubExtension(path)) {
+        continue;
+      }
+      const uint32_t pathHash = BookOrbitDownloadIndex::pathHash(path);
+      bool asked = false;
+      for (size_t k = 0; k < knownCount && !asked; k++) {
+        asked = known[k].pathHash == pathHash && known[k].size == entry.fileSize;
+      }
+      if (asked) continue;
+      batch->items[batch->count++] = Candidate{i, entry.firstSeen, entry.fileSize, pathHash};
     }
-    library::ClixRecord entry;
-    if (!index.readRecord(i, entry) || entry.firstSeen < state.watermark) continue;
-    if (!index.readPath(entry, path, checkpoints.get(), stride) || path.size() > PATH_MAX_LEN ||
-        !FsHelpers::hasEpubExtension(path) || BookOrbitDownloadIndex::hasPath(path)) {
-      continue;
+    if (!ok) break;
+    // A file the download index holds is a catalog book already in place: not hashed.
+    BookOrbitDownloadIndex::findPaths(batch->paths, batch->count, batch->claimed);
+    for (size_t k = 0; k < batch->count && ok; k++) {
+      const Candidate& candidate = batch->items[k];
+      if (batch->claimed[k]) continue;
+      if (header.count >= maxNewPerPass()) {
+        if (candidate.firstSeen < watermark) watermark = candidate.firstSeen;
+        continue;
+      }
+      if (cancelled != nullptr && cancelled()) {
+        ok = false;
+        break;
+      }
+      const std::string& path = batch->paths[k];
+      const std::string hash = KOReaderDocumentId::calculate(path);
+      if (hash.size() != HASH_LEN || !index.readRecord(candidate.ordinal, entry) ||
+          !index.readDisplayText(entry, title, author)) {
+        LOG_ERR("BookOrbit", "Device scan could not read %s", path.c_str());
+        continue;
+      }
+      Record record{};
+      memcpy(record.hash, hash.data(), HASH_LEN);
+      record.size = candidate.fileSize;
+      record.pathHash = candidate.pathHash;
+      ok = writeRecord(work, record, path, title, author);
+      header.count++;
+      report(progress, Step::Hashing, candidate.ordinal + 1u, books);
     }
-    const uint32_t pathHash = BookOrbitDownloadIndex::pathHash(path);
-    bool asked = false;
-    for (size_t k = 0; k < knownCount && !asked; k++) {
-      asked = known[k].pathHash == pathHash && known[k].size == entry.fileSize;
-    }
-    if (asked) continue;
-    if (header.count >= maxNewPerPass()) {
-      if (entry.firstSeen < watermark) watermark = entry.firstSeen;
-      continue;
-    }
-    const std::string hash = KOReaderDocumentId::calculate(path);
-    if (hash.size() != HASH_LEN || !index.readDisplayText(entry, title, author)) {
-      LOG_ERR("BookOrbit", "Device scan could not read %s", path.c_str());
-      continue;
-    }
-    Record record{};
-    memcpy(record.hash, hash.data(), HASH_LEN);
-    record.size = entry.fileSize;
-    record.pathHash = pathHash;
-    ok = writeRecord(work, record, path, title, author);
-    header.count++;
-    report(progress, Step::Hashing, i + 1u, books);
   }
-  BookOrbitDownloadIndex::unload();
   header.watermark = watermark;
   ok = ok && work.seek(0) && work.write(&header, sizeof(header)) == sizeof(header);
   work.close();
@@ -299,6 +336,9 @@ struct Item {
   std::string author;
   int64_t bookId;
   int64_t fileId;
+  // Where the download index holds the book, asked for the whole batch before filing it.
+  bool indexed;
+  std::string indexedPath;
 };
 
 struct Run {
@@ -308,6 +348,10 @@ struct Run {
   size_t progressTotal = 0;
   Item items[BATCH];
   size_t count = 0;
+  // The batch's books the download index gains, recorded together once it is filed.
+  int64_t filedIds[BATCH] = {};
+  std::string filedPaths[BATCH];
+  size_t filedCount = 0;
   FsFile state;  // STATE_TMP_PATH
   uint32_t remembered = 0;
   char version[BookOrbitSyncClient::LIBRARY_VERSION_SIZE] = {};
@@ -383,8 +427,8 @@ bool removeCopy(const std::string& path, const std::string& kept) {
 // now is. A copy the download index already holds, or one already at that place, is the one
 // kept.
 std::string place(Run& run, const Item& item, const BookOrbitBookDetail& detail, const BookOrbitCatalogFile& file) {
-  std::string kept;
-  if (BookOrbitDownloadIndex::lookup(item.bookId, kept)) {
+  if (item.indexed) {
+    const std::string& kept = item.indexedPath;
     if (kept == item.path || !removeCopy(item.path, kept)) return item.path;
     run.duplicates++;
     return kept;
@@ -407,7 +451,7 @@ std::string place(Run& run, const Item& item, const BookOrbitBookDetail& detail,
 // Files a recognised book and adds it to the download index where it ends up. The naming
 // template is only resolved in the book's catalog detail: a book the catalog hides, or a
 // failed request, leaves it indexed where it is, as does /Read.
-void file(Run& run, const Item& item) {
+void file(Run& run, Item& item) {
   std::string where = item.path;
   BookOrbitBookDetail detail;
   if (!inReadFolder(item.path) && BookOrbitCatalogClient::fetchBookDetail(item.bookId, detail)) {
@@ -417,10 +461,54 @@ void file(Run& run, const Item& item) {
       break;
     }
   }
-  // A copy the index already holds stays the book's entry; looking it up first also drops
-  // an entry whose file is gone, which record() then replaces.
-  std::string indexed;
-  if (!BookOrbitDownloadIndex::lookup(item.bookId, indexed)) BookOrbitDownloadIndex::record(item.bookId, where);
+  // A copy the index already holds stays the book's entry (the batch's lookup dropped an
+  // entry whose file is gone). Another copy of the same book later in the batch now finds
+  // this one, as it would in the index.
+  if (item.indexed || run.filedCount >= BATCH) return;
+  run.filedIds[run.filedCount] = item.bookId;
+  run.filedPaths[run.filedCount++] = where;
+  for (size_t i = 0; i < run.count; i++) {
+    Item& other = run.items[i];
+    if (other.bookId != item.bookId || other.indexed) continue;
+    other.indexed = true;
+    other.indexedPath = where;
+  }
+}
+
+// Where the download index holds the batch's recognised books, in one pass over it.
+void lookUpIndexed(Run& run) {
+  int64_t ids[BATCH];
+  uint8_t at[BATCH];
+  size_t count = 0;
+  for (size_t i = 0; i < run.count; i++) {
+    Item& item = run.items[i];
+    item.indexed = false;
+    std::string().swap(item.indexedPath);
+    if (item.bookId == 0) continue;
+    ids[count] = item.bookId;
+    at[count++] = static_cast<uint8_t>(i);
+  }
+  struct Answer {
+    Run* run;
+    const uint8_t* at;
+  } answer{&run, at};
+  BookOrbitDownloadIndex::lookupAll(
+      ids, count,
+      [](const size_t i, const std::string& path, void* context) {
+        const auto& to = *static_cast<Answer*>(context);
+        Item& item = to.run->items[to.at[i]];
+        item.indexed = true;
+        item.indexedPath = path;
+      },
+      &answer);
+}
+
+// Records where the batch's books were filed, in one rewrite of the download index.
+void recordFiled(Run& run) {
+  BookOrbitDownloadIndex::Download downloads[BATCH];
+  for (size_t i = 0; i < run.filedCount; i++) downloads[i] = {run.filedIds[i], &run.filedPaths[i]};
+  BookOrbitDownloadIndex::recordAll(downloads, run.filedCount);
+  run.filedCount = 0;
 }
 
 void onMatch(const char* hash, const int64_t bookId, const int64_t bookFileId, void* context) {
@@ -454,8 +542,9 @@ bool checkBatch(Run& run) {
     return false;
   }
   run.asked += run.count;
+  lookUpIndexed(run);
   for (size_t i = 0; i < run.count; i++) {
-    const Item& item = run.items[i];
+    Item& item = run.items[i];
     if (item.bookId == 0) {
       remember(run, item);
     } else {
@@ -464,6 +553,7 @@ bool checkBatch(Run& run) {
     }
     report(run.progress, BookOrbitDeviceScan::Step::Filing, ++run.progressDone, run.progressTotal);
   }
+  recordFiled(run);
   return !run.failed;
 }
 
@@ -586,7 +676,6 @@ BookOrbitDeviceScan::Summary BookOrbitDeviceScan::run(bool (*cancelled)(), const
     }
   }
 
-  BookOrbitDownloadIndex::unload();
   if (run->moved > 0 || run->duplicates > 0) library::invalidateLibraryIndex();
 
   if (workDone) next.watermark = workHeader.watermark;

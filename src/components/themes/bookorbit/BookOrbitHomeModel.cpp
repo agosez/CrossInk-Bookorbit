@@ -16,14 +16,21 @@
 #include "util/CardSpace.h"
 
 namespace {
-uint8_t onCardMask(const BookOrbitHomeBook* books, const int count) {
-  std::string path;
-  uint8_t mask = 0;
-  for (int i = 0; i < count; i++) {
-    if (BookOrbitDownloadIndex::lookup(books[i].id, path)) mask |= static_cast<uint8_t>(1u << i);
-  }
-  return mask;
-}
+// Every server book Home shows, asked about in one pass over the download index.
+struct OnCard {
+  static constexpr int CONTINUE = BookOrbitHomeSnapshot::CONTINUE_COUNT;
+  static constexpr int SHELF_BOOKS = BookOrbitHomeShelf::BOOK_COUNT;
+  static constexpr int BOOKS = CONTINUE + BookOrbitHomeSnapshot::SHELVES * SHELF_BOOKS;
+  int64_t ids[BOOKS] = {};
+  size_t count = 0;
+  size_t continueCount = 0;             // the Continue Reading books come first in ids
+  uint32_t found = 0;                   // bit i: ids[i] is on the card
+  std::string continuePaths[CONTINUE];  // where they are, for the recent-book check
+
+  bool has(const size_t i) const { return ((found >> i) & 1u) != 0; }
+};
+static_assert(OnCard::BOOKS <= 32, "one bit per book");
+static_assert(OnCard::SHELF_BOOKS <= 8, "one bit per shelf entry");
 
 // Counting the used space froze Home at every start on slow FAT32 cards (#110), so only
 // exFAT cards get a storage bar (see CardSpace). The card is asked once per boot; every
@@ -109,22 +116,43 @@ void BookOrbitHomeModel::computeRows() {
     }
     return false;
   };
-  std::string path;
-  for (int i = 0; i < snapshot->continueCount && rowCount < static_cast<int>(rows.size()); i++) {
+  OnCard onCard;
+  const int continueCount = std::min<int>(snapshot->continueCount, OnCard::CONTINUE);
+  for (int i = 0; i < continueCount; i++) onCard.ids[onCard.count++] = snapshot->continueReading[i].id;
+  onCard.continueCount = onCard.count;
+  std::array<size_t, BookOrbitHomeSnapshot::SHELVES> shelfStart{};
+  for (int s = 0; s < BookOrbitHomeSnapshot::SHELVES; s++) {
+    shelfStart[s] = onCard.count;
+    const int books = std::min<int>(snapshot->shelves[s].count, OnCard::SHELF_BOOKS);
+    for (int b = 0; b < books; b++) onCard.ids[onCard.count++] = snapshot->shelves[s].books[b].id;
+  }
+  BookOrbitDownloadIndex::lookupAll(
+      onCard.ids, onCard.count,
+      [](const size_t i, const std::string& path, void* context) {
+        auto& on = *static_cast<OnCard*>(context);
+        on.found |= 1u << i;
+        if (i < on.continueCount) on.continuePaths[i] = path;
+      },
+      &onCard);
+
+  for (int i = 0; i < continueCount && rowCount < static_cast<int>(rows.size()); i++) {
     const BookOrbitHomeBook& book = snapshot->continueReading[i];
-    const bool onCard = BookOrbitDownloadIndex::lookup(book.id, path);
-    if (isRecentBook(book.title, onCard ? path : std::string{})) continue;
+    if (isRecentBook(book.title, onCard.continuePaths[i])) continue;  // empty when not on the card
     Row& row = rows[static_cast<size_t>(rowCount++)];
     row.remote = &book;
     row.remoteArg = i;
     row.progress = book.progress != BookOrbitHomeBook::NO_PROGRESS ? static_cast<float>(book.progress) : -1.0f;
-    row.onCard = onCard;
+    row.onCard = onCard.has(static_cast<size_t>(i));
   }
-  for (int i = 0; i < BookOrbitHomeSnapshot::SHELVES; i++) {
-    shelfOnCard[i] = onCardMask(snapshot->shelves[i].books, snapshot->shelves[i].count);
+  for (int s = 0; s < BookOrbitHomeSnapshot::SHELVES; s++) {
+    uint8_t mask = 0;
+    const int books = std::min<int>(snapshot->shelves[s].count, OnCard::SHELF_BOOKS);
+    for (int b = 0; b < books; b++) {
+      if (onCard.has(shelfStart[s] + static_cast<size_t>(b))) mask |= static_cast<uint8_t>(1u << b);
+    }
+    shelfOnCard[s] = mask;
   }
   serverBookCount = static_cast<int32_t>(BookOrbitDownloadIndex::recordedCount());
-  BookOrbitDownloadIndex::unload();
 }
 
 const BookOrbitHomeBook* BookOrbitHomeModel::catalogBook(const int arg) const {

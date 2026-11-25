@@ -61,9 +61,11 @@ size_t collectInProgress(std::vector<BookOrbitCatalogEntry>* sink);
 void sortByTitle(std::vector<BookOrbitCatalogEntry>& rows);
 
 // The rows of a facet page, a server book page and an On device page, each filled in
-// place (see BookOrbitCatalogWindow::placePage) and taking the strings it is given.
+// place (see BookOrbitCatalogWindow::placePage) and taking the strings it is given. A book
+// row's devicePath is where the book is on the card, empty when it is not (see
+// BookOrbitCatalogDownload::findOnDevice(), which answers for a whole page).
 void setFacet(BookOrbitCatalogEntry& entry, BookOrbitFacetEntry&& facet);
-void setBook(BookOrbitCatalogEntry& entry, BookOrbitCatalogBook&& book);
+void setBook(BookOrbitCatalogEntry& entry, BookOrbitCatalogBook&& book, std::string&& devicePath);
 void setLocalBook(BookOrbitCatalogEntry& entry, std::string&& path);
 
 // The book listing a facet row opens; facetSectionId is the facet listing's own section.

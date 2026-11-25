@@ -5,6 +5,14 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+Based on CrossInk v1.6.1.
+
+### Changed
+
+- On the X3 and X4, the BookOrbit catalog now remembers where up to 2048 downloaded books landed, up from 512, as the X4 Pro and reTerminal Sticky already did. Beyond 512, older books filed in the server's series folders used to lose their on-device dot and drop out of "On device"; they now keep both. The reader no longer holds that list in memory while you browse the catalog: each page, Home's shelves and each step of the card scan look their books up on the SD card, all at once.
+
 ## [v1.6.1+bookorbit.9] - 2026-11-22
 
 Based on CrossInk v1.6.1.

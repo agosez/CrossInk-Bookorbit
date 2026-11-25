@@ -154,7 +154,6 @@ void BookOrbitCatalogBrowserActivity::onExit() {
   listOptions.reset();
   window.rows().clear();
   if (bookList.onDeviceFiles) BookOrbitLocalBooks::clear();
-  BookOrbitDownloadIndex::unload();
 
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(false);
@@ -495,6 +494,14 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
   if (!cacheHit) {
     BookOrbitCatalogListCache::saveBooksPage(query, page, result);
   }
+  // Which of the page's books are on the card, before the render lock: one pass over the
+  // download index for the whole page. A page of strings, runtime-sized: heap.
+  auto devicePaths = makeUniqueNoThrow<std::string[]>(result.books.size());
+  if (devicePaths) {
+    BookOrbitCatalogDownload::findOnDevice(result.books, devicePaths.get());
+  } else {
+    LOG_ERR("BookOrbit", "Out of memory marking a page's books on the device");
+  }
 
   // Commit the navigation context only on success (see loadFacetEntries).
   RenderLock lock(*this);
@@ -514,7 +521,8 @@ bool BookOrbitCatalogBrowserActivity::loadBooks(const BookOrbitBookQuery& query,
   // it consistent; a client-side re-sort would destroy both.
   const size_t first = joinPage(load, result.books.size(), page);
   for (size_t i = 0; i < result.books.size(); i++) {
-    BookOrbitCatalogRows::setBook(window.rows()[first + i], std::move(result.books[i]));
+    BookOrbitCatalogRows::setBook(window.rows()[first + i], std::move(result.books[i]),
+                                  devicePaths ? std::move(devicePaths[i]) : std::string());
   }
   // The letters span the whole listing and only come with its first page.
   if (page == 1) window.setLetters(result.letters);
