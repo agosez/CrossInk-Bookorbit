@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <BoardConfig.h>
 #include <CrossInkHalFrontlight.h>
+#include <FilePublication.h>
 #include <FontCacheManager.h>
 #include <FontDecompressor.h>
 #include <FreeInkUIGfxRenderer.h>
@@ -25,6 +26,7 @@
 
 #include <cstdlib>
 
+#include "sync/ProgressBookIterator.h"
 #include "util/PluginEvents.h"
 #if !defined(SIMULATOR) && !FREEINK_MCU_C3
 #include <XteinkDetect.h>
@@ -1723,6 +1725,10 @@ void setup() {
   BoardConfig::holdPowerRails();
 
   const esp_reset_reason_t rawResetReason = esp_reset_reason();
+  if (rawResetReason != ESP_RST_DEEPSLEEP &&
+      !(rawResetReason == ESP_RST_SW && silentRebootMagic == SILENT_REBOOT_MAGIC)) {
+    ProgressBookIterator::resetLegacyLookups();
+  }
   const esp_sleep_wakeup_cause_t rawWakeupCause = esp_sleep_get_wakeup_cause();
 #if FREEINK_DEVICE_PICCO
   const bool usbSleepWake = piccoUsbWakeToken.consume(rawResetReason == ESP_RST_SW);
@@ -1870,13 +1876,19 @@ void setup() {
 #endif
 
   LOG_INF("BOOT", "Wake route: %s", wakeupRouteName(wakeupReason));
+  wakePowerReleasePending = wakeupReason == HalGPIO::WakeupReason::PowerButton;
+#if FREEINK_DEVICE_PICCO && !defined(SIMULATOR)
+  // A Picco cold boot can report Other even when Power is physically held.
+  if (wakeupReason == HalGPIO::WakeupReason::Other && gpio.isPowerButtonPhysicallyPressed()) {
+    wakePowerReleasePending = true;
+  }
+#endif
+  if (wakePowerReleasePending) {
+    mappedInputManager.suppressNextPowerRelease();
+    mappedInputManager.suppressNextPowerConfirmRelease();
+  }
   switch (wakeupReason) {
     case HalGPIO::WakeupReason::PowerButton:
-      wakePowerReleasePending = true;
-      // Readers also handle held Power shortcuts. Hide the wake hold from
-      // mapped input until its release, while allowing the activity to load.
-      mappedInputManager.suppressNextPowerRelease();
-      mappedInputManager.suppressNextPowerConfirmRelease();
       break;
     case HalGPIO::WakeupReason::AfterUSBPower:
 #if FREEINK_DEVICE_EEGO_A4
@@ -1924,11 +1936,26 @@ void setup() {
   // SD Card Initialization
   // We need 6 open files concurrently when parsing a new chapter
   if (!Storage.begin()) {
-    LOG_ERR("MAIN", "SD card initialization failed");
-    setupDisplayAndFonts(isSilentReboot, !isNetworkResume, useReaderRenderStack);
-    activityManager.goToFullScreenMessage("SD card error", EpdFontFamily::BOLD);
+    auto description = StrId::STR_SD_START_FAILED;
+#ifndef SIMULATOR
+    switch (Storage.startupError()) {
+      case HalStorage::StartupError::CardNotDetected:
+      case HalStorage::StartupError::CardCommunicationFailure:
+        description = StrId::STR_SD_NO_RESPONSE;
+        break;
+      case HalStorage::StartupError::VolumeMountFailed:
+        description = StrId::STR_SD_MOUNT_FAILED;
+        break;
+      default:
+        break;
+    }
+#endif
+    LOG_ERR("MAIN", "SD card initialization failed: %s", I18n::getInstance().get(description));
+    setupDisplayAndFonts(isSilentReboot, false, useReaderRenderStack);
+    activityManager.goToFullScreenMessage(StrId::STR_SD_START_ERROR, description);
     return;
   }
+  if (!FilePublication::recoverAtBoot()) LOG_ERR("MAIN", "Interrupted SD transfer needs recovery");
   logBootHeap("storage ready");
   display.startBegin();
 
@@ -2418,8 +2445,10 @@ void loop() {
     lastMemPrint = millis();
   }
 
-  if (!buttonShortcutController.isQuickLocked() && UsbSerialFileTransfer::process(activityManager.isHomeActivity()) ==
-                                                       UsbSerialFileTransfer::ProcessResult::ScreenshotRequested) {
+  const auto usbResult = buttonShortcutController.isQuickLocked()
+                             ? UsbSerialFileTransfer::ProcessResult::None
+                             : UsbSerialFileTransfer::process(activityManager.isHomeActivity());
+  if (usbResult == UsbSerialFileTransfer::ProcessResult::ScreenshotRequested) {
     RenderLock lock;
     const uint32_t bufferSize = display.getBufferSize();
     logSerial.printf("SCREENSHOT_START:%d\n", bufferSize);
@@ -2444,7 +2473,8 @@ void loop() {
   // Check for any user activity (button press or release) or active background work
   static unsigned long lastActivityTime = millis();
   const bool transitionWasAborted = storageTransitionAborted.exchange(false, std::memory_order_relaxed);
-  if (userInputReceived || activityManager.preventAutoSleep() || transitionWasAborted) {
+  if (userInputReceived || activityManager.preventAutoSleep() || transitionWasAborted ||
+      usbResult == UsbSerialFileTransfer::ProcessResult::SyncActivity) {
     lastActivityTime = millis();         // Reset inactivity timer
     powerManager.setPowerSaving(false);  // Restore normal CPU frequency on user activity
   }

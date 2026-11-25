@@ -303,7 +303,7 @@ inline SettingInfo buildDictionaryFontSizeSetting(const SdCardFontRegistry* regi
   return s;
 }
 
-inline SettingInfo buildDictionarySetting(const DictionaryRegistry* dictRegistry) {
+inline SettingInfo buildDictionarySetting(const DictionaryRegistry& dictRegistry) {
   SettingInfo s;
   s.nameId = StrId::STR_DICTIONARY;
   s.type = SettingType::ENUM;
@@ -311,36 +311,23 @@ inline SettingInfo buildDictionarySetting(const DictionaryRegistry* dictRegistry
   s.category = StrId::STR_CAT_READER;
   s.enumStringValues.push_back(I18N.get(StrId::STR_NONE_OPT));
 
-  std::vector<DictionaryEntry> entries;
-  if (dictRegistry) {
-    entries = dictRegistry->getEntries();
-    s.enumStringValues.reserve(entries.size() + 1);
-    for (const auto& entry : entries) {
-      s.enumStringValues.push_back(entry.name);
-    }
+  const auto& entries = dictRegistry.getEntries();
+  std::vector<std::string> paths;
+  paths.reserve(entries.size());
+  s.enumStringValues.reserve(entries.size() + 1);
+  for (const auto& entry : entries) {
+    paths.push_back(entry.basePath);
+    s.enumStringValues.push_back(entry.name);
   }
 
-  s.valueGetter = [entries]() -> uint8_t {
-    const std::string activePath = Dictionary::readDictPath();
-    if (activePath.empty()) {
-      return 0;
-    }
-    for (size_t i = 0; i < entries.size(); i++) {
-      if (entries[i].basePath == activePath) {
-        return static_cast<uint8_t>(i + 1);
-      }
-    }
-    return 0;
+  s.valueGetter = [paths]() -> uint8_t {
+    const auto path = Dictionary::readConfiguredDictPath();
+    const auto it = std::find(paths.begin(), paths.end(), path);
+    return it == paths.end() ? 0 : static_cast<uint8_t>(std::distance(paths.begin(), it) + 1);
   };
-
-  s.valueSetter = [entries](uint8_t v) {
-    if (v == 0) {
-      Dictionary::saveGlobalDictPath("");
-      return;
-    }
-    const size_t entryIndex = static_cast<size_t>(v - 1);
-    if (entryIndex < entries.size()) {
-      Dictionary::saveGlobalDictPath(entries[entryIndex].basePath.c_str());
+  s.valueSetter = [paths = std::move(paths)](uint8_t value) {
+    if (value <= paths.size()) {
+      Dictionary::saveGlobalDictPath(value == 0 ? "" : paths[value - 1].c_str());
     }
   };
 
@@ -635,9 +622,9 @@ inline SettingInfo buildSideButtonActionSetting(const StrId nameId, uint8_t Cros
 // The count is this fork's: upstream's 112 common entries less its five two-finger and
 // eight Sync Server account entries, plus the seven BookOrbit ones, the clock latch
 // toggle and the release-candidate update toggle. Publisher Fonts is compiled only on
-// scalable-font builds; nine gesture entries (two-finger and edge) only for touch
-// devices; the eight Sync Server account entries only with its build switch; Two-tone
-// Text AA only on the EEGO A4.
+// scalable-font builds; ten entries (nine two-finger and edge gestures, and Word Hold
+// Action) only for touch devices; the eight Sync Server account entries only with its
+// build switch; Two-tone Text AA only on the EEGO A4.
 // getBaseSettingsCapacity() adds the four persisted IMU entries and the slide switch.
 #if CROSSINK_APP_CAP_KOREADER_SYNC
 inline constexpr size_t BASE_SETTINGS_KOREADER_ENTRIES = 8;
@@ -655,7 +642,7 @@ inline constexpr size_t BASE_SETTINGS_EEGO_ENTRIES = 1;
 inline constexpr size_t BASE_SETTINGS_EEGO_ENTRIES = 0;
 #endif
 inline constexpr size_t BASE_SETTINGS_CAPACITY = 108 + BASE_SETTINGS_SCALABLE_FONT_ENTRIES +
-                                                 (CROSSINK_APP_CAP_TOUCH ? 9 : 0) + BASE_SETTINGS_KOREADER_ENTRIES +
+                                                 (CROSSINK_APP_CAP_TOUCH ? 10 : 0) + BASE_SETTINGS_KOREADER_ENTRIES +
                                                  BASE_SETTINGS_EEGO_ENTRIES;
 
 #if FREEINK_DEVICE_PICCO
@@ -732,7 +719,8 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   if (!hasTouch) {
     v.erase(std::remove_if(v.begin(), v.end(),
                            [](const SettingInfo& s) {
-                             return s.nameId == StrId::STR_DISABLE_TOUCHSCREEN || s.nameId == StrId::STR_NEXT_PAGE ||
+                             return s.nameId == StrId::STR_WORD_HOLD_ACTION ||
+                                    s.nameId == StrId::STR_DISABLE_TOUCHSCREEN || s.nameId == StrId::STR_NEXT_PAGE ||
                                     s.nameId == StrId::STR_PREV_PAGE || s.nameId == StrId::STR_TAP_HIDE_STATUS_BAR ||
                                     s.nameId == StrId::STR_PINCH_FONT_RESIZE ||
                                     s.nameId == StrId::STR_TWO_FINGER_ROTATION ||
@@ -860,7 +848,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     auto guideIt =
         std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_GUIDE_READING; });
     const auto insertPos = guideIt == v.end() ? v.end() : guideIt + 1;
-    v.insert(insertPos, buildDictionarySetting(dictRegistry));
+    v.insert(insertPos, buildDictionarySetting(*dictRegistry));
   }
   return v;
 }
@@ -1004,10 +992,11 @@ inline std::vector<SettingInfo> buildControlsTapsGesturesSettingsList(const std:
   const bool hasRotation = hasSettingByName(allSettings, StrId::STR_TWO_FINGER_ROTATION);
   const bool hasTwoFingerSwipe = hasSettingByName(allSettings, StrId::STR_TWO_FINGER_SWIPE_UP);
   const bool hasEdgeGestures = hasSettingByName(allSettings, StrId::STR_LEFT_EDGE_UP);
-  settings.reserve(4 + (hasPinch ? 1u : 0u) + (hasRotation ? 1u : 0u) + (hasTwoFingerSwipe ? 1u : 0u) +
+  settings.reserve(5 + (hasPinch ? 1u : 0u) + (hasRotation ? 1u : 0u) + (hasTwoFingerSwipe ? 1u : 0u) +
                    (hasEdgeGestures ? 1u : 0u));
   addSettingByName(settings, allSettings, StrId::STR_NEXT_PAGE);
   addSettingByName(settings, allSettings, StrId::STR_PREV_PAGE);
+  addSettingByName(settings, allSettings, StrId::STR_WORD_HOLD_ACTION);
   if (hasPinch) addSettingByName(settings, allSettings, StrId::STR_PINCH_FONT_RESIZE);
   if (hasRotation) addSettingByName(settings, allSettings, StrId::STR_TWO_FINGER_ROTATION);
   addSettingByName(settings, allSettings, StrId::STR_TAP_HIDE_STATUS_BAR);

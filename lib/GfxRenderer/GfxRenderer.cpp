@@ -189,7 +189,7 @@ GfxRenderer::BitmapScratchLock::~BitmapScratchLock() {
 }
 
 void GfxRenderer::ensureSdCardFontReady(int fontId, const char* utf8Text, uint8_t styleMask) const {
-  auto it = sdCardFonts_.find(fontId);
+  auto it = sdCardFonts_.find(bitmapTextSize(fontId).sourceId);
   if (it != sdCardFonts_.end()) {
     std::string shaped;
     appendShapedRtlTokens(utf8Text, shaped);
@@ -202,7 +202,7 @@ void GfxRenderer::ensureSdCardFontReady(int fontId, const char* utf8Text, uint8_
 
 void GfxRenderer::ensureSdCardFontReady(int fontId, const std::deque<std::string>& words, bool includeHyphen,
                                         uint8_t styleMask) const {
-  auto it = sdCardFonts_.find(fontId);
+  auto it = sdCardFonts_.find(bitmapTextSize(fontId).sourceId);
   if (it != sdCardFonts_.end()) {
     // Augment the persistent advance-only table for layout measurement.
     // The table survives across paragraphs/sections (capped per font), so
@@ -221,7 +221,7 @@ void GfxRenderer::ensureSdCardFontReady(int fontId, const std::deque<std::string
 
 void GfxRenderer::ensureSdCardFontReady(int fontId, const uint32_t* codepoints, uint32_t cpCount, bool includeSpace,
                                         bool includeHyphen, uint8_t styleMask) const {
-  auto it = sdCardFonts_.find(fontId);
+  auto it = sdCardFonts_.find(bitmapTextSize(fontId).sourceId);
   if (it != sdCardFonts_.end()) {
     int missed =
         it->second->buildAdvanceTableForCodepoints(codepoints, cpCount, includeSpace, includeHyphen, styleMask);
@@ -364,11 +364,45 @@ void GfxRenderer::FrameBufferLoan::end() {
 bool GfxRenderer::isFontCacheScanning() const { return fontCacheManager_ && fontCacheManager_->isScanning(); }
 
 void GfxRenderer::insertFont(const int fontId, EpdFontFamily font) {
+  ruledFontCached_ = false;
   auto result = fontMap.insert({fontId, font});
   if (!result.second) {
     LOG_ERR("GFX", "Font ID %d already registered, ignoring duplicate", fontId);
+    return;
   }
+#if !CROSSINK_SCALABLE_FONTS
+  if (fontId && font.sizeFamilyId() && font.pointSize() >= 8 && font.pointSize() <= 44) {
+    const auto slot = std::find(bitmapSizeSources_.begin(), bitmapSizeSources_.end(), 0);
+    if (slot != bitmapSizeSources_.end()) *slot = fontId;
+  }
+#endif
 }
+
+void GfxRenderer::removeFont(const int fontId) {
+  ruledFontCached_ = false;
+  fontMap.erase(fontId);
+  sdCardFonts_.erase(fontId);
+#if !CROSSINK_SCALABLE_FONTS
+  const auto slot = std::find(bitmapSizeSources_.begin(), bitmapSizeSources_.end(), fontId);
+  if (slot != bitmapSizeSources_.end()) *slot = 0;
+#endif
+}
+
+#if !CROSSINK_SCALABLE_FONTS
+GfxRenderer::BitmapTextSize GfxRenderer::bitmapTextSize(const int fontId) const {
+  const auto id = static_cast<uint32_t>(fontId);
+  if ((id & 0xFFFF0000U) != BITMAP_SIZE_ID_BASE || fontMap.count(fontId)) return {fontId};
+  const auto slot = (id & 0xFFFFU) >> 6;
+  if (slot >= bitmapSizeSources_.size() || !bitmapSizeSources_[slot]) return {fontId};
+  const int source = bitmapSizeSources_[slot];
+  const auto it = fontMap.find(source);
+  if (it == fontMap.end()) return {fontId};
+  const int sourcePoints = it->second.pointSize();
+  const int points = id & 63;
+  if (points <= sourcePoints || points > 44) return {fontId};
+  return {source, sourcePoints, points};
+}
+#endif
 
 int GfxRenderer::filenameFontId(const int primaryFontId) const {
   const auto it = filenameFontMap_.find(primaryFontId);
@@ -893,6 +927,36 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
   renderer.drawGlyphBitmap(bitmap, width, height, frame, is2Bit, renderMode, pixelState);
 }
 
+#if !CROSSINK_SCALABLE_FONTS
+// Sample the native glyph directly. A large heading can use both grayscale
+// text planes without allocating a second bitmap or changing the glyph cache.
+static void drawEnlargedGlyph(const GfxRenderer& renderer, GfxRenderer::RenderMode mode,
+                              const EpdFontFamily::GlyphData& data, int left, int top, int width, int height,
+                              bool black) {
+  if (!data.glyph || !data.fontData || width <= 0 || height <= 0 ||
+      !renderer.glyphIntersectsStrip(left, top, left + width - 1, top + height - 1))
+    return;
+  const auto* bitmap = renderer.getGlyphBitmap(data.fontData, data.glyph);
+  if (!bitmap) return;
+  const int srcWidth = data.glyph->width;
+  const int srcHeight = data.glyph->height;
+  const int stepX = (srcWidth << 16) / width;
+  const int stepY = (srcHeight << 16) / height;
+  for (int row = 0, sy = stepY / 2; row < height; ++row, sy += stepY) {
+    const int srcRow = (sy >> 16) * srcWidth;
+    for (int col = 0, sx = stepX / 2; col < width; ++col, sx += stepX) {
+      const int index = srcRow + (sx >> 16);
+      if (data.fontData->is2Bit) {
+        const uint8_t raw = (bitmap[index >> 2] >> (6 - 2 * (index & 3))) & 3;
+        draw2BitFontPixel(renderer, mode, left + col, top + row, raw, black);
+      } else if (bitmap[index >> 3] & (0x80 >> (index & 7))) {
+        renderer.drawPixel(left + col, top + row, black);
+      }
+    }
+  }
+}
+#endif
+
 // Draw an unscaled glyph placed by a logical frame. Equivalent to calling
 // drawPixel() for each ink pixel, but the clip test, orientation rotation,
 // strip-band check and address math are resolved once per glyph rather than
@@ -951,6 +1015,38 @@ bool GfxRenderer::isPixelBlack(const int x, const int y) const {
   const uint32_t byteIndex = rowY * panelWidthBytes + (phyX / 8);
   const uint8_t bitPosition = 7 - (phyX % 8);
   return (target[byteIndex] & (1 << bitPosition)) == 0;
+}
+
+// Check a logical rectangle in framebuffer bytes, including only the requested
+// bits in the first and last bytes. Off-screen pixels and absent strip rows are white.
+bool GfxRenderer::hasBlackPixels(int x, int y, int width, int height) const {
+  if (width <= 0 || height <= 0) return false;
+  int x0, y0, x1, y1;
+  rotateCoordinates(orientation, x, y, &x0, &y0, panelWidth, panelHeight);
+  rotateCoordinates(orientation, x + width - 1, y + height - 1, &x1, &y1, panelWidth, panelHeight);
+  const int left = std::max(0, std::min(x0, x1));
+  const int right = std::min<int>(panelWidth - 1, std::max(x0, x1));
+  const int origin = getWriteOriginY();
+  const int top = std::max(origin, std::min(y0, y1));
+  const int bottom = std::min(origin + getWriteRows() - 1, std::max(y0, y1));
+  if (left > right || top > bottom) return false;
+
+  const int first = left / 8, last = right / 8;
+  const uint8_t leftMask = 0xff >> (left % 8);
+  const uint8_t rightMask = 0xff << (7 - right % 8);
+  const uint8_t* row = getWriteTarget() + (top - origin) * panelWidthBytes;
+  for (int py = top; py <= bottom; ++py) {
+    if (first == last) {
+      if (~row[first] & leftMask & rightMask) return true;
+    } else {
+      if ((~row[first] & leftMask) || (~row[last] & rightMask)) return true;
+      for (int i = first + 1; i < last; ++i) {
+        if (row[i] != 0xff) return true;
+      }
+    }
+    row += panelWidthBytes;
+  }
+  return false;
 }
 
 void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
@@ -1063,17 +1159,18 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
     return 0;
   }
 
-  const int resolvedFontId = fontId;
+  const auto size = bitmapTextSize(fontId);
+  const int resolvedFontId = size.sourceId;
   const auto sdIt = sdCardFonts_.find(resolvedFontId);
   SdCardFont::MetricsScope metrics(sdIt == sdCardFonts_.end() ? nullptr : sdIt->second);
 
   if (characterSpacing != 0) {
-    return getTextAdvanceX(resolvedFontId, text, style, 0, characterSpacing);
+    return getTextAdvanceX(fontId, text, style, 0, characterSpacing);
   }
   std::string visualBuffer;
   const char* textCursor = resolveVisualText(text, visualBuffer, baseDir);
   if ((style & EpdFontFamily::SMALL_CAPS) != 0) {
-    return getTextAdvanceX(resolvedFontId, textCursor, style);
+    return getTextAdvanceX(fontId, textCursor, style);
   }
 
   // SD-card fonts can measure from their persistent advance table during layout.
@@ -1090,7 +1187,7 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
       if (utf8IsVariationSelector(cp)) continue;
       widthFP += resolveSdCardAdvanceFP(*sdIt->second, font, cp, style, styleIdx);
     }
-    return fp4::toPixel(widthFP);
+    return size.scale(fp4::toPixel(widthFP));
   }
 
   const auto fontIt = fontMap.find(resolvedFontId);
@@ -1101,16 +1198,33 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
 
   int w = 0, h = 0;
   fontIt->second.getTextDimensions(textCursor, &w, &h, style);
-  return w;
+  return size.scale(w);
+}
+
+void GfxRenderer::selectRuledFont(int fontId) const {
+  if (ruledFontCached_ && ruledFontId_ == fontId) return;
+  ruledFontId_ = fontId;
+  latinBodyValid_ = false;
+  latinLetters_.fill({});
+  ruledFontCached_ = true;
 }
 
 bool GfxRenderer::getLatinBodyBounds(int fontId, TextVerticalBounds& body, TextVerticalBounds& extent) const {
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
 #endif
-  const auto it = fontMap.find(fontId);
+  const std::lock_guard<std::mutex> lock(ruledFontMutex_);
+  selectRuledFont(fontId);
+  if (latinBodyValid_) {
+    body = latinBody_;
+    extent = latinExtent_;
+    return true;
+  }
+  const auto failures = EpdFont::glyphLookupFailureCount();
+  const auto size = bitmapTextSize(fontId);
+  const auto it = fontMap.find(size.sourceId);
   if (it == fontMap.end()) return false;
-  const auto sd = sdCardFonts_.find(fontId);
+  const auto sd = sdCardFonts_.find(size.sourceId);
   SdCardFont::MetricsScope metrics(sd == sdCardFonts_.end() ? nullptr : sd->second);
   const auto& font = it->second;
   const int baseline = font.getData(EpdFontFamily::REGULAR)->ascender;
@@ -1124,6 +1238,14 @@ bool GfxRenderer::getLatinBodyBounds(int fontId, TextVerticalBounds& body, TextV
     const auto* glyph = font.findGlyphData(cp).glyph;
     if (glyph && glyph->width) extent.include(baseline - glyph->top, glyph->height);
   }
+  body = {size.scale(body.top), size.scale(body.bottom)};
+  extent = {size.scale(extent.top), size.scale(extent.bottom)};
+  // A transient SD or scalable-font miss can leave the sampled extent incomplete.
+  if (EpdFont::glyphLookupFailureCount() == failures) {
+    latinBody_ = body;
+    latinExtent_ = extent;
+    latinBodyValid_ = true;
+  }
   return true;
 }
 
@@ -1136,9 +1258,15 @@ GfxRenderer::TextVerticalBounds GfxRenderer::getTextVerticalBounds(const int fon
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
 #endif
-  const auto sd = sdCardFonts_.find(fontId);
+  const auto sd = sdCardFonts_.find(bitmapTextSize(fontId).sourceId);
   SdCardFont::MetricsScope metrics(sd == sdCardFonts_.end() ? nullptr : sd->second);
-  drawOrMeasureText(fontId, 0, 0, text, true, style, baseDir, spacing, &bounds);
+  if (style == EpdFontFamily::REGULAR) {
+    const std::lock_guard<std::mutex> lock(ruledFontMutex_);
+    selectRuledFont(fontId);
+    drawOrMeasureText(fontId, 0, 0, text, true, style, baseDir, spacing, &bounds, latinLetters_.data());
+  } else {
+    drawOrMeasureText(fontId, 0, 0, text, true, style, baseDir, spacing, &bounds);
+  }
   return bounds;
 }
 
@@ -1170,13 +1298,15 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
 
 void GfxRenderer::drawOrMeasureText(const int fontId, const int x, const int y, const char* text, const bool black,
                                     const EpdFontFamily::Style style, const BidiUtils::BidiBaseDir baseDir,
-                                    const int8_t characterSpacing, TextVerticalBounds* bounds) const {
+                                    const int8_t characterSpacing, TextVerticalBounds* bounds,
+                                    LetterInk* letters) const {
   // cannot draw a NULL / empty string
   if (text == nullptr || *text == '\0') {
     return;
   }
 
-  const int resolvedFontId = fontId;
+  const auto size = bitmapTextSize(fontId);
+  const int resolvedFontId = size.sourceId;
   const int yPos = y + getFontAscenderSize(resolvedFontId);
   int lastBaseX = x;
   int lastBaseLeft = 0;
@@ -1203,7 +1333,50 @@ void GfxRenderer::drawOrMeasureText(const int fontId, const int x, const int y, 
     return;
   }
   const auto& font = fontIt->second;
+  const auto scaledX = [size, x](int sourceX) { return x + size.scale(sourceX - x); };
+  const auto scaledY = [size, y](int sourceY) { return y + size.scale(sourceY - y); };
+  const auto includeInk = [&](int top, int height) {
+    const int scaledTop = scaledY(top);
+    bounds->include(scaledTop, scaledY(top + height) - scaledTop);
+  };
+  const auto drawGlyph = [&](uint32_t cp, int cursorX, int baseline, bool supSub, bool smallCaps = false) {
+#if !CROSSINK_SCALABLE_FONTS
+    if (size.enlarged()) {
+      const auto data = font.getGlyphData(cp, style);
+      if (!data.glyph || !data.glyph->width || !data.glyph->height) return;
+      const auto bearing = [supSub, smallCaps](int value) {
+        return supSub ? value / 2 : smallCaps ? scaleSmallCapsMetric(value) : value;
+      };
+      const auto extent = [supSub, smallCaps](int value) {
+        return supSub ? (value + 1) / 2 : smallCaps ? smallCapsScaledExtent(value) : value;
+      };
+      const int sourceLeft = cursorX + bearing(data.glyph->left);
+      const int sourceTop = baseline - bearing(data.glyph->top);
+      const int left = scaledX(sourceLeft);
+      const int top = scaledY(sourceTop);
+      drawEnlargedGlyph(*this, renderMode, data, left, top, scaledX(sourceLeft + extent(data.glyph->width)) - left,
+                        scaledY(sourceTop + extent(data.glyph->height)) - top, black);
+      return;
+    }
+#endif
+    if (supSub)
+      renderCharScaled(*this, renderMode, font, cp, cursorX, baseline, black, style);
+    else if (smallCaps)
+      renderCharSmallCaps(*this, renderMode, font, cp, cursorX, baseline, black, style);
+    else
+      renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, cursorX, baseline, black, style);
+  };
+  const auto scaledSynthetic = [&](SyntheticSolidGlyphMetrics metrics, int cursorX, int baseline) {
+    metrics.width = scaledX(cursorX + metrics.left + metrics.width) - scaledX(cursorX + metrics.left);
+    metrics.height = scaledY(baseline - metrics.top + metrics.height) - scaledY(baseline - metrics.top);
+    metrics.left = scaledX(cursorX + metrics.left) - scaledX(cursorX);
+    metrics.top = scaledY(baseline) - scaledY(baseline - metrics.top);
+    return metrics;
+  };
 
+#if CROSSINK_SCALABLE_FONTS
+  if (letters && font.getData(style)->dynamicGlyphHandler) letters = nullptr;
+#endif
   uint32_t cp;
   int trackingGaps = 0;
   uint32_t prevCp = 0;
@@ -1220,9 +1393,9 @@ void GfxRenderer::drawOrMeasureText(const int fontId, const int x, const int y, 
       const int combiningX = combiningMark::anchorOver(anchor, lastBaseX, lastBaseLeft, lastBaseWidth,
                                                        combiningGlyph->left, combiningGlyph->width);
       if (bounds) {
-        if (combiningGlyph->width) bounds->include(yPos - raiseBy - combiningGlyph->top, combiningGlyph->height);
+        if (combiningGlyph->width) includeInk(yPos - raiseBy - combiningGlyph->top, combiningGlyph->height);
       } else
-        renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, combiningX, yPos - raiseBy, black, style);
+        drawGlyph(cp, combiningX, yPos - raiseBy, false);
       continue;
     }
 
@@ -1232,8 +1405,27 @@ void GfxRenderer::drawOrMeasureText(const int fontId, const int x, const int y, 
     } else if (characterSpacing == 0) {
       cp = font.applyLigatures(cp, textCursor, style);
     }
-    cp = font.getFallbackCodepoint(cp, style);
-    const bool hasRealGlyph = font.findGlyphData(cp, style).glyph != nullptr;
+    // A vertical-only measurement can consume the resolved metrics directly.
+    // Do not carry an on-demand glyph pointer across the drawing path's kerning or raster lookups.
+    // After ligature substitution, ordinary letters have the same vertical ink in
+    // every word. Combining marks still need the preceding base glyph's original top.
+    LetterInk* letter = letters && cp >= 32 && cp <= 126 ? &letters[cp - 32] : nullptr;
+    if (letter && letter->encodedTop) {
+      lastBaseTop = letter->encodedTop - 128;
+      includeInk(yPos - lastBaseTop, letter->height);
+      prevCp = cp;
+      continue;
+    }
+    const uint32_t originalCp = cp;
+    const auto failures = letter ? EpdFont::glyphLookupFailureCount() : 0;
+    const EpdGlyph* measuredGlyph = nullptr;
+    cp = font.getFallbackCodepoint(cp, style, bounds ? &measuredGlyph : nullptr);
+    if (letter && measuredGlyph && cp == originalCp && measuredGlyph->top >= -127 && measuredGlyph->top <= 127 &&
+        failures == EpdFont::glyphLookupFailureCount()) {
+      letter->encodedTop = static_cast<uint8_t>(measuredGlyph->top + 128);
+      letter->height = measuredGlyph->width ? measuredGlyph->height : 0;
+    }
+    const bool hasRealGlyph = bounds ? measuredGlyph != nullptr : font.findGlyphData(cp, style).glyph != nullptr;
 
     // Differential rounding: snap (previous advance + current kern) as one unit so
     // identical character pairs always produce the same pixel step regardless of
@@ -1252,7 +1444,7 @@ void GfxRenderer::drawOrMeasureText(const int fontId, const int x, const int y, 
     }
 
     if (syntheticGlyph::isBlankSpace(cp, hasRealGlyph)) {
-      prevAdvanceFP = font.getSpaceAdvanceX(cp, style);
+      if (!bounds) prevAdvanceFP = font.getSpaceAdvanceX(cp, style);
       if ((style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0) prevAdvanceFP = halfAdvanceFP(prevAdvanceFP);
       lastBaseLeft = 0;
       lastBaseWidth = 0;
@@ -1265,9 +1457,10 @@ void GfxRenderer::drawOrMeasureText(const int fontId, const int x, const int y, 
     if (!hasRealGlyph && syntheticGlyph::isSolid(cp)) {
       const auto metrics = getSyntheticSolidGlyphMetrics(font, style, cp);
       if (bounds)
-        bounds->include(yPos - metrics.top, metrics.height);
+        includeInk(yPos - metrics.top, metrics.height);
       else
-        fillSyntheticSolidGlyph(*this, metrics, lastBaseX, yPos, black);
+        fillSyntheticSolidGlyph(*this, scaledSynthetic(metrics, lastBaseX, yPos), scaledX(lastBaseX), scaledY(yPos),
+                                black);
       lastBaseLeft = metrics.left;
       lastBaseWidth = metrics.width;
       lastBaseTop = metrics.top;
@@ -1280,9 +1473,10 @@ void GfxRenderer::drawOrMeasureText(const int fontId, const int x, const int y, 
     if (!hasRealGlyph && syntheticGlyph::isGreekFallback(cp)) {
       const auto metrics = getSyntheticGreekGlyphMetrics(font, style, cp);
       if (bounds)
-        bounds->include(yPos - metrics.top, metrics.height);
+        includeInk(yPos - metrics.top, metrics.height);
       else
-        drawSyntheticGreekGlyph(*this, metrics, cp, lastBaseX, yPos, black);
+        drawSyntheticGreekGlyph(*this, scaledSynthetic(metrics, lastBaseX, yPos), cp, scaledX(lastBaseX), scaledY(yPos),
+                                black);
       lastBaseLeft = metrics.left;
       lastBaseWidth = metrics.width;
       lastBaseTop = metrics.top;
@@ -1295,9 +1489,10 @@ void GfxRenderer::drawOrMeasureText(const int fontId, const int x, const int y, 
     if (!hasRealGlyph && syntheticGlyph::isReplacementFallback(cp)) {
       const auto metrics = getSyntheticReplacementGlyphMetrics(font, style);
       if (bounds)
-        bounds->include(yPos - metrics.top, metrics.height);
+        includeInk(yPos - metrics.top, metrics.height);
       else
-        drawSyntheticReplacementGlyph(*this, metrics, lastBaseX, yPos, black);
+        drawSyntheticReplacementGlyph(*this, scaledSynthetic(metrics, lastBaseX, yPos), scaledX(lastBaseX),
+                                      scaledY(yPos), black);
       lastBaseLeft = metrics.left;
       lastBaseWidth = metrics.width;
       lastBaseTop = metrics.top;
@@ -1307,7 +1502,7 @@ void GfxRenderer::drawOrMeasureText(const int fontId, const int x, const int y, 
       continue;
     }
 
-    const EpdGlyph* glyph = font.getGlyph(cp, style);
+    const EpdGlyph* glyph = bounds ? measuredGlyph : font.getGlyph(cp, style);
 
     if (!glyph) {
       // Advance was already flushed into lastBaseX above; clear base metrics so the
@@ -1339,14 +1534,10 @@ void GfxRenderer::drawOrMeasureText(const int fontId, const int x, const int y, 
       const int height = isSupSub         ? (glyph->height + 1) / 2
                          : scaledSmallCap ? smallCapsScaledExtent(glyph->height)
                                           : glyph->height;
-      bounds->include(yPos - top, height);
-    } else if (isSupSub) {
-      // yPos already carries the vertical offset applied by TextBlock::render().
-      renderCharScaled(*this, renderMode, font, cp, lastBaseX, yPos, black, style);
-    } else if (scaledSmallCap) {
-      renderCharSmallCaps(*this, renderMode, font, cp, lastBaseX, yPos, black, style);
+      includeInk(yPos - top, height);
     } else {
-      renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, lastBaseX, yPos, black, style);
+      // yPos already carries the vertical offset applied by TextBlock::render().
+      drawGlyph(cp, lastBaseX, yPos, isSupSub, scaledSmallCap);
     }
     prevCp = cp;
     prevScaledSmallCap = scaledSmallCap;
@@ -2760,25 +2951,26 @@ int GfxRenderer::getSpaceWidth(const int fontId, const EpdFontFamily::Style styl
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
 #endif
+  const auto size = bitmapTextSize(fontId);
   // Advance table fast-path for SD card fonts during layout
-  auto sdIt = sdCardFonts_.find(fontId);
+  auto sdIt = sdCardFonts_.find(size.sourceId);
   if (sdIt != sdCardFonts_.end() && sdIt->second->hasAdvanceTable()) {
     const uint8_t resolvedStyle = resolveSdCardStyle(*sdIt->second, style);
     uint16_t advanceFP = sdIt->second->getAdvance(' ', resolvedStyle);
     if (advanceFP == 0) {
       sdIt->second->readAdvance(' ', resolvedStyle, &advanceFP);
     }
-    return fp4::toPixel(advanceFP);
+    return size.scale(fp4::toPixel(advanceFP));
   }
 
-  const auto fontIt = fontMap.find(fontId);
+  const auto fontIt = fontMap.find(size.sourceId);
   if (fontIt == fontMap.end()) {
     LOG_ERR("GFX", "Font %d not found", fontId);
     return 0;
   }
 
   const EpdGlyph* spaceGlyph = fontIt->second.getGlyph(' ', style);
-  return spaceGlyph ? fp4::toPixel(spaceGlyph->advanceX) : 0;  // snap 12.4 fixed-point to nearest pixel
+  return spaceGlyph ? size.scale(fp4::toPixel(spaceGlyph->advanceX)) : 0;  // snap 12.4 fixed-point to nearest pixel
 }
 
 int GfxRenderer::getSpaceAdvance(const int fontId, const uint32_t leftCp, const uint32_t rightCp,
@@ -2786,20 +2978,21 @@ int GfxRenderer::getSpaceAdvance(const int fontId, const uint32_t leftCp, const 
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
 #endif
+  const auto size = bitmapTextSize(fontId);
   // Advance table fast-path for SD card fonts during layout.
   // Kern data is not loaded during layout (consistent with previous metadataOnly behavior),
   // so we return just the space advance without kerning.
-  auto sdIt = sdCardFonts_.find(fontId);
+  auto sdIt = sdCardFonts_.find(size.sourceId);
   if (sdIt != sdCardFonts_.end() && sdIt->second->hasAdvanceTable()) {
     const uint8_t resolvedStyle = resolveSdCardStyle(*sdIt->second, style);
     uint16_t advanceFP = sdIt->second->getAdvance(' ', resolvedStyle);
     if (advanceFP == 0) {
       sdIt->second->readAdvance(' ', resolvedStyle, &advanceFP);
     }
-    return fp4::toPixel(advanceFP);
+    return size.scale(fp4::toPixel(advanceFP));
   }
 
-  const auto fontIt = fontMap.find(fontId);
+  const auto fontIt = fontMap.find(size.sourceId);
   if (fontIt == fontMap.end()) return 0;
   const auto& font = fontIt->second;
   const EpdGlyph* spaceGlyph = font.getGlyph(' ', style);
@@ -2808,7 +3001,7 @@ int GfxRenderer::getSpaceAdvance(const int fontId, const uint32_t leftCp, const 
   // Snapping the combined value avoids the +/-1 px error from snapping each component separately.
   const int32_t kernFP = static_cast<int32_t>(font.getKerning(leftCp, ' ', style)) +
                          static_cast<int32_t>(font.getKerning(' ', rightCp, style));
-  return fp4::toPixel(spaceAdvanceFP + kernFP);
+  return size.scale(fp4::toPixel(spaceAdvanceFP + kernFP));
 }
 
 int GfxRenderer::getKerning(const int fontId, const uint32_t leftCp, const uint32_t rightCp,
@@ -2816,12 +3009,13 @@ int GfxRenderer::getKerning(const int fontId, const uint32_t leftCp, const uint3
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
 #endif
-  const auto fontIt = fontMap.find(fontId);
+  const auto size = bitmapTextSize(fontId);
+  const auto fontIt = fontMap.find(size.sourceId);
   if (fontIt == fontMap.end()) return 0;
   const int kernFP = fontIt->second.getKerning(leftCp, rightCp, style);  // 4.4 fixed-point
-  return fp4::toPixel(kernFP) + (characterSpacing != 0 && characterSpacingBoundary(leftCp, rightCp)
-                                     ? characterSpacingPixels(1, characterSpacing)
-                                     : 0);  // snap 4.4 fixed-point to nearest pixel
+  return size.scale(fp4::toPixel(kernFP) + (characterSpacing != 0 && characterSpacingBoundary(leftCp, rightCp)
+                                                ? characterSpacingPixels(1, characterSpacing)
+                                                : 0));  // snap 4.4 fixed-point to nearest pixel
 }
 
 int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFontFamily::Style style,
@@ -2829,7 +3023,8 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFo
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
 #endif
-  const int resolvedFontId = fontId;
+  const auto size = bitmapTextSize(fontId);
+  const int resolvedFontId = size.sourceId;
   const auto sdIt = sdCardFonts_.find(resolvedFontId);
   SdCardFont::MetricsScope metrics(sdIt == sdCardFonts_.end() ? nullptr : sdIt->second);
 
@@ -2896,7 +3091,7 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFo
                    characterSpacingPixels(trackingGaps, characterSpacing);
       }
     }
-    return widthPx + fp4::toPixel(prevAdvanceFP);
+    return size.scale(widthPx + fp4::toPixel(prevAdvanceFP));
   }
 
   const auto fontIt = fontMap.find(resolvedFontId);
@@ -3002,7 +3197,7 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFo
   } else {
     widthPx += fp4::toPixel(prevAdvanceFP);  // final glyph's advance
   }
-  return widthPx;
+  return size.scale(widthPx);
 }
 
 bool GfxRenderer::getCodepointMetrics(const int fontId, const uint32_t cp, const EpdFontFamily::Style style,
@@ -3010,22 +3205,28 @@ bool GfxRenderer::getCodepointMetrics(const int fontId, const uint32_t cp, const
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
 #endif
-  const auto fontIt = fontMap.find(fontId);
+  const auto size = bitmapTextSize(fontId);
+  const auto fontIt = fontMap.find(size.sourceId);
   if (fontIt == fontMap.end()) return false;
+  const auto sd = sdCardFonts_.find(size.sourceId);
+  SdCardFont::MetricsScope metrics(sd == sdCardFonts_.end() ? nullptr : sd->second);
   if (syntheticGlyph::isBlankSpace(cp, cp == 0x1680 && fontIt->second.findGlyphData(cp, style).glyph)) {
-    advanceFP = fontIt->second.getSpaceAdvanceX(cp, style);
+    advanceFP = size.scale(fontIt->second.getSpaceAdvanceX(cp, style));
     top = 0;
     return true;
   }
   const EpdGlyph* glyph = fontIt->second.getGlyph(cp, style);
   if (!glyph) return false;
-  advanceFP = glyph->advanceX;
-  top = glyph->top;
+  advanceFP = size.scale(glyph->advanceX);
+  top = size.scale(glyph->top);
   return true;
 }
 
-int GfxRenderer::drawScaledCodepoint(const int fontId, const uint32_t cp, const EpdFontFamily::Style style, const int x,
-                                     const int baselineY, const int scale256, const bool pixelState) const {
+int GfxRenderer::drawScaledCodepoint(int fontId, const uint32_t cp, const EpdFontFamily::Style style, const int x,
+                                     const int baselineY, int scale256, const bool pixelState) const {
+  const auto size = bitmapTextSize(fontId);
+  fontId = size.sourceId;
+  scale256 = size.scale(scale256);
   if (scale256 <= 0 || scale256 > 4096) return 0;
   if (fontCacheManager_ && fontCacheManager_->isScanning()) {
     char utf8[5] = {};
@@ -3089,39 +3290,31 @@ int GfxRenderer::getFontAscenderSize(const int fontId) const {
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
 #endif
-  const auto fontIt = fontMap.find(fontId);
+  const auto size = bitmapTextSize(fontId);
+  const auto fontIt = fontMap.find(size.sourceId);
   if (fontIt == fontMap.end()) {
     LOG_ERR("GFX", "Font %d not found", fontId);
     return 0;
   }
 
-  return fontIt->second.getData(EpdFontFamily::REGULAR)->ascender;
+  return size.scale(fontIt->second.getData(EpdFontFamily::REGULAR)->ascender);
 }
 
 int GfxRenderer::getLineHeight(const int fontId) const {
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
 #endif
-  const auto fontIt = fontMap.find(fontId);
+  const auto size = bitmapTextSize(fontId);
+  const auto fontIt = fontMap.find(size.sourceId);
   if (fontIt == fontMap.end()) {
     LOG_ERR("GFX", "Font %d not found", fontId);
     return 0;
   }
 
-  return fontIt->second.getData(EpdFontFamily::REGULAR)->advanceY;
+  return size.scale(fontIt->second.getData(EpdFontFamily::REGULAR)->advanceY);
 }
 
-int GfxRenderer::getTextHeight(const int fontId) const {
-#if CROSSINK_SCALABLE_FONTS
-  ScalableFontAccess access;
-#endif
-  const auto fontIt = fontMap.find(fontId);
-  if (fontIt == fontMap.end()) {
-    LOG_ERR("GFX", "Font %d not found", fontId);
-    return 0;
-  }
-  return fontIt->second.getData(EpdFontFamily::REGULAR)->ascender;
-}
+int GfxRenderer::getTextHeight(const int fontId) const { return getFontAscenderSize(fontId); }
 
 void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y, const char* text, const bool black,
                                       const EpdFontFamily::Style style) const {
@@ -3496,6 +3689,8 @@ void GfxRenderer::setRenderMode(RenderMode mode) {
 }
 
 uint8_t GfxRenderer::getFontPointSize(const int fontId) const {
+  const auto size = bitmapTextSize(fontId);
+  if (size.enlarged()) return size.points;
   const auto it = fontMap.find(fontId);
   if (it != fontMap.end()) {
 #if CROSSINK_SCALABLE_FONTS
@@ -3510,7 +3705,9 @@ uint8_t GfxRenderer::getFontPointSize(const int fontId) const {
 
 int GfxRenderer::getFontIdForSize(const int fontId, const uint8_t points) const {
   if (!points) return fontId;
-  const auto it = fontMap.find(fontId);
+  const auto baseSize = bitmapTextSize(fontId);
+  if (baseSize.enlarged() && points == baseSize.points) return fontId;
+  const auto it = fontMap.find(baseSize.sourceId);
   if (it == fontMap.end()) return fontId;
 #if CROSSINK_SCALABLE_FONTS
   const auto* scalable = it->second.getData();
@@ -3528,15 +3725,17 @@ int GfxRenderer::getFontIdForSize(const int fontId, const uint8_t points) const 
   if (!it->second.sizeFamilyId()) return fontId;
   const auto& base = it->second;
   if (base.pointSize() < 8 || base.pointSize() > 44) return fontId;
-  int chosenId = fontId;
+  int chosenId = baseSize.sourceId;
   unsigned distance = 256;
   uint8_t chosenSize = 0;
+  uint8_t largest = 0;
   // Shrinking rounds down when possible; growth picks the nearest installed
   // bitmap (ties grow). No storage I/O or font allocation happens here.
   bool foundBelow = false;
   for (const auto& [id, family] : fontMap) {
     if (family.sizeFamilyId() != base.sizeFamilyId() || !family.pointSize()) continue;
     const uint8_t size = family.pointSize();
+    largest = std::max(largest, size);
     if (points < base.pointSize() && size <= points) {
       if (!foundBelow || size > chosenSize) {
         chosenId = id;
@@ -3552,6 +3751,18 @@ int GfxRenderer::getFontIdForSize(const int fontId, const uint8_t points) const 
       }
     }
   }
+#if !CROSSINK_SCALABLE_FONTS
+  // Closest native size wins within the available range. When a request would
+  // exceed that range or collapse into the body size, enlarge the bitmap we
+  // already have. No font face, glyph buffer, or SD file is added for this size.
+  if (points <= 44 && points > base.pointSize() && (points > largest || chosenSize == base.pointSize())) {
+    const auto slot = std::find(bitmapSizeSources_.begin(), bitmapSizeSources_.end(), chosenId);
+    if (slot != bitmapSizeSources_.end()) {
+      const int alias = BITMAP_SIZE_ID_BASE + (static_cast<int>(slot - bitmapSizeSources_.begin()) << 6) + points;
+      if (!fontMap.count(alias)) return alias;
+    }
+  }
+#endif
   return chosenId;
 }
 

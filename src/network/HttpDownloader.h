@@ -94,7 +94,7 @@ class HttpDownloader {
     // Borrowed only for this synchronous request. Basic credentials are sent
     // only to this origin; empty keeps the request URL as the credential origin.
     std::string_view authorizationOrigin;
-    // Download to "<destPath>.part" and rename it over destPath only once the
+    // Download into the private transfer directory and publish to destPath once the
     // transfer succeeds, so a failed or interrupted download never replaces
     // (or deletes) an existing file and never leaves a truncated one behind
     // under the real name.
@@ -104,7 +104,7 @@ class HttpDownloader {
     // With stageAsPart: leave the file the download replaced at "<destPath>.old" for the
     // caller, which must remove it. A replaced book's highlights and sync state are keyed by
     // its content, and moving them needs the old copy beside the new one (BookUpdateMigration,
-    // which also picks up one a reset left behind). The next staged download to destPath
+    // which also picks up one a reset left behind). The next keepReplaced download to destPath
     // removes a leftover (DownloadFileSwap::recover), so a caller resumes it before that.
     bool keepReplaced = false;
     // Checks the finished file before it is accepted (and, with stageAsPart,

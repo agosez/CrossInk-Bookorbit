@@ -2,6 +2,7 @@
 
 #include <BoardConfig.h>
 #include <Epub.h>
+#include <FilePublication.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
@@ -163,9 +164,9 @@ constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 1000;
 constexpr unsigned long DOWNLOAD_PROGRESS_MAX_UPDATE_MS = 5000;
 // Hold threshold for the book action menu (firmware convention, as in Recent Books).
 constexpr unsigned long LONG_PRESS_MS = 1000;
-// Where HttpDownloader stages a download until it is complete and checked (see
-// DownloadFileSwap). Not ".epub", so a leftover never shows up as a book.
-constexpr char STAGED_DOWNLOAD_SUFFIX[] = ".part";
+// HttpDownloader's FilePublication staging kind: a download waits below
+// /.crosspoint/xfer/<kind>/ until it is complete and checked.
+constexpr char STAGED_DOWNLOAD_KIND[] = "http-download";
 // Marker appended (right-aligned) to catalog rows whose book already exists on the
 // device. U+2022 bullet: guaranteed by the built-in fonts' default glyph intervals.
 constexpr char ON_DEVICE_MARKER[] = "\xE2\x80\xA2";
@@ -1363,7 +1364,7 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
   };
 
   // A replacement a reset interrupted: this download would drop its old copy
-  // (DownloadFileSwap::recover), so the state that copy holds moves first.
+  // (DownloadFileSwap::recover, keepReplaced below), so the state that copy holds moves first.
   if (BookUpdateMigration::pending(finalPath)) BookUpdateMigration::begin(finalPath, /*renderCacheIsOld=*/false);
 
   HttpDownloader::DownloadOptions downloadOptions;
@@ -1376,8 +1377,8 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
   // connection's input buffer to a full record while the heap still has the block
   // (skipped when the server agreed to small records, issue #96).
   downloadOptions.reserveFullRecord = true;
-  // CrossInk v1.6.1's download safeguards, as its OPDS browser uses them: stage the file
-  // as "<book>.part", refuse a book the card cannot hold before writing any of it, and
+  // CrossInk's download safeguards, as its OPDS browser uses them: stage the file in the
+  // private transfer directory, refuse a book the card cannot hold before writing any of it, and
   // only put the file in place once it opens as an EPUB. A body cut short without a
   // Content-Length, or an error page served as the file, used to land as the book.
   downloadOptions.stageAsPart = true;
@@ -1447,7 +1448,8 @@ void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const i
   if (downloadFailed) {
     // preservePartial kept the staged file for resuming between attempts; don't
     // leave it behind once we give up.
-    Storage.remove((finalPath + STAGED_DOWNLOAD_SUFFIX).c_str());
+    std::string staged;
+    if (FilePublication::stagePath(finalPath, STAGED_DOWNLOAD_KIND, staged)) Storage.remove(staged.c_str());
   }
 
   if (result == HttpDownloader::OK) {

@@ -126,7 +126,10 @@ def main():
     # A non-empty prepare_release marks the snapshot as a release build, as upstream's
     # release job does; its tag checks are upstream-specific and not repeated here.
     publisher.args = SimpleNamespace(channel=args.channel, release_tag=None, prepare_release=args.version)
-    bundles = [publisher.build_languages(args.version, commit), publisher.build_hyphenation()]
+    # Finnish hyphenation has its own catalog, so firmware older than CrossInk v2.0.0 keeps
+    # reading the nine-entry one.
+    bundles = [publisher.build_languages(args.version, commit), publisher.build_hyphenation(),
+               publisher.build_finnish_hyphenation()]
     files, catalogs = plan(args.output, bundles)
     envelopes = signatures(bundles, catalogs, args.signing_key)
     new = sum(1 for name in files if not (args.output / name).exists())

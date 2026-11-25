@@ -433,8 +433,8 @@ bool ClipSelectionActivity::hasTextBuildMemory(const int from, const int to, con
   const auto budget = ClipTextBuilder::allocationBudget(wordStore, readingOrder.data(), from, to, tableSelection);
   const auto heap = MemoryBudget::snapshot();
   if (budget.fits(heap.freeHeap, heap.maxAllocHeap)) return true;
-  LOG_ERR("CLIP", "Low heap assembling selection (%u free, %u largest; %u text + %u temporary)", heap.freeHeap,
-          heap.maxAllocHeap, static_cast<unsigned>(budget.textCapacity), static_cast<unsigned>(budget.temporaryBytes));
+  LOG_ERR("CLIP", "Low heap assembling selection (%u free, %u largest; %u text)", heap.freeHeap, heap.maxAllocHeap,
+          static_cast<unsigned>(budget.textCapacity));
   return false;
 }
 
@@ -586,14 +586,14 @@ bool ClipSelectionActivity::switchToPage(const int pageIdx) {
 
   if (page->hasImages()) {
     GfxRenderer::FrameBufferLoan loan(renderer);
-    page->prepareImageCaches();
+    page->prepareImageCaches(/*grayscale=*/false);
   }
 
   const auto drawPage = [&]() {
     renderer.clearScreen(ReaderUtils::readerBackgroundColor());
     page->renderText(renderer, renderFontId, marginLeft, marginTop, ReaderUtils::readerForegroundBlack());
     ReaderRuling::drawSelectionPage(renderer, *page, renderFontId, marginLeft, marginTop);
-    page->renderImages(renderer, renderFontId, marginLeft, marginTop, ReaderUtils::readerForegroundBlack());
+    page->renderImages(renderer, renderFontId, marginLeft, marginTop, ReaderUtils::readerForegroundBlack(), false);
   };
   if (auto* fcm = renderer.getFontCacheManager()) {
     bool renderWithFallback = false;

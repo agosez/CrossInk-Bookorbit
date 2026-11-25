@@ -43,35 +43,10 @@ jobs:
           ref: ${{ inputs.source_commit || github.sha }}
           submodules: recursive
 
-      - uses: actions/setup-python@v6
+      # Resolve the action from this workflow's commit, even for older firmware sources.
+      - uses: $/.github/actions/setup-platformio
         with:
-          python-version: "3.14"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-          enable-cache: true
-
-      - name: Cache PlatformIO packages
-        uses: actions/cache@v4
-        with:
-          # Do not cache PlatformIO's Python virtual environment. It is tied to
-          # the runner's Python and can become invalid when restored elsewhere.
-          path: |
-            ~/.platformio/packages
-            ~/.platformio/platforms
-          key: ${{ runner.os }}-platformio-py3.14-core6.1.19-penv-v2-${{ matrix.environment }}-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
-
-      - name: Install PlatformIO Core
-        run: |
-          # The ESP platform invokes pio from this penv for its second pass.
-          # Pin the package name it checks, so it cannot install a newer Core
-          # and replace SCons while a build is already running.
-          uv venv --python "$pythonLocation/bin/python" "$HOME/.platformio/penv"
-          uv pip install --python "$HOME/.platformio/penv/bin/python" "pioarduino==6.1.19"
-          echo "$HOME/.platformio/penv/bin" >> "$GITHUB_PATH"
-          "$HOME/.platformio/penv/bin/pio" --version
+          cache-scope: ${{ matrix.environment }}
 
       - name: Resolve release-candidate metadata
         id: metadata
@@ -90,35 +65,15 @@ jobs:
           echo "RC_BRANCH_SAFE=$branch_safe" >> "$GITHUB_ENV"
           echo "RC_HASH_SHORT=$hash_short" >> "$GITHUB_ENV"
           echo "RC_TAG=$rc_tag" >> "$GITHUB_ENV"
-          echo "VERSION=${branch_safe}-RC" >> "$GITHUB_ENV"
 
       - name: Set version from branch
         shell: bash
         run: |
           # scripts/git_branch.py appends its own "-rc+<hash>" for the default env, so write
-          # the bare branch name here. Fails loudly: a silent no-op ships the wrong version.
-          python3 - "$RC_BRANCH_RAW" <<'PY'
-          import re
-          import sys
-
-          version = sys.argv[1]
-          path = 'platformio.ini'
-          with open(path) as f:
-              text = f.read()
-
-          def set_in_section(section):
-              return re.sub(r'(?m)^version\s*=.*$', f'version = {version}', section, count=1)
-
-          new_text, count = re.subn(
-              r'(?ms)^\[crossink\]\n.*?(?=^\[|\Z)', lambda m: set_in_section(m.group(0)), text, count=1
-          )
-          if count != 1 or f'version = {version}' not in new_text:
-              sys.exit(f'could not set [crossink] version in {path}')
-
-          with open(path, 'w') as f:
-              f.write(new_text)
-          PY
-          grep -A1 '^\[crossink\]' platformio.ini
+          # the bare branch name here. The ignored PlatformIO override leaves the checkout
+          # clean, so About reports the commit's real Git state.
+          printf '[crossink]\nversion = %s\n' "$RC_BRANCH_RAW" > platformio.local.ini
+          cat platformio.local.ini
 
       - name: Build CrossInk
         shell: bash

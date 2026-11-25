@@ -9,6 +9,8 @@
 #include <SecureHttpClient.h>
 #endif
 #include <DownloadFileSwap.h>
+#include <FilePublication.h>
+#include <TransferWriteCheckpoint.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
 #include <strings.h>
@@ -855,15 +857,22 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   }
   std::string destination = destPath;
   if (options.resolvedPath) *options.resolvedPath = destination;
-  if (!options.useServerFilename && options.stageAsPart && !DownloadFileSwap::recover(destination)) return FILE_ERROR;
-  std::string writePath = options.stageAsPart ? destination + ".part" : destination;
+  if (options.stageAsPart && !FilePublication::recover()) return FILE_ERROR;
+  std::string writePath = destination;
+  if (!options.useServerFilename && options.stageAsPart &&
+      !FilePublication::stagePath(destination, "http-download", writePath))
+    return FILE_ERROR;
   bool outputPrepared = !options.useServerFilename;
   size_t resumeOffset = 0;
   if (outputPrepared && options.resumePartial && Storage.exists(writePath.c_str())) {
     FsFile existingFile;
     if (Storage.openFileForRead("HTTP", writePath.c_str(), existingFile)) {
-      resumeOffset = existingFile.fileSize();
-      existingFile.close();
+      const size_t existingSize = existingFile.fileSize();
+      if (!existingFile.close()) {
+        LOG_ERR("HTTP", "Could not close partial file before resuming");
+        return FILE_ERROR;
+      }
+      resumeOffset = existingSize;
     }
   }
 
@@ -905,7 +914,7 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
         LOG_INF("HTTP", "Using generated filename: server name missing or unsafe");
       }
       if (options.resolvedPath) *options.resolvedPath = destination;
-      if (!DownloadFileSwap::recover(destination)) {
+      if (!FilePublication::recover()) {
         sink.destinationError = FILE_ERROR;
         return false;
       }
@@ -913,7 +922,10 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
         sink.destinationError = FILE_EXISTS;
         return false;
       }
-      writePath = destination + ".part";
+      if (!FilePublication::stagePath(destination, "http-download", writePath)) {
+        sink.destinationError = FILE_ERROR;
+        return false;
+      }
       // Cross-session partials have no retained validator; start fresh. In-call
       // reconnects below keep the path, version validator and exact byte offset.
       if (Storage.exists(writePath.c_str()) && !Storage.remove(writePath.c_str())) {
@@ -928,6 +940,7 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
 
   FsFile file;
   bool fileOpen = false;
+  bool checkpointFailed = false;
 #ifndef SIMULATOR
   bool spaceChecked = false;
 #endif
@@ -974,7 +987,13 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
     return fileOpen;
   };
 
-  sink.write = [&](const uint8_t* data, size_t len) { return openOutputFile() && file.write(data, len) == len; };
+  sink.write = [&](const uint8_t* data, size_t len) {
+    if (!openOutputFile()) return false;
+    if (FsHelpers::writeAndCheckpoint(file, data, len)) return true;
+    checkpointFailed = true;
+    LOG_ERR("HTTP", "Failed to checkpoint downloaded bytes");
+    return false;
+  };
 
   DownloadError result = HTTP_ERROR;
   HttpDownloadResume::RetryBudget budget;
@@ -1041,8 +1060,8 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
       if (options.checkFreeSpace && totalBytes > 0 && freeBytes < neededBytes) result = INSUFFICIENT_SPACE;
     }
 #endif
-    if (outputPrepared && (result == ABORTED || !options.preservePartial)) {
-      Storage.remove(writePath.c_str());
+    if (outputPrepared && (result == ABORTED || !options.preservePartial || checkpointFailed)) {
+      if (!Storage.remove(writePath.c_str())) LOG_ERR("HTTP", "Could not remove uncheckpointed partial file");
     }
     return result;
   }
@@ -1074,9 +1093,15 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
     Storage.remove(writePath.c_str());
     return ABORTED;
   }
-  if (options.stageAsPart &&
-      !DownloadFileSwap::publish(destination, options.requireBackupCleanup, options.keepReplaced))
-    return FILE_ERROR;
+  if (options.stageAsPart) {
+    // keepReplaced leaves the replaced copy at "<destination>.old" for the caller, which the
+    // journaled publication would delete.
+    const bool published =
+        options.keepReplaced
+            ? DownloadFileSwap::publishFrom(destination, writePath, options.requireBackupCleanup, true)
+            : FilePublication::publish(writePath.c_str(), destination.c_str(), true, options.requireBackupCleanup);
+    if (!published) return FILE_ERROR;
+  }
 
   sessionGuard.success = true;
   return OK;

@@ -351,6 +351,8 @@ void SdCardFont::freeAll() {
   contentBitmapNext_ = 0;
   contentBitmapsAttempted_ = false;
   contentMetrics_.reset();
+  bodyMetricsAttempted_ = false;
+  bodyMetricsClock_ = 0;
   contentBitmapBytes_ = 0;
   contentBitmapInternalLimit_ = 0;
   leanContent_ = false;
@@ -1173,13 +1175,32 @@ SdCardFont::ContentMetricsEntry* SdCardFont::contentGlyphMetrics(const uint32_t 
   auto* victim = &contentMetrics_[first];
   for (uint32_t probe = 0; probe < CONTENT_METRICS_CACHE_SIZE; ++probe) {
     auto& candidate = contentMetrics_[(first + probe) % CONTENT_METRICS_CACHE_SIZE];
-    if (candidate.codepoint == codepoint && candidate.style == styleIdx) return &candidate;
+    if (candidate.codepoint == codepoint && candidate.style == styleIdx) {
+      if (!leanContent_) candidate.recentlyUsed = 1;
+      return &candidate;
+    }
+    if (!leanContent_ && candidate.style == MAX_STYLES) {
+      // Body entries are never deleted individually, so no key can sit
+      // beyond the first empty slot until the table has filled.
+      victim = &candidate;
+      break;
+    }
     // Search all slots even after finding a vacancy: ring eviction and metrics
     // replacement leave holes before live keys. Prefer unused, then bitmapless
     // entries; only a table entirely backed by bitmaps requires their eviction.
     if ((candidate.style == MAX_STYLES && victim->style != MAX_STYLES) ||
         (!candidate.bitmapValid && victim->bitmapValid))
       victim = &candidate;
+  }
+  if (!leanContent_ && victim->style != MAX_STYLES) {
+    // The body cache holds no bitmaps. Once full, give active glyphs another
+    // turn instead of evicting the same frequently used hash slot on each miss.
+    while (contentMetrics_[bodyMetricsClock_].recentlyUsed) {
+      contentMetrics_[bodyMetricsClock_].recentlyUsed = 0;
+      bodyMetricsClock_ = (bodyMetricsClock_ + 1) % CONTENT_METRICS_CACHE_SIZE;
+    }
+    victim = &contentMetrics_[bodyMetricsClock_];
+    bodyMetricsClock_ = (bodyMetricsClock_ + 1) % CONTENT_METRICS_CACHE_SIZE;
   }
   auto& entry = *victim;
   HalFile file;
@@ -1197,6 +1218,7 @@ SdCardFont::ContentMetricsEntry* SdCardFont::contentGlyphMetrics(const uint32_t 
   }
   if (!glyphEntryValid(styles_[styleIdx], glyph, codepoint)) glyph = EpdGlyph{};
   entry = {codepoint, glyph, styleIdx};
+  if (!leanContent_) entry.recentlyUsed = 1;
   return &entry;
 }
 
@@ -1784,7 +1806,11 @@ void SdCardFont::releaseForLowMemory(const bool preserveAdvanceTable) {
   contentBitmapCapacity_ = 0;
   contentBitmapNext_ = 0;
   contentBitmapsAttempted_ = false;
-  if (contentMetrics_) {
+  if (!leanContent_) {
+    contentMetrics_.reset();
+    bodyMetricsAttempted_ = false;
+    bodyMetricsClock_ = 0;
+  } else if (contentMetrics_) {
     for (size_t i = 0; i < CONTENT_METRICS_CACHE_SIZE; ++i) contentMetrics_[i].bitmapValid = false;
   }
   if (!preserveAdvanceTable) {
@@ -2250,6 +2276,16 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   const auto& s = self->styles_[styleIdx];
   if (!s.fullIntervals && !s.bmpIntervals) return nullptr;
 
+  // Ruled layout measures body glyphs before page bitmaps are prepared. Reuse
+  // the optional-size metrics cache so repeated letters need no SD pixel reads.
+  if (self->metricsDepth_ && !self->leanContent_ && !self->bodyMetricsAttempted_) {
+    self->bodyMetricsAttempted_ = true;
+    if (MemoryBudget::canAllocateInternal(CONTENT_METRICS_CACHE_BYTES, MemoryBudget::EPUB_LAYOUT_INTERNAL_RESERVE,
+                                          MINI_RETAIN_MIN_MAX_ALLOC_HEAP + CONTENT_METRICS_CACHE_BYTES)) {
+      self->contentMetrics_ = makeUniqueNoThrow<ContentMetricsEntry[]>(CONTENT_METRICS_CACHE_SIZE);
+      if (!self->contentMetrics_) LOG_ERR("SDCF", "Body metrics cache unavailable; using the small metrics ring");
+    }
+  }
   if (self->metricsDepth_ && self->contentMetrics_) {
     const int32_t index = self->findGlobalGlyphIndex(s, codepoint);
     const auto* entry = index < 0 ? nullptr : self->contentGlyphMetrics(codepoint, styleIdx, index);
@@ -2299,7 +2335,9 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   const uint32_t latest = (self->overflowNext_ + OVERFLOW_CAPACITY - 1) % OVERFLOW_CAPACITY;
   for (uint32_t i = 0; i < self->overflowCount_; i++) {
     if (self->leanContent_ && (i != latest || scratchOwner->contentScratchUser_ != self)) continue;
-    if (self->overflow_[i].codepoint == codepoint && self->overflow_[i].styleIdx == styleIdx) {
+    const auto& entry = self->overflow_[i];
+    if (entry.codepoint == codepoint && entry.styleIdx == styleIdx &&
+        (self->metricsDepth_ || !entry.glyph.dataLength || entry.bitmap)) {
       return &self->overflow_[i].glyph;
     }
   }
@@ -2343,7 +2381,9 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
 
   // Read bitmap data into temporary (if any)
   uint8_t* tempBitmap = nullptr;
-  if (tempGlyph.dataLength > 0) {
+  // A measurement miss may use the existing ring without allocating or reading pixels.
+  // A later draw skips this metadata-only slot and loads the bitmap normally.
+  if (!self->metricsDepth_ && tempGlyph.dataLength > 0) {
     if (self->leanContent_ && tempGlyph.dataLength > self->contentBitmapBytes_) {
       LOG_ERR("SDCF", "Content bitmap changed beyond its fixed scratch");
       file.close();

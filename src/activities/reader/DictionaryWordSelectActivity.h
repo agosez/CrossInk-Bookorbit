@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../Activity.h"
+#include "CrossPointSettings.h"
 #include "util/DictionaryLookupController.h"
 #include "util/WordSelectNavigator.h"
 #if CROSSINK_APP_CAP_TOUCH
@@ -34,7 +35,8 @@ class DictionaryWordSelectActivity final : public Activity {
       std::string cachePath, std::string nextPageFirstWord = "", bool hasNextReaderPage = false,
       bool framebufferContainsPage = false, int reservedBottomHeight = 0, int initialTouchX = -1,
       int initialTouchY = -1, bool autoLookupInitialWord = false, const char* dictionaryFontFamilyName = nullptr,
-      uint8_t dictionaryFontPointSize = 0, void* readerContext = nullptr, ReaderPageLoadFn readerPageLoad = nullptr)
+      uint8_t dictionaryFontPointSize = 0, void* readerContext = nullptr, ReaderPageLoadFn readerPageLoad = nullptr,
+      uint8_t wordHoldAction = SETTINGS.wordHoldAction)
       : Activity("DictionaryWordSelect", renderer, mappedInput),
         page(std::move(page)),
         marginLeft(marginLeft),
@@ -52,6 +54,7 @@ class DictionaryWordSelectActivity final : public Activity {
         initialTouchY_(initialTouchY),
         autoLookupInitialWord_(autoLookupInitialWord),
         dictionaryFontPointSize_(dictionaryFontPointSize),
+        wordHoldAction_(wordHoldAction),
         readerContext_(readerContext),
         readerPageLoad_(readerPageLoad) {
     if (dictionaryFontFamilyName) {
@@ -146,6 +149,7 @@ class DictionaryWordSelectActivity final : public Activity {
   // dictionary selection resident while laying out EPUB sections.
   char dictionaryFontFamilyName_[64] = "";
   uint8_t dictionaryFontPointSize_ = 0;
+  uint8_t wordHoldAction_;
 #if CROSSINK_APP_CAP_TOUCH
   bool touchSelectionActive_ = false;
   bool touchLookupEnabled_ = false;
@@ -162,14 +166,24 @@ class DictionaryWordSelectActivity final : public Activity {
   void showTouchSelectionActions(std::string phrase, size_t wordCount);
   TextSelectionOverlay::Layout touchSelectionLayout() const;
   bool handleTouchSelection();
+  bool beginTouchPress(const TextSelectionOverlay::Layout& layout, int x, int y);
+  void resetTouchDragTracking(int x, int y);
+  void sampleTouchDrag();
+  void updateTouchDrag();
   bool isWithinSelectedPageEndDwellSlop(int x, int y) const;
   void performTouchSelectionAction(int action);
   void drawTouchSelection() const;
-#endif
+  bool applyWordHoldAction_ = false;
   bool touchDragLookup_ = false;
   bool touchDragHasMoved_ = false;
   int touchDragStartX_ = 0;
   int touchDragStartY_ = 0;
+  int touchDragX_ = 0;
+  int touchDragY_ = 0;
+  bool touchDragReleased_ = false;
+  bool touchPressPending_ = false;
+  bool touchTapPending_ = false;
+#endif
   void* readerContext_ = nullptr;
   ReaderPageLoadFn readerPageLoad_ = nullptr;
   int activePageOffset_ = 0;
@@ -232,5 +246,5 @@ class DictionaryWordSelectActivity final : public Activity {
   bool appendText(const char* text, size_t length, uint16_t& offset);
   bool appendMergedText(const char* first, size_t firstLength, const char* second, size_t secondLength,
                         uint16_t& offset);
-  bool appendWord(WordSelectNavigator::WordInfo word);
+  bool appendWord(WordSelectNavigator::WordInfo word, int16_t rowY);
 };

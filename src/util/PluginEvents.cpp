@@ -1,10 +1,12 @@
 #include "PluginEvents.h"
 
 #include <ArduinoJson.h>
+#include <FilePublication.h>
 #include <HalStorage.h>
 #include <LibraryBuilder.h>
 #include <LibraryFileTypes.h>
 #include <Logging.h>
+#include <Memory.h>
 #ifndef SIMULATOR
 #include <esp_random.h>
 #else
@@ -23,6 +25,7 @@ static uint32_t esp_random() { return std::random_device{}(); }
 #include <vector>
 
 #include "CrossPointSettings.h"
+#include "PluginEventOutbox.h"
 #include "PluginHttp.h"
 #include "PluginLocations.h"
 #include "WifiCredentialStore.h"
@@ -36,13 +39,10 @@ constexpr const char* EVENT_NAMES[] = {"reader.open", "reader.exit", "reader.ses
 static_assert(sizeof(EVENT_NAMES) / sizeof(EVENT_NAMES[0]) == static_cast<size_t>(pluginevents::Event::COUNT),
               "event name table out of sync");
 
-constexpr const char* OUTBOX_NAME = "/events.jsonl";
-// Drop-oldest wholesale: a plugin that is never drained must not grow a file
-// forever, and by the time 4KB of events piled up the old ones describe stale
-// state anyway.
-constexpr size_t MAX_OUTBOX_BYTES = 4 * 1024;
+constexpr const char* OUTBOX_NAME = PluginEventOutbox::NAME;
+constexpr size_t MAX_OUTBOX_BYTES = PluginEventOutbox::MAX_OUTBOX_BYTES;
+constexpr size_t MAX_EVENT_LINE = PluginEventOutbox::MAX_EVENT_LINE;
 constexpr size_t MAX_MANIFEST_SIZE = 8 * 1024;
-constexpr size_t MAX_EVENT_LINE = 2048;
 // Event handler responses are acknowledgements, not content.
 constexpr size_t MAX_EVENT_RESPONSE = 8 * 1024;
 
@@ -51,10 +51,10 @@ constexpr size_t MAX_EVENT_RESPONSE = 8 * 1024;
 // plugin list screen, not a marketplace.
 constexpr size_t MAX_EVENT_PLUGINS = 8;
 struct Subscriber {
-  char name[81] = {0};      // plugin folder name; "" = empty slot
-  char dir[112] = {0};      // "<root>/<name>"
-  uint8_t mask = 0;         // bit per Event
-  uint8_t connectMask = 0;  // events whose handler declares "connect": true
+  char name[81] = {0};                                    // plugin folder name; "" = empty slot
+  char dir[PluginEventOutbox::DIRECTORY_CAPACITY] = {0};  // "<root>/<name>"
+  uint8_t mask = 0;                                       // bit per Event
+  uint8_t connectMask = 0;                                // events whose handler declares "connect": true
 };
 Subscriber subscribers[MAX_EVENT_PLUGINS];
 std::mutex outboxMutex;
@@ -176,44 +176,47 @@ void emit(const Event e, const Var* vars, const size_t varCount) {
   if (!anySubscriber(e)) return;
 
   std::lock_guard<std::mutex> guard(outboxMutex);
-  // One line: {"e":"reader.exit","id":"3fa9c21b-7","ts":1734212345,"vars":{"book":"...","percent":"74"}}
-  JsonDocument doc;
-  doc["e"] = EVENT_NAMES[static_cast<size_t>(e)];
-  // Unique id for server-side dedupe of at-least-once delivery: a per-boot
-  // nonce plus an in-session counter, unique across queued events and reboots
-  // without an SD read-modify-write per event. ts alone repeats (1-second
-  // resolution, and 0 whenever the clock was never set).
-  static const uint32_t bootNonce = esp_random();
-  static uint32_t seq = 0;
-  char id[24];
-  snprintf(id, sizeof(id), "%08lx-%lu", static_cast<unsigned long>(bootNonce), static_cast<unsigned long>(++seq));
-  doc["id"] = id;
-  // Best-effort unix time: 0 when the clock was never set (no RTC, no NTP yet).
-  doc["ts"] = static_cast<long long>(trustedtime::trustedNow());
-  JsonObject varsObj = doc["vars"].to<JsonObject>();
-  for (size_t i = 0; i < varCount; i++) {
-    varsObj[vars[i].key] = vars[i].value;
-  }
-  std::string line;
-  line.reserve(160);
-  serializeJson(doc, line);
-  line += '\n';
-  if (line.size() > MAX_EVENT_LINE) {
-    LOG_ERR("PEVT", "event line too large (%u); dropped", static_cast<unsigned>(line.size()));
-    return;
+  HeapByteBuffer line;
+  size_t lineSize = 0;
+  {
+    // One line: {"e":"reader.exit","id":"3fa9c21b-7","ts":1734212345,"vars":{"book":"...","percent":"74"}}
+    JsonDocument doc;
+    doc["e"] = EVENT_NAMES[static_cast<size_t>(e)];
+    // Unique id for server-side dedupe of at-least-once delivery.
+    static const uint32_t bootNonce = esp_random();
+    static uint32_t seq = 0;
+    char id[24];
+    snprintf(id, sizeof(id), "%08lx-%lu", static_cast<unsigned long>(bootNonce), static_cast<unsigned long>(++seq));
+    doc["id"] = id;
+    // Best-effort unix time: 0 when the clock was never set (no RTC, no NTP yet).
+    doc["ts"] = static_cast<long long>(trustedtime::trustedNow());
+    JsonObject varsObj = doc["vars"].to<JsonObject>();
+    for (size_t i = 0; i < varCount; i++) {
+      varsObj[vars[i].key] = vars[i].value;
+    }
+    if (doc.overflowed()) {
+      LOG_ERR("PEVT", "Cannot allocate plugin event JSON");
+      return;
+    }
+    const size_t bytes = measureJson(doc);
+    if (bytes >= MAX_EVENT_LINE) {
+      LOG_ERR("PEVT", "Event line too large (%u); dropped", static_cast<unsigned>(bytes));
+      return;
+    }
+    // Exact, fallible allocation once for all subscribers. A maximum 2 KiB
+    // event does not belong on the loop stack. Release the JSON pool before I/O.
+    lineSize = bytes + 1;
+    line = makeDefaultByteBufferNoThrow(lineSize);
+    if (!line || serializeJson(doc, reinterpret_cast<char*>(line.get()), lineSize) != bytes) {
+      LOG_ERR("PEVT", "Cannot serialize plugin event (%u bytes); dropped", static_cast<unsigned>(lineSize));
+      return;
+    }
+    line[bytes] = '\n';
   }
 
   for (const auto& sub : subscribers) {
     if (sub.name[0] == '\0' || !(sub.mask & eventBit(e))) continue;
-    const std::string path = outboxPath(sub);
-    if (!DownloadFileSwap::recover(path)) continue;
-    std::string queued;
-    if (Storage.exists(path.c_str()) &&
-        !Storage.readFileToString("PEVT", path, MAX_OUTBOX_BYTES + MAX_EVENT_LINE, queued))
-      continue;
-    if (queued.size() > MAX_OUTBOX_BYTES) queued.clear();
-    queued += line;
-    writeOutbox(path, queued.data(), queued.size());
+    PluginEventOutbox::append(sub.dir, reinterpret_cast<const char*>(line.get()), lineSize);
   }
 }
 
@@ -360,14 +363,14 @@ bool deliverLine(const DrainManifest& mf, const std::string& lineText, std::stri
       constexpr size_t MAX_EVENT_DOWNLOAD = 1024 * 1024;
       // Stream to a sibling temp and swap it in only on a clean 2xx, so a
       // 404/500 error body can never replace an existing dest (e.g. /sleep.bmp).
-      if (!DownloadFileSwap::recover(dest)) return -1;
-      const std::string tmp = dest + ".part";
+      std::string tmp;
+      if (!FilePublication::stagePath(dest, "plugin-event", tmp)) return -1;
       const int st = pluginhttp::requestToFile(
           nullptr, drainSubstituted(handler->req.url, tok, config, meta, vars, ts, id), handler->req.method,
           drainSubstituted(handler->req.body, tok, config, meta, vars, ts, id), headers, tmp.c_str(),
           MAX_EVENT_DOWNLOAD, expired, timeout());
       if (st >= 200 && st < 300) {
-        if (!DownloadFileSwap::publish(dest)) return -1;
+        if (!FilePublication::publish(tmp.c_str(), dest.c_str())) return -1;
         if (library::fileTypeFor(dest)) library::invalidateLibraryIndex();
       } else {
         Storage.remove(tmp.c_str());
@@ -412,12 +415,20 @@ bool deliverLine(const DrainManifest& mf, const std::string& lineText, std::stri
 }  // namespace
 
 enum class DrainMode { Ordered, Sleep, Connect };
+constexpr size_t MAX_SLEEP_CONNECT_DELIVERIES = 4;  // Match CrossPoint's default ordered drain.
+
+static int queuedEvent(const std::string& raw, size_t start, size_t end) {
+  JsonDocument event;
+  if (deserializeJson(event, raw.data() + start, end - start) != DeserializationError::Ok) return -1;
+  return eventFromName(event["e"] | "");
+}
 static void drainQueued(GfxRenderer* renderer, size_t maxEvents, DrainMode mode, uint32_t deadline = 0) {
   if (!SETTINGS.pluginsEnabled) return;
   std::lock_guard<std::mutex> guard(outboxMutex);
   size_t budget = maxEvents;
+  const auto expired = [deadline]() { return deadline && static_cast<int32_t>(millis() - deadline) >= 0; };
   for (const auto& sub : subscribers) {
-    if (budget == 0 || (deadline && static_cast<int32_t>(millis() - deadline) >= 0)) break;
+    if (budget == 0 || expired()) break;
     if (sub.name[0] == '\0') continue;
     const std::string path = outboxPath(sub);
     if (!DownloadFileSwap::recover(path) || !Storage.exists(path.c_str())) continue;
@@ -442,24 +453,44 @@ static void drainQueued(GfxRenderer* renderer, size_t maxEvents, DrainMode mode,
     // Pre-build the substitution patterns (see drainSubstituted).
     for (auto& kv : config) kv.first = "{cfg." + kv.first + "}";
 
-    if (mode != DrainMode::Ordered) {
+    if (mode == DrainMode::Connect) {
+      // Replay opt-in events in queue order. A failure stalls only this
+      // subscriber. Keep all skipped, failed, and unattempted lines on disk.
+      bool changed = false;
+      for (size_t start = 0; start < raw.size() && budget > 0 && !expired();) {
+        size_t nl = raw.find('\n', start);
+        if (nl == std::string::npos) nl = raw.size();
+        const size_t end = nl < raw.size() ? nl + 1 : nl;
+        const int e = queuedEvent(raw, start, nl);
+        if (e < 0 || e == static_cast<int>(Event::SleepEnter) || !(sub.connectMask & (1u << e))) {
+          start = end;
+          continue;
+        }
+        if (!deliverLine(mf, raw.substr(start, nl - start), token, config, renderer, deadline)) break;
+        // The suffix slides into this offset; each source line is parsed once.
+        raw.erase(start, end - start);
+        changed = true;
+        --budget;
+      }
+      if (changed) {
+        if (raw.empty())
+          Storage.remove(path.c_str());
+        else
+          writeOutbox(path, raw.data(), raw.size());
+      }
+      continue;
+    }
+
+    if (mode == DrainMode::Sleep) {
       // Prioritize the latest sleep event for this plugin. Preserve all other
       // queued events, including old failed sleep events, for ordinary replay.
       size_t selected = std::string::npos, end = 0;
       for (size_t start = 0; start < raw.size();) {
         size_t next = raw.find('\n', start);
         if (next == std::string::npos) next = raw.size();
-        JsonDocument event;
-        if (deserializeJson(event, raw.data() + start, next - start) == DeserializationError::Ok) {
-          const int e = eventFromName(event["e"] | "");
-          const bool selectedSleep = mode == DrainMode::Sleep && e == static_cast<int>(Event::SleepEnter);
-          const bool selectedConnect = mode == DrainMode::Connect && e >= 0 &&
-                                       e != static_cast<int>(Event::SleepEnter) && (sub.connectMask & (1u << e));
-          if (selectedSleep || selectedConnect) {
-            selected = start;
-            end = next < raw.size() ? next + 1 : next;
-            if (selectedConnect) break;
-          }
+        if (queuedEvent(raw, start, next) == static_cast<int>(Event::SleepEnter)) {
+          selected = start;
+          end = next < raw.size() ? next + 1 : next;
         }
         start = next + 1;
       }
@@ -541,7 +572,7 @@ void deliverSleepEvents() {
   if (WiFi.status() == WL_CONNECTED) {
     const uint32_t deadline = millis() + 10000;
     drainQueued(nullptr, MAX_EVENT_PLUGINS, DrainMode::Sleep, deadline);
-    drainQueued(nullptr, MAX_EVENT_PLUGINS, DrainMode::Connect, deadline);
+    drainQueued(nullptr, MAX_SLEEP_CONNECT_DELIVERIES, DrainMode::Connect, deadline);
   }
 }
 

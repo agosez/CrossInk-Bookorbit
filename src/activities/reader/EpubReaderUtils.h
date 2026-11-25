@@ -9,6 +9,7 @@
 #include <string>
 
 #include "ProgressRecord.h"
+#include "sync/ProgressBookIterator.h"
 #include "util/BookContentId.h"
 #include "util/InPlaceFileWrite.h"
 
@@ -106,8 +107,8 @@ inline bool loadProgress(const Epub& epub, Progress& progress, const char* modul
 }
 
 // Writes one progress home: the older of its two slots is overwritten in place, and an
-// unchanged position is not written at all.
-inline bool saveProgressPath(const std::string& path, const progress_record::Fields& fields) {
+// unchanged position is not written at all (written stays false).
+inline bool saveProgressPath(const std::string& path, const progress_record::Fields& fields, bool* written = nullptr) {
   const std::string backupPath = path + ".bak";
   const auto primary = readProgressSlot("ERS", path);
   const auto backup = readProgressSlot("ERS", backupPath);
@@ -118,7 +119,9 @@ inline bool saveProgressPath(const std::string& path, const progress_record::Fie
   uint8_t record[progress_record::RECORD_BYTES];
   progress_record::encode(fields, progress_record::nextSeq(primary, backup), record);
   const auto& target = progress_record::target(primary, backup) == progress_record::PRIMARY ? path : backupPath;
-  return writeFileInPlace("ERS", target.c_str(), record, sizeof(record));
+  if (!writeFileInPlace("ERS", target.c_str(), record, sizeof(record))) return false;
+  if (written) *written = true;
+  return true;
 }
 
 // Persists reader progress for an EPUB to both of its homes (see loadProgress). Returns
@@ -136,7 +139,10 @@ inline bool saveProgress(const Epub& epub, int spineIndex, int pageNumber, int p
   // Saves are debounced and skip unchanged positions, so the second home costs little
   // next to what it buys: the content-keyed copy survives moves and renames, the
   // path-keyed copy keeps stock CrossInk fully working after a firmware revert.
-  const bool pathOk = saveProgressPath(epub.getCachePath() + "/progress.bin", fields);
+  bool pathWritten = false;
+  const bool pathOk = saveProgressPath(epub.getCachePath() + "/progress.bin", fields, &pathWritten);
+  // Lets progress sync find the book from its cache without walking the card.
+  if (pathWritten) ProgressBookIterator::rememberPath(epub.getPath(), epub.getCachePath());
   bool stateOk = true;
   const std::string stateDir = BookContentId::bookStateDir(epub.getPath());
   if (!stateDir.empty()) {

@@ -552,6 +552,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t tapToHideStatusBar = 1;
   // Disables all touchscreen input while a reader is active. Reader menus temporarily override this.
   uint8_t disableReaderTouchscreen = 0;
+  enum WordHoldAction : uint8_t { WORD_HOLD_LOOKUP, WORD_HOLD_CLIP, WORD_HOLD_ASK };
+  // Only used by the per-book setting.
+  static constexpr uint8_t WORD_HOLD_USE_GLOBAL = 3;
+  uint8_t wordHoldAction = WORD_HOLD_LOOKUP;
   // Available only on multi-touch hardware; defaults on for pinch font resizing.
   uint8_t pinchFontResizeEnabled = 1;
   // Two-finger twist rotates the reader screen. Multi-touch hardware only.
