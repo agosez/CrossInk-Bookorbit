@@ -1439,11 +1439,15 @@ still exist with its recorded size) and dropped when stale, and a missing or
 discarded index costs the marker and the listing entry, leaving the filename
 heuristic and a flat directory scan as fallbacks.
 
-Only the fixed-size records are loaded into RAM; each path stays in the file
-and is read back at its recorded offset when needed, and the stored path hash
-lets a path match skip the SD read for every other entry. Capped at 512 entries
-on devices without PSRAM and 2048 with it, oldest evicted first; a card moved
-to a device with a lower cap keeps its newest entries.
+Nothing of the index stays in RAM. Each call reads the fixed-size records in one
+pass, a few at a time, and reads a path back at its recorded offset only for a
+record that matches; the stored path hash lets a path match skip the SD read
+for every other entry. A catalog page, Home's shelves and each batch of the
+card scan are asked about in one pass for all their books. Capped at 2048
+entries on every device, oldest evicted first: the cap bounds the length of a
+pass (45 KB of records) and of the "On device" listing, which opens every
+recorded book. A file holding more records than the cap is read from its
+newest ones, and the next rewrite drops the rest.
 
 Book ids are only meaningful on the server that issued them, so the header
 records a CRC32 of the configured server URL; the whole file is discarded when

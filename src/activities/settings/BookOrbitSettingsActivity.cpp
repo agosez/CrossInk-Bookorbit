@@ -17,7 +17,6 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
-#include "activities/browser/BookOrbitCatalogBrowserActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/settings/BookOrbitAuthActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"

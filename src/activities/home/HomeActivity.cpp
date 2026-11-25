@@ -39,7 +39,7 @@
 #include "RecentBooksStore.h"
 #include "SavedItemsHomeActivity.h"
 #include "SilentRestart.h"
-#include "activities/browser/BookOrbitCatalogLink.h"
+#include "activities/browser/bookorbit/BookOrbitCatalogLink.h"
 #include "components/UITheme.h"
 #include "components/themes/bookorbit/BookOrbitHomeLayout.h"
 #include "components/themes/dashboard/DashboardTheme.h"
@@ -1222,7 +1222,6 @@ void HomeActivity::activateBookOrbitStop(const BookOrbitHomeUi::Stop& stop) {
       if (book == nullptr) break;
       std::string path;
       const bool onCard = BookOrbitDownloadIndex::lookup(book->id, path);
-      BookOrbitDownloadIndex::unload();
       if (onCard) {
         onSelectBook(path);
       } else {

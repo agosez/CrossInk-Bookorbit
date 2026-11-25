@@ -32,8 +32,8 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
-#include "activities/browser/BookOrbitCatalogLink.h"
-#include "activities/browser/BookOrbitCatalogListCache.h"
+#include "activities/browser/bookorbit/BookOrbitCatalogLink.h"
+#include "activities/browser/bookorbit/BookOrbitCatalogListCache.h"
 #include "activities/home/RecentBookProgress.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/reader/EpubReaderUtils.h"
@@ -196,7 +196,6 @@ void BookOrbitSyncActivity::returnToReader() {
 void BookOrbitSyncActivity::resolveUpdateBook() {
   int64_t bookId = 0;
   if (!BookOrbitDownloadIndex::bookIdForPath(epubPath, bookId)) bookId = 0;
-  BookOrbitDownloadIndex::unload();
   if (bookId == 0) {
     // Not a catalog download (copied to the card, or the index lost it): the server still
     // resolves this copy's older hash to its book. A bare hash stays out of Books to Review.
