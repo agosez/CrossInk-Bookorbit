@@ -16,6 +16,7 @@
 #include <optional>
 
 #include "AssetCompanionStore.h"
+#include "AssetDownloadTransport.h"
 #include "HttpDownloader.h"
 #include "HyphenationPackStore.h"
 

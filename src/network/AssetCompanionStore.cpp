@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "AssetDownloadTransport.h"
 #include "HttpDownloader.h"
 
 namespace AssetCompanionStore {
