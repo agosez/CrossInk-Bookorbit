@@ -569,7 +569,7 @@ bool BookOrbitCatalogClient::fetchBookDetail(const int64_t bookId, BookOrbitBook
   JsonDocument filter;
   bookOrbitSetFilter(filter,
                      R"({"id":true,"title":true,"authors":true,"files":[{"id":true,"format":true,"sizeBytes":true,)"
-                     R"("devicePath":true}]})");
+                     R"("devicePath":true,"downloadVariant":true}]})");
   JsonDocument doc;
   if (!fetchJson(url, filter, doc)) return false;
 
@@ -587,19 +587,27 @@ bool BookOrbitCatalogClient::fetchBookDetail(const int64_t bookId, BookOrbitBook
     entry.format = std::string(file["format"] | "");
     entry.sizeBytes = file["sizeBytes"] | 0;
     entry.devicePath = std::string(file["devicePath"] | "");
+    // The download request carries it as is: only the values the server's query accepts.
+    const std::string_view variant = file["downloadVariant"] | "";
+    if (variant == "original" || variant == "audioless_epub") entry.downloadVariant = variant;
     outDetail.files.push_back(std::move(entry));
   }
   return true;
 }
 
-HttpDownloader::DownloadError BookOrbitCatalogClient::downloadFile(const int64_t fileId, const std::string& destPath,
+HttpDownloader::DownloadError BookOrbitCatalogClient::downloadFile(const int64_t fileId, const std::string& variant,
+                                                                   const std::string& destPath,
                                                                    HttpDownloader::ProgressCallback progress,
                                                                    bool* cancelFlag,
                                                                    HttpDownloader::DownloadOptions options) {
   if (!BOOKORBIT_STORE.hasCredentials()) return HttpDownloader::HTTP_ERROR;
 
-  const std::string url =
-      BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/files/" + std::to_string(fileId) + "/download";
+  // Without a variant the server streams the file whole and with no validator, so a dropped
+  // transfer can only start over. Naming the variant it would deliver anyway sends the same
+  // bytes through its delivery route, which honours Range under a strong ETag. Servers before
+  // 3.4.0 ignore the query and keep the old behaviour.
+  std::string url = BOOKORBIT_STORE.getBaseUrl() + "/plugin/catalog/files/" + std::to_string(fileId) + "/download";
+  if (!variant.empty()) url += "?variant=" + variant;
   const auto headers = authHeaders();
   options.headers = &headers;
   // Same transport and trust as the JSON endpoints: this request carries the same

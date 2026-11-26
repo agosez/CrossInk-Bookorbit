@@ -76,14 +76,17 @@ bool isAlreadyAt(const std::string& path, const BookOrbitCatalogFile& file);
 bool makeFolders(const std::string& path);
 
 /**
- * Downloads the file to finalPath, staged as "<book>.part" and only put in place once it
- * opens as an EPUB, resuming the staged file between attempts. A copy it replaces stays
- * beside the new one until BookUpdateMigration has moved the state keyed by its content.
- * On OK, that hand-over is done (or the book's render cache cleared), and the download
- * index and the Library know of the book. A failure (neither OK nor ABORTED) removes the
- * staged file the attempts kept for resuming.
+ * Downloads the file to finalPath, staged in the private transfer directory and only put in
+ * place once it opens as an EPUB. variant is the file's downloadVariant: with it, an attempt
+ * the connection drops resumes from the staged bytes, and the download only fails after three
+ * attempts in a row that end with no more of the file than it ever had. A copy it replaces
+ * stays beside the new one until BookUpdateMigration has moved the state keyed by its content.
+ * On OK, that hand-over is done (or the book's render cache cleared), and the download index
+ * and the Library know of the book. Giving up keeps the bytes received, with their version,
+ * for the next download of this book to resume (/.crosspoint/bookorbit_partial.json); one
+ * book's at most, as starting another drops them. A cancel or a full card removes them.
  */
-HttpDownloader::DownloadError transfer(int64_t bookId, int64_t fileId, const std::string& finalPath,
-                                       Reporter& reporter);
+HttpDownloader::DownloadError transfer(int64_t bookId, int64_t fileId, const std::string& variant,
+                                       const std::string& finalPath, Reporter& reporter);
 
 }  // namespace BookOrbitCatalogDownload

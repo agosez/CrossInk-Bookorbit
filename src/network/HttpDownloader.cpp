@@ -292,6 +292,8 @@ bool prepareResponse(Sink& sink, int status, std::string_view range, bool hasLen
     sink.total = hasLength ? length : 0;
     sink.responseEnd = sink.total;
     sink.validator = validator;
+    // Published at once: a caller can record the version before the first byte is written.
+    if (sink.options->resumeValidator) *sink.options->resumeValidator = validator;
   } else {
     return false;
   }
@@ -887,6 +889,7 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   sink.cancelFlag = cancelFlag;
   sink.shouldCancel = std::move(options.shouldCancel);
   sink.resumeOffset = resumeOffset;
+  if (resumeOffset > 0 && options.resumeValidator) sink.validator = *options.resumeValidator;
 
   if (options.useServerFilename) {
     sink.prepareDestination = [&](std::string_view disposition) {
@@ -1041,6 +1044,7 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
       delay(20);
     }
   } while (true);
+  if (options.resumeValidator) *options.resumeValidator = sink.validator;
   if (insufficientSpace) result = INSUFFICIENT_SPACE;
 
   if (result != OK) {

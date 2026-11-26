@@ -17,6 +17,7 @@ constexpr char BOOKORBIT_LIST_CACHE_SUFFIX[] = ".json";
 constexpr size_t BOOKORBIT_CACHE_PATH_CAP = 180;
 constexpr char BOOKORBIT_DOWNLOAD_RESUME_PATH[] = "/.crosspoint/bookorbit_download.json";
 constexpr char BOOKORBIT_ENTRY_LINK_PATH[] = "/.crosspoint/bookorbit_catalog_link.json";
+constexpr char BOOKORBIT_KEPT_DOWNLOAD_PATH[] = "/.crosspoint/bookorbit_partial.json";
 
 bool writeJsonStringFile(const std::string& path, const std::string& text) {
   FsFile file;
@@ -305,6 +306,7 @@ bool saveDownloadResume(const BookOrbitDownloadResume& resume) {
   addNumber("fileId", resume.fileId);
   addString("title", resume.title);
   addString("path", resume.path);
+  addString("fileVariant", resume.fileVariant);
   addString("sort", resume.listQuery.sort);
   addString("order", resume.listQuery.order);
   addString("shelf", resume.listQuery.shelf);
@@ -351,6 +353,7 @@ bool takeDownloadResume(BookOrbitDownloadResume& outResume) {
   outResume.fileId = doc["fileId"] | int64_t{0};
   outResume.title = field("title");
   outResume.path = field("path");
+  outResume.fileVariant = field("fileVariant");
   outResume.listQuery.sort = field("sort");
   outResume.listQuery.order = field("order");
   outResume.listQuery.shelf = field("shelf");
@@ -413,5 +416,38 @@ bool takeEntryLink(BookOrbitCatalogLink& outLink) {
 }
 
 void discardEntryLink() { Storage.remove(BOOKORBIT_ENTRY_LINK_PATH); }
+
+bool saveKeptDownload(const BookOrbitKeptDownload& kept) {
+  std::string json = "{\"fileId\":" + std::to_string(kept.fileId) + ",\"path\":";
+  appendJsonEscaped(json, kept.path);
+  json += ",\"variant\":";
+  appendJsonEscaped(json, kept.variant);
+  json += ",\"validator\":";
+  appendJsonEscaped(json, kept.validator);
+  json += '}';
+  return writeJsonStringFile(BOOKORBIT_KEPT_DOWNLOAD_PATH, json);
+}
+
+bool loadKeptDownload(BookOrbitKeptDownload& outKept) {
+  outKept = BookOrbitKeptDownload{};
+  if (!Storage.exists(BOOKORBIT_KEPT_DOWNLOAD_PATH)) return false;
+  std::string json;
+  JsonDocument doc;
+  if (!readJsonStringFile(BOOKORBIT_KEPT_DOWNLOAD_PATH, json) ||
+      deserializeJson(doc, json) != DeserializationError::Ok) {
+    LOG_ERR("BookOrbit", "Unreadable %s: its download will start over", BOOKORBIT_KEPT_DOWNLOAD_PATH);
+    Storage.remove(BOOKORBIT_KEPT_DOWNLOAD_PATH);
+    return false;
+  }
+  outKept.fileId = doc["fileId"] | int64_t{0};
+  outKept.path = std::string(doc["path"] | "");
+  outKept.variant = std::string(doc["variant"] | "");
+  outKept.validator = std::string(doc["validator"] | "");
+  return !outKept.path.empty();
+}
+
+void discardKeptDownload() {
+  if (Storage.exists(BOOKORBIT_KEPT_DOWNLOAD_PATH)) Storage.remove(BOOKORBIT_KEPT_DOWNLOAD_PATH);
+}
 
 }  // namespace BookOrbitCatalogListCache

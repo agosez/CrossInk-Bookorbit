@@ -85,6 +85,12 @@ class HttpDownloader {
     DataCallback authChallenge;
     bool preservePartial;
     bool resumePartial;
+    // With resumePartial: the validator (ETag or Last-Modified) the kept partial was received
+    // under. The resumed request sends it as If-Range and only appends a 206 that matches it,
+    // so a file that changed on the server since restarts instead of splicing two versions.
+    // Updated once a whole new answer is accepted, before its first byte is written, and on
+    // return: the validator of the bytes the partial holds. Borrowed for the call.
+    std::string* resumeValidator = nullptr;
     CancelCallback shouldCancel;
     size_t bufferSize;
     // ESP_HTTP receive storage, separate from the streamed body chunk. Zero

@@ -180,7 +180,8 @@ void BookOrbitCatalogBrowserActivity::restoreFromResume(BookOrbitDownloadResume&
   facetList.selectorIndex = resume.facetSelectorIndex;
   facetList.topIndex = resume.facetTopIndex;
   downloadFromHome = resume.fromHome;
-  pendingDownload = {resume.bookId, resume.fileId, std::move(resume.title), std::move(resume.path)};
+  pendingDownload = {resume.bookId, resume.fileId, std::move(resume.title), std::move(resume.path),
+                     std::move(resume.fileVariant)};
 }
 
 void BookOrbitCatalogBrowserActivity::checkAndConnectWifi() {
@@ -1232,11 +1233,11 @@ void BookOrbitCatalogBrowserActivity::downloadBook(const int64_t bookId, const s
     return;
   }
 
-  if (restartForDownload(bookId, epubFile.id, title, finalPath)) return;
-  transferBook(bookId, epubFile.id, finalPath);
+  if (restartForDownload(bookId, epubFile, title, finalPath)) return;
+  transferBook(bookId, epubFile.id, epubFile.downloadVariant, finalPath);
 }
 
-bool BookOrbitCatalogBrowserActivity::restartForDownload(const int64_t bookId, const int64_t fileId,
+bool BookOrbitCatalogBrowserActivity::restartForDownload(const int64_t bookId, const BookOrbitCatalogFile& file,
                                                          const std::string& title, const std::string& path) {
 #if FREEINK_MCU_C3
   // A BookOrbit Home shelf opens the catalog's network boot straight onto its book, and
@@ -1250,7 +1251,8 @@ bool BookOrbitCatalogBrowserActivity::restartForDownload(const int64_t bookId, c
   }
   BookOrbitDownloadResume resume;
   resume.bookId = bookId;
-  resume.fileId = fileId;
+  resume.fileId = file.id;
+  resume.fileVariant = file.downloadVariant;
   resume.title = title;
   resume.path = path;
   resume.listQuery = bookList.query;
@@ -1278,7 +1280,7 @@ bool BookOrbitCatalogBrowserActivity::restartForDownload(const int64_t bookId, c
   return true;
 #else
   (void)bookId;
-  (void)fileId;
+  (void)file;
   (void)title;
   (void)path;
   return false;
@@ -1299,12 +1301,13 @@ void BookOrbitCatalogBrowserActivity::runPendingDownload(const bool wifiConnecte
     return;
   }
   showDownloadScreen(job.title);
-  transferBook(job.bookId, job.fileId, job.path);
+  transferBook(job.bookId, job.fileId, job.variant, job.path);
 }
 
 void BookOrbitCatalogBrowserActivity::transferBook(const int64_t bookId, const int64_t fileId,
-                                                   const std::string& finalPath) {
-  const HttpDownloader::DownloadError result = BookOrbitCatalogDownload::transfer(bookId, fileId, finalPath, *this);
+                                                   const std::string& variant, const std::string& finalPath) {
+  const HttpDownloader::DownloadError result =
+      BookOrbitCatalogDownload::transfer(bookId, fileId, variant, finalPath, *this);
   const bool downloadFailed = result != HttpDownloader::OK && result != HttpDownloader::ABORTED;
 
   if (result == HttpDownloader::OK) {

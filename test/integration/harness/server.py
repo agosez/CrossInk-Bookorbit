@@ -228,3 +228,86 @@ def server_with_failing_progress():
     finally:
         server.shutdown()
         server.server_close()
+
+
+# server_cutting_downloads() faults, besides a cut after N body bytes (an int).
+DROP = "drop"  # the connection closes before any answer, as a link lost mid-request
+
+
+def stall(sent: int) -> tuple[str, int]:
+    """A fault that sends `sent` body bytes, then holds the connection open, silent, until the
+    stand-in stops: the reader is left waiting, as when it resets or its battery dies."""
+    return ("stall", sent)
+
+
+@contextlib.contextmanager
+def server_cutting_downloads(faults: list):
+    """A local stand-in for the server, yielding its URL and the book downloads it saw: it
+    forwards every request to the real one, and breaks the first book downloads with
+    faults[i]: an int cuts the connection after that many body bytes, as a lost Wi-Fi link
+    would, DROP closes it before answering, stall() holds it. Each download is recorded as a
+    dict: path, range and if_range (the request's), status, etag and body (the server's
+    answer, whole; None when dropped) and sent (the bytes passed on)."""
+    upstream = BASE_URL.rstrip("/")
+    dropped = {"host", "connection", "accept-encoding", "content-length", "transfer-encoding"}
+    downloads: list[dict] = []
+    lock = threading.Lock()
+    released = threading.Event()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            fault = None
+            record = None
+            if "/plugin/catalog/files/" in self.path and "/download" in self.path:
+                with lock:
+                    fault = faults[len(downloads)] if len(downloads) < len(faults) else None
+                    record = {"path": self.path, "range": self.headers.get("Range"),
+                              "if_range": self.headers.get("If-Range"), "status": None,
+                              "etag": None, "body": None, "sent": 0}
+                    downloads.append(record)
+            if fault == DROP:
+                self.close_connection = True
+                return
+            request = urllib.request.Request(
+                upstream + self.path,
+                headers={k: v for k, v in self.headers.items() if k.lower() not in dropped})
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    status, headers, data = response.status, response.headers, response.read()
+            except urllib.error.HTTPError as error:
+                status, headers, data = error.code, error.headers, error.read()
+            sent = len(data)
+            if isinstance(fault, int):
+                sent = min(fault, len(data))
+            elif isinstance(fault, tuple):
+                sent = min(fault[1], len(data))
+            if record is not None:
+                record.update(status=status, etag=headers.get("ETag"), body=data, sent=sent)
+            self.send_response(status)
+            for key, value in headers.items():
+                if key.lower() not in dropped:
+                    self.send_header(key, value)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            # Short of the announced length, the client sees the link drop mid-body.
+            self.wfile.write(data[:sent])
+            self.wfile.flush()
+            if isinstance(fault, tuple):
+                released.wait()
+            if sent < len(data):
+                self.close_connection = True
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", downloads
+    finally:
+        released.set()
+        server.shutdown()
+        server.server_close()

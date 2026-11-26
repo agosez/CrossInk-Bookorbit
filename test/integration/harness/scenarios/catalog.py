@@ -15,8 +15,8 @@ import re
 from pathlib import Path
 
 from formats import book_listings, listings_by_key, read_progress_bin, write_progress_bin
-from server import load_seed, sim_device, want_to_read_epubs
-from sim import CATALOG_ROOT, TO_CATALOG, presses, run_simulator, sd_card
+from server import DROP, load_seed, server_cutting_downloads, sim_device, stall, want_to_read_epubs
+from sim import CATALOG_ROOT, TO_CATALOG, SimFs, presses, run_simulator, sd_card
 
 BOOT_TARGET_BOOKORBIT_DOWNLOAD = 34  # NetworkBootTarget::BOOKORBIT_DOWNLOAD, src/SilentRestart.h
 
@@ -286,6 +286,104 @@ def scenario_catalog_download_naming() -> None:
             (first["id"], book_path, expected.stat().st_size)], "the index did not record the copy after the others"
         state = json.loads((fs.crosspoint / "state.json").read_text())
         assert state.get("openEpubPath") == book_path, "Confirm did not open the copy in place"
+
+
+def scenario_catalog_download_resumes() -> None:
+    """A book download the connection drops resumes where it stopped instead of starting
+    over, and only fails after three attempts in a row that bring nothing more; what it got
+    stays on the card for the next download of that book. BookOrbit's KOReader route serves
+    byte ranges only when the download names the delivery variant the book's details give,
+    so every request must name it. A stand-in for the server breaks the connection.
+
+    Four runs. On a first card, four attempts in a row are cut after 2000 bytes: each later
+    one asks for the rest (Range) of the version it started (If-Range, the first answer's
+    ETag) and gets it (206), four failed attempts where three used to end the download, and
+    the fifth completes the book, byte for byte the server's file. On a second card, which
+    holds another book's unfinished download: the first attempt is cut after 3000 bytes and
+    the next three get no answer, so the download fails, with the 3000 bytes and their ETag
+    kept and the other book's bytes gone. The next download resumes them and the reader is
+    killed mid-transfer, as a reset or a flat battery would stop it. The last one resumes
+    from where that left off and completes the book, leaving nothing staged behind."""
+    manifest, _ = load_seed()
+    sim = sim_device(manifest)
+    script = ";".join([*TO_ALL_BOOKS, "16000:CONFIRM", "24000:QUIT"])
+    staging = Path(".crosspoint") / "xfer" / "http-download"
+
+    def staged(fs: SimFs) -> dict[str, int]:
+        root = fs.fs / staging
+        return {p.relative_to(root).as_posix(): p.stat().st_size for p in root.rglob("*") if p.is_file()}
+
+    def books(fs: SimFs) -> list[Path]:
+        return [p for p in fs.fs.rglob("*.epub") if staging not in p.relative_to(fs.fs).parents]
+
+    def resumed(d: dict, offset: int, etag: str) -> bool:
+        return d["range"] == f"bytes={offset}-" and d["if_range"] == etag and d["status"] == 206
+
+    with server_cutting_downloads([2000] * 4) as (url, downloads), sd_card(manifest) as fs:
+        fs.update_bookorbit(serverUrl=url)
+        output = run_simulator(fs, input_script=script, choice="apply", timeout_s=120,
+                               after_reboot_script="15000:QUIT")
+        assert "Restarting into the download of book" in output, "the download did not start"
+        first = book_listings(fs.list_caches())[0]["items"][0]
+        epub = next(f for f in sim.catalog_book_detail(first["id"])["files"] if f["format"].lower() == "epub")
+        variant = epub["downloadVariant"]
+        assert len(downloads) == 5, f"expected 4 cut attempts and a complete one: {downloads}"
+        assert all(d["path"].endswith(f"/download?variant={variant}") for d in downloads), \
+            f"a download did not name its variant {variant!r}: {[d['path'] for d in downloads]}"
+        whole = downloads[0]
+        assert whole["range"] is None and whole["status"] == 200 and whole["etag"], \
+            f"the first attempt should fetch the whole file under an ETag: {whole}"
+        for attempt, d in enumerate(downloads[1:], start=1):
+            assert resumed(d, 2000 * attempt, whole["etag"]), f"attempt {attempt + 1} did not resume: {d}"
+        assert "Download attempt 4 failed" in output and "Download attempt 5 failed" not in output, \
+            "the download did not keep going while it progressed"
+        assert [p.read_bytes() for p in books(fs)] == [whole["body"]], "the resumed book differs from the server's file"
+        assert not staged(fs) and not (fs.crosspoint / "bookorbit_partial.json").exists(), \
+            "a completed download left its staged bytes or their record"
+
+    with sd_card(manifest) as fs:
+        record = fs.crosspoint / "bookorbit_partial.json"
+        other = fs.fs / staging / "Other" / "Book.epub"
+        other.parent.mkdir(parents=True)
+        other.write_bytes(b"x" * 100)
+        record.write_text(json.dumps({"fileId": -5, "path": "/Other/Book.epub", "variant": "original",
+                                      "validator": '"another-book"'}))
+
+        with server_cutting_downloads([3000, DROP, DROP, DROP]) as (url, downloads):
+            fs.update_bookorbit(serverUrl=url)
+            output = run_simulator(fs, input_script=script, choice="apply", timeout_s=120,
+                                   after_reboot_script="15000:QUIT")
+        whole = downloads[0]
+        assert whole["status"] == 200 and whole["etag"] and len(downloads) == 4, \
+            f"expected a cut answer, then three attempts without one: {downloads}"
+        assert all(d["range"] == "bytes=3000-" and d["if_range"] == whole["etag"] for d in downloads[1:]), \
+            f"the attempts after the cut did not ask for the rest: {downloads[1:]}"
+        assert "3 in a row without progress)" in output, "the third attempt without progress did not end it"
+        assert not books(fs), "the failed download left a book"
+        assert list(staged(fs).values()) == [3000], f"the 3000 bytes received were not kept alone: {staged(fs)}"
+        kept = json.loads(record.read_text())
+        epub = next(f for f in sim.catalog_book_detail(
+            book_listings(fs.list_caches())[0]["items"][0]["id"])["files"] if f["format"].lower() == "epub")
+        assert (kept["fileId"], kept["variant"], kept["validator"]) == (
+            epub["id"], epub["downloadVariant"], whole["etag"]), f"the kept bytes' record is wrong: {kept}"
+
+        # Killed while the answer hangs: the reader never sees the transfer end.
+        with server_cutting_downloads([stall(2000)]) as (url, downloads):
+            fs.update_bookorbit(serverUrl=url)
+            output = run_simulator(fs, input_script=script, choice="apply", timeout_s=45)
+        assert "Resuming the 3000 bytes an earlier download of this book kept" in output, \
+            "the kept bytes were not picked up"
+        assert len(downloads) == 1 and resumed(downloads[0], 3000, whole["etag"]), \
+            f"the download did not resume the kept bytes: {downloads}"
+        assert list(staged(fs).values()) == [5000], f"the bytes received before the reset were lost: {staged(fs)}"
+
+        with server_cutting_downloads([]) as (url, downloads):
+            fs.update_bookorbit(serverUrl=url)
+            run_simulator(fs, input_script=script, choice="apply", timeout_s=120, after_reboot_script="15000:QUIT")
+        assert len(downloads) == 1 and resumed(downloads[0], 5000, whole["etag"]), \
+            f"the download after the reset did not resume: {downloads}"
+        assert [p.read_bytes() for p in books(fs)] == [whole["body"]], "the resumed book differs from the server's file"
+        assert not staged(fs) and not record.exists(), "the completed download left its staged bytes or their record"
 
 
 def scenario_catalog_book_actions() -> None:

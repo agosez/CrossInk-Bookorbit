@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "AppVersion.h"
+#include "BookOrbitCatalogListCache.h"
 #include "BookOrbitCredentialStore.h"
 #include "BookOrbitDownloadIndex.h"
 #include "util/BookCacheUtils.h"
@@ -26,10 +27,47 @@ constexpr char READ_FOLDER_PREFIX[] = "/Read";
 constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 5;
 constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 1000;
 constexpr unsigned long DOWNLOAD_PROGRESS_MAX_UPDATE_MS = 5000;
-constexpr int MAX_DOWNLOAD_ATTEMPTS = 3;
+// Attempts in a row that may end without the download getting further before it fails.
+constexpr uint8_t MAX_ATTEMPTS_WITHOUT_PROGRESS = 3;
+// The pause before an attempt that follows one without progress, times the attempts in a
+// row so far: a Wi-Fi drop of a few seconds is ridden out rather than failed in a burst.
+constexpr unsigned long STALLED_RETRY_DELAY_MS = 1000;
 // HttpDownloader's FilePublication staging kind: a download waits below
 // /.crosspoint/xfer/<kind>/ until it is complete and checked.
 constexpr char STAGED_DOWNLOAD_KIND[] = "http-download";
+
+// Counts the attempts that end without the download getting further than it ever got. The
+// furthest point, not the previous attempt's: a server that drops the connection and then
+// ignores the resume restarts every other attempt from zero, which must not count as progress
+// for ever.
+class ProgressBudget {
+ public:
+  // resumedBytes: what an earlier download left for this one; only more counts as progress.
+  explicit ProgressBudget(const size_t resumedBytes) : furthest_(resumedBytes) {}
+  // keptBytes: what the staged file holds after a failed attempt. False once it should stop.
+  bool again(const size_t keptBytes) {
+    if (keptBytes > furthest_) {
+      furthest_ = keptBytes;
+      withoutProgress_ = 0;
+    } else {
+      ++withoutProgress_;
+    }
+    return withoutProgress_ < MAX_ATTEMPTS_WITHOUT_PROGRESS;
+  }
+  uint8_t withoutProgress() const { return withoutProgress_; }
+
+ private:
+  size_t furthest_ = 0;
+  uint8_t withoutProgress_ = 0;
+};
+
+// What a failed attempt left in the staged file for the next one to resume (0 when none).
+size_t stagedBytes(const std::string& stagedPath) {
+  FsFile staged = Storage.open(stagedPath.c_str());  // quiet when the attempt removed it
+  const size_t size = staged && !staged.isDirectory() ? staged.fileSize() : 0;
+  staged.close();
+  return size;
+}
 
 // The SD filename (leading slash, no folder) this firmware falls back to when the
 // server does not say where the file belongs.
@@ -113,8 +151,8 @@ bool makeFolders(const std::string& path) {
   return false;
 }
 
-HttpDownloader::DownloadError transfer(const int64_t bookId, const int64_t fileId, const std::string& finalPath,
-                                       Reporter& reporter) {
+HttpDownloader::DownloadError transfer(const int64_t bookId, const int64_t fileId, const std::string& variant,
+                                       const std::string& finalPath, Reporter& reporter) {
   // The heap the TLS session starts from: what tells a fragmented session from a
   // clean download boot in a field log. The version says which build wrote that log.
   LOG_INF("BookOrbit", "Downloading file %lld -> %s (free=%u maxAlloc=%u, firmware %s)", static_cast<long long>(fileId),
@@ -137,6 +175,14 @@ HttpDownloader::DownloadError transfer(const int64_t bookId, const int64_t fileI
   // TLS runs with a few KB of headroom on the C3 and reads can drop mid-transfer;
   // keep the partial file and resume instead of restarting a multi-MB download.
   downloadOptions.preservePartial = true;
+  // One request per attempt: the loop below owns the retries, so every attempt counts toward
+  // its rule, whether the connection dropped or the server answered with an error.
+  downloadOptions.maxAttempts = 1;
+  // The validator (the server's ETag) the staged bytes came under. The next attempt resumes
+  // them with Range and If-Range, so a book updated on the server in between starts over
+  // instead of splicing two versions. Empty: nothing to resume, the next attempt starts over.
+  std::string validator;
+  downloadOptions.resumeValidator = &validator;
   // A book spans many TLS records: once the request is out, the SDK grows the
   // connection's input buffer to a full record while the heap still has the block
   // (skipped when the server agreed to small records, issue #96).
@@ -156,25 +202,70 @@ HttpDownloader::DownloadError transfer(const int64_t bookId, const int64_t fileI
     return zip.getInflatedFileSize("META-INF/container.xml", &size) && size > 0;
   };
 
+  std::string stagedPath;
+  if (!FilePublication::stagePath(finalPath, STAGED_DOWNLOAD_KIND, stagedPath)) stagedPath.clear();
+  // Cleared once the server's delivery route refuses the file (400 when busy, 409 when it
+  // changed on disk before a rescan): the plain route still serves it, only without resuming.
+  bool useVariant = !variant.empty();
+  const std::string noVariant;
+  size_t keptBytes = 0;
+
+  // The bytes an earlier download left (BookOrbitKeptDownload, written before the first byte
+  // of each): resumed when they are this book's, in the version it asks for, and dropped when
+  // they are another book's, so the card keeps one at most. Its validator, once set, is the
+  // version of every staged byte: a resume only appends bytes the server confirmed under it,
+  // and an attempt that starts over clears it first.
+  BookOrbitKeptDownload onCard;
+  const bool hasRecord = BookOrbitCatalogListCache::loadKeptDownload(onCard);
+  if (hasRecord && onCard.path != finalPath) {
+    std::string otherStaged;
+    if (FilePublication::stagePath(onCard.path, STAGED_DOWNLOAD_KIND, otherStaged)) Storage.remove(otherStaged.c_str());
+    LOG_INF("BookOrbit", "Dropped the bytes an unfinished download of %s kept", onCard.path.c_str());
+  } else if (hasRecord && onCard.fileId == fileId && onCard.variant == variant && !onCard.validator.empty() &&
+             !stagedPath.empty()) {
+    keptBytes = stagedBytes(stagedPath);
+    if (keptBytes > 0) {
+      validator = onCard.validator;
+      LOG_INF("BookOrbit", "Resuming the %zu bytes an earlier download of this book kept", keptBytes);
+    }
+  }
+  ProgressBudget budget(keptBytes);
+  // What the card says about the staged bytes, rewritten only when that changes.
+  bool recorded = hasRecord && keptBytes > 0;
+  std::string recordedValidator = recorded ? validator : std::string();
+  const auto recordStaged = [&](const std::string& forValidator) {
+    if (recorded && recordedValidator == forValidator) return;
+    recorded = BookOrbitCatalogListCache::saveKeptDownload(
+        {fileId, finalPath, useVariant ? variant : noVariant, forValidator});
+    recordedValidator = forValidator;
+  };
+
   reporter.releaseForTransfer();
 
   HttpDownloader::DownloadError result = HttpDownloader::HTTP_ERROR;
+  bool gaveUp = false;  // ended by the attempts in a row without progress
   int lastRenderedPercent = -1;
   unsigned long lastProgressUpdateMs = 0;
   unsigned long now = 0;
   int percent = 0;
-  for (int attempt = 0; attempt < MAX_DOWNLOAD_ATTEMPTS; attempt++) {
+  for (unsigned attempt = 1;; attempt++) {
     // Honor a Back press between attempts too: a failing download otherwise runs
     // all its retries (TLS handshake included) with the cancel request ignored.
     if (pollCancel()) {
       result = HttpDownloader::ABORTED;
       break;
     }
-    downloadOptions.resumePartial = attempt > 0;
+    // Without a validator nothing says which version staged bytes belong to: the attempt
+    // drops them and starts over, and the card stops vouching for any version first.
+    downloadOptions.resumePartial = keptBytes > 0 && !validator.empty();
+    if (!downloadOptions.resumePartial) recordStaged(std::string());
     result = BookOrbitCatalogClient::downloadFile(
-        fileId, finalPath,
-        [&reporter, &lastRenderedPercent, &lastProgressUpdateMs, &percent, &now](const size_t downloaded,
-                                                                                 const size_t total) {
+        fileId, useVariant ? variant : noVariant, finalPath,
+        [&reporter, &lastRenderedPercent, &lastProgressUpdateMs, &percent, &now, &validator, &recordStaged](
+            const size_t downloaded, const size_t total) {
+          // The first bytes of a new answer: once the card names their version, a reset or a
+          // flat battery from here on leaves them for the next download of this book.
+          if (!validator.empty()) recordStaged(validator);
           percent = total > 0 ? static_cast<int>(static_cast<uint64_t>(downloaded) * 100 / total) : 0;
           now = millis();
           // Throttle e-ink refreshes to meaningful progress steps: partial
@@ -196,15 +287,36 @@ HttpDownloader::DownloadError transfer(const int64_t bookId, const int64_t fileI
         result == HttpDownloader::INSUFFICIENT_SPACE) {
       break;
     }
-    LOG_ERR("BookOrbit", "Download attempt %d/%d failed (err=%d), retrying", attempt + 1, MAX_DOWNLOAD_ATTEMPTS,
-            static_cast<int>(result));
+    const int status = HttpDownloader::lastHttpStatus;
+    keptBytes = stagedPath.empty() ? 0 : stagedBytes(stagedPath);
+    const bool retry = budget.again(keptBytes);
+    LOG_ERR("BookOrbit", "Download attempt %u failed (err=%d, http=%d, %zu bytes kept, %u in a row without progress)%s",
+            attempt, static_cast<int>(result), status, keptBytes, static_cast<unsigned>(budget.withoutProgress()),
+            retry ? ", retrying" : "");
+    if (keptBytes > 0 && !validator.empty()) recordStaged(validator);
+    if (!retry) {
+      gaveUp = true;
+      break;
+    }
+    // The server answered the resume itself, yet the staged bytes got no further (416, or a
+    // 206 for another range or version): they cannot be resumed, the next attempt starts over.
+    if ((status == 206 || status == 416) && budget.withoutProgress() > 0) validator.clear();
+    if (useVariant && (status == 400 || status == 409)) {
+      useVariant = false;
+      validator.clear();
+    }
+    const unsigned long pauseMs = STALLED_RETRY_DELAY_MS * budget.withoutProgress();
+    for (const unsigned long start = millis(); millis() - start < pauseMs && !pollCancel();) delay(20);
   }
 
-  if (result != HttpDownloader::OK && result != HttpDownloader::ABORTED) {
-    // preservePartial kept the staged file for resuming between attempts; don't
-    // leave it behind once we give up.
-    std::string staged;
-    if (FilePublication::stagePath(finalPath, STAGED_DOWNLOAD_KIND, staged)) Storage.remove(staged.c_str());
+  // Giving up keeps what was received under a known version for the next download of this
+  // book. Otherwise the staged file goes (a cancel, or a full card, included), and its record.
+  const bool keep = gaveUp && keptBytes > 0 && !validator.empty() && recorded && recordedValidator == validator;
+  if (keep) {
+    LOG_INF("BookOrbit", "Keeping the %zu bytes received for a later download of this book", keptBytes);
+  } else {
+    if (result != HttpDownloader::OK && !stagedPath.empty()) Storage.remove(stagedPath.c_str());
+    BookOrbitCatalogListCache::discardKeptDownload();
   }
 
   if (result == HttpDownloader::OK) {

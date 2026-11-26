@@ -108,6 +108,7 @@ class BookOrbitCatalogBrowserActivity final : public Activity, private BookOrbit
     int64_t fileId = 0;
     std::string title;
     std::string path;
+    std::string variant;  // the file's downloadVariant
   };
 
   // --- Session --------------------------------------------------------------------
@@ -284,10 +285,11 @@ class BookOrbitCatalogBrowserActivity final : public Activity, private BookOrbit
   // Saves the download and the listing, then restarts into the BOOKORBIT_DOWNLOAD
   // boot. False when the download runs in place instead: on S3 boards, and for a
   // BookOrbit Home shelf book in the catalog's network boot.
-  bool restartForDownload(int64_t bookId, int64_t fileId, const std::string& title, const std::string& path);
+  bool restartForDownload(int64_t bookId, const BookOrbitCatalogFile& file, const std::string& title,
+                          const std::string& path);
   void runPendingDownload(bool wifiConnected);
-  // The transfer itself, then the listing it freed is rebuilt.
-  void transferBook(int64_t bookId, int64_t fileId, const std::string& finalPath);
+  // The transfer itself, then the listing it freed is rebuilt. variant: the file's downloadVariant.
+  void transferBook(int64_t bookId, int64_t fileId, const std::string& variant, const std::string& finalPath);
   // BookOrbitCatalogDownload::Reporter
   void releaseForTransfer() override;
   void reportProgress(size_t downloaded, size_t total, bool redraw) override;

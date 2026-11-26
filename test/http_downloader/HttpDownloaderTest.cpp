@@ -219,6 +219,59 @@ TEST_P(HttpDownloaderTest, RetriesTransportFailureWithoutLosingPartialBytes) {
   EXPECT_EQ(requests[2]["Range"], "bytes=3-");
 }
 
+TEST_P(HttpDownloaderTest, NextCallResumesAPartialUnderItsValidator) {
+  const std::string staged = "/.crosspoint/xfer/http-download/book";
+  std::string validator;
+  HttpDownloader::DownloadOptions options;
+  options.transport = GetParam();
+  options.stageAsPart = true;
+  options.preservePartial = true;
+  options.maxAttempts = 1;
+  options.resumeValidator = &validator;
+  replies = {{200, "abc", 6, "", false}};
+  EXPECT_EQ(HttpDownloader::downloadToFile("https://example.com/book", "/book", nullptr, nullptr, "", "", options),
+            HttpDownloader::HTTP_ERROR);
+  EXPECT_EQ(files[staged], "abc");
+  EXPECT_EQ(validator, "\"v1\"");
+
+  options.resumePartial = true;
+  nextReply = 0;
+  requests.clear();
+  replies = {{206, "def", 3, "bytes 3-5/6", true}};
+  EXPECT_EQ(HttpDownloader::downloadToFile("https://example.com/book", "/book", nullptr, nullptr, "", "", options),
+            HttpDownloader::OK);
+  EXPECT_EQ(files["/book"], "abcdef");
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_EQ(requests[0]["Range"], "bytes=3-");
+  EXPECT_EQ(requests[0]["If-Range"], "\"v1\"");
+}
+
+TEST_P(HttpDownloaderTest, NextCallNeverAppendsAnotherVersion) {
+  const std::string staged = "/.crosspoint/xfer/http-download/book";
+  std::string validator = "\"v1\"";
+  HttpDownloader::DownloadOptions options;
+  options.transport = GetParam();
+  options.stageAsPart = true;
+  options.preservePartial = true;
+  options.resumePartial = true;
+  options.maxAttempts = 1;
+  options.resumeValidator = &validator;
+  files[staged] = "abc";
+  replies = {{206, "XYZ", 3, "bytes 3-5/6", true, "", "\"v2\""}};
+  EXPECT_EQ(HttpDownloader::downloadToFile("https://example.com/book", "/book", nullptr, nullptr, "", "", options),
+            HttpDownloader::HTTP_ERROR);
+  EXPECT_EQ(files[staged], "abc");
+  EXPECT_FALSE(files.count("/book"));
+
+  // A server that answers If-Range with the whole new version: the old bytes go.
+  nextReply = 0;
+  replies = {{200, "UVWXYZ", 6, "", true, "", "\"v2\""}};
+  EXPECT_EQ(HttpDownloader::downloadToFile("https://example.com/book", "/book", nullptr, nullptr, "", "", options),
+            HttpDownloader::HTTP_ERROR);
+  EXPECT_FALSE(files.count(staged));
+  EXPECT_FALSE(files.count("/book"));
+}
+
 TEST_P(HttpDownloaderTest, ServerFilenameUsesFinalResponseAndKeepsGeneratedFile) {
   files["/Books/Author - Title.epub"] = "unrelated";
   Reply redirect = named("Wrong.epub", "", 302, 0);
