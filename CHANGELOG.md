@@ -5,7 +5,7 @@ records only its own additions. Each release states the CrossInk version it is b
 on; for everything inherited from upstream, see the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
-## [Unreleased]
+## [v2.0.0+bookorbit.1] - 2026-11-26
 
 Based on CrossInk v2.0.0.
 
