@@ -80,6 +80,15 @@ COPY_NEW = """#ifdef ALLOWS_UNALIGNED
 """
 
 
+# playFrame() paces frames with millis() and delay() everywhere but macOS and __LINUX__
+# (which GCC never defines), yet the header includes Arduino.h only under ARDUINO, so the
+# simulator fails to build on Linux. CrossInk calls playFrame() with bSync false, so the
+# timer only ever measured an unused delay; device builds define ARDUINO and keep it.
+FRAME_TIMER_OLD = "#if !defined( __MACH__ ) && !defined( __LINUX__ )"
+FRAME_TIMER_NEW = "#if defined(ARDUINO) && !defined( __MACH__ ) && !defined( __LINUX__ )"
+FRAME_TIMER_SITES = 2
+
+
 def _patch_header(header_path):
     with open(header_path, "r", encoding="utf-8") as file:
         text = file.read()
@@ -133,9 +142,26 @@ def _patch_decoder(source_path):
     return True
 
 
+def _patch_frame_timer(source_path):
+    with open(source_path, "r", encoding="utf-8") as file:
+        text = file.read()
+    count = text.count(FRAME_TIMER_OLD)
+    if count == 0 and text.count(FRAME_TIMER_NEW) == FRAME_TIMER_SITES:
+        return True
+    if count != FRAME_TIMER_SITES:
+        raise RuntimeError("AnimatedGIF frame timer patch does not match %s" % source_path)
+    with open(source_path, "w", encoding="utf-8") as file:
+        file.write(text.replace(FRAME_TIMER_OLD, FRAME_TIMER_NEW))
+    print("Patched AnimatedGIF frame timer for non-Arduino builds")
+    return True
+
+
 def patch_library(library_path):
-    return _patch_header(os.path.join(library_path, "src", "AnimatedGIF.h")) and _patch_decoder(
-        os.path.join(library_path, "src", "gif.inl")
+    source = os.path.join(library_path, "src")
+    return (
+        _patch_header(os.path.join(source, "AnimatedGIF.h"))
+        and _patch_decoder(os.path.join(source, "gif.inl"))
+        and _patch_frame_timer(os.path.join(source, "AnimatedGIF.cpp"))
     )
 
 

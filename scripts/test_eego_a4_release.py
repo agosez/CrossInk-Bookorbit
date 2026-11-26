@@ -102,15 +102,17 @@ class EegoA4ReleaseTest(unittest.TestCase):
     def test_workflows_build_and_publish_a4(self):
         ci = (ROOT / '.github/workflows/ci.yml').read_text()
         self.assertRegex(ci, r'environment: \[[^\n]*\beego_a4, eego_a4-debug\]')
+        # This fork names release assets after ASSET_VERSION, the version with "+bookorbit.N"
+        # sanitised to "-bookorbit.N", and leaves out upstream's signed release catalog (see
+        # release.yml), so the stable firmware is listed once: in the GitHub release files.
         for workflow in ('release.yml', 'release_candidate.yml'):
             content = (ROOT / '.github/workflows' / workflow).read_text()
             self.assertIn('- environment: eego_a4\n            firmware: firmware-eego_a4', content)
-            suffix = ('v${{ env.RELEASE_VERSION }}' if workflow == 'release.yml'
+            suffix = ('v${{ env.ASSET_VERSION }}' if workflow == 'release.yml'
                       else '${{ env.RC_BRANCH_SAFE }}-${{ env.RC_HASH_SHORT }}-RC')
-            expected_count = 2 if workflow == 'release.yml' else 1
-            self.assertEqual(content.count(f'firmware-eego_a4-{suffix}.bin'), expected_count)
+            self.assertEqual(content.count(f'firmware-eego_a4-{suffix}.bin'), 1)
         release = (ROOT / '.github/workflows/release.yml').read_text()
-        self.assertIn('--firmware "release-firmware/firmware-eego_a4-v${{ env.RELEASE_VERSION }}.bin"', release)
+        self.assertIn('${{ matrix.firmware }}-v${{ needs.prepare-release.outputs.asset_version }}.bin', release)
 
 
 if __name__ == '__main__':
