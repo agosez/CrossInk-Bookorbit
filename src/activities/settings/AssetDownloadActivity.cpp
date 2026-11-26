@@ -17,6 +17,7 @@
 #include "activities/network/WifiSelectionActivity.h"
 #include "components/TouchHeaderBackButton.h"
 #include "network/AssetCatalogSignature.h"
+#include "network/AssetDownloadTransport.h"
 #include "network/HttpDownloader.h"
 #include "util/StringUtils.h"
 
