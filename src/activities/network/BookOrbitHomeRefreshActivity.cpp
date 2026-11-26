@@ -144,7 +144,7 @@ void BookOrbitHomeRefreshActivity::loop() {
 
 void BookOrbitHomeRefreshActivity::render(RenderLock&&) {
   char line[96];
-  const char* status = tr(STR_LOADING_POPUP);
+  const char* status = tr(STR_LOADING);
   bool showSummary = false;
   size_t done = 0;
   size_t total = 0;

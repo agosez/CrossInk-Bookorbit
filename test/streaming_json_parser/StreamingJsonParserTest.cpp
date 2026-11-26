@@ -1,10 +1,9 @@
+#include <StreamingJsonParser.h>
 #include <gtest/gtest.h>
 
 #include <cstring>
 #include <string>
 #include <vector>
-
-#include "lib/JsonParser/StreamingJsonParser.h"
 
 namespace {
 
@@ -150,13 +149,13 @@ TEST(StreamingJsonParser, StringEscapes) {
   EXPECT_EQ(events[2].value, std::string("a\"b\\c/d\ne\tf"));
 }
 
-TEST(StreamingJsonParser, UnicodeEscapePassthrough) {
-  auto events = parse(R"({"u": "\u0041\u0042"})");
+TEST(StreamingJsonParser, UnicodeEscapesDecodeToUtf8) {
+  auto events = parse(R"({"u": "\u0041\u00E9\uD83D\uDE00"})");
 
   ASSERT_EQ(events.size(), 4u);
   EXPECT_EQ(events[2].type, EventType::STRING);
-  // \uXXXX passed through as literal \u followed by the hex digits
-  EXPECT_EQ(events[2].value, "\\u0041\\u0042");
+  // The shared SDK parser decodes escaped code points, including surrogate pairs.
+  EXPECT_EQ(events[2].value, "Aé😀");
 }
 
 TEST(StreamingJsonParser, Numbers) {
@@ -503,48 +502,4 @@ TEST(StreamingJsonParser, NullCallbacksNoCrash) {
   const char* json = R"({"key": "value", "num": 42, "b": true, "n": null, "a": [1]})";
   parser.feed(json, strlen(json));
   EXPECT_FALSE(parser.hasError());
-}
-
-struct PartsContext {
-  TestContext base;
-  std::string assembled;
-  size_t parts = 0;
-  size_t lastParts = 0;
-};
-
-void onStringPart(void* ctx, const char* part, size_t len, bool last) {
-  auto* parts = static_cast<PartsContext*>(ctx);
-  parts->assembled.append(part, len);
-  parts->parts++;
-  if (last) parts->lastParts++;
-}
-
-void onStringInParts(void* ctx, const char* value, size_t len) {
-  static_cast<PartsContext*>(ctx)->base.events.push_back({EventType::STRING, std::string(value, len)});
-}
-
-TEST(StreamingJsonParser, LongStringInParts) {
-  // Long enough for three pieces, with an escape inside, fed one byte at a time.
-  std::string longVal(StreamingJsonParser::TOKEN_BUF_SIZE * 2 + 100, 'x');
-  longVal[700] = '"';
-  std::string escaped = longVal;
-  escaped.replace(700, 1, "\\\"");
-  const std::string json = R"({"short": "ok", "long": ")" + escaped + R"(", "after": "end"})";
-
-  PartsContext ctx;
-  JsonCallbacks callbacks = {&ctx,          onKey,       onStringInParts, onNumber,   onBool,      onNull,
-                             onObjectStart, onObjectEnd, onArrayStart,    onArrayEnd, onStringPart};
-  StreamingJsonParser parser(callbacks);
-  for (char c : json) parser.feed(&c, 1);
-
-  EXPECT_FALSE(parser.hasError());
-  EXPECT_EQ(ctx.assembled, longVal);
-  EXPECT_EQ(ctx.parts, 3u);
-  EXPECT_EQ(ctx.lastParts, 1u);
-  // Values that fit still go to onString, whole.
-  std::vector<std::string> strings;
-  for (const auto& e : ctx.base.events) {
-    if (e.type == EventType::STRING) strings.push_back(e.value);
-  }
-  EXPECT_EQ(strings, (std::vector<std::string>{"ok", "end"}));
 }

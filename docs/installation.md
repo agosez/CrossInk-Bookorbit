@@ -11,6 +11,7 @@ nav_order: 2
 - Xteink X4 Pro
 - Xteink X4 Classic
 - Seeed Studio Sticky
+- BOOX Picco (USB installation only, see [BOOX Picco](#boox-picco))
 
 ## Firmware Files
 
@@ -31,6 +32,51 @@ offered the test builds published ahead of each release as well.
    your device model and choose the custom-firmware option.
 3. Give it the downloaded `firmware-*.bin` and start the flash, keeping the reader
    connected through the download-mode and flashing steps.
+
+## BOOX Picco
+
+#### For new installs and every update.
+
+Picco keeps its factory recovery software next to a single application slot, so it
+has no Wi-Fi or SD card firmware update: each version is installed over USB, and
+only into that slot.
+
+1. Download `firmware-picco-v<version>.bin` from the releases page.
+2. Connect Picco over USB. From the stock firmware, hold Power and Volume Up (+)
+   together for more than 10 seconds to enter serial flash mode; a Picco already
+   running CrossInk usually does not need this.
+3. Open the [CrossPoint flash tools](https://crosspointreader.com/#flash-tools),
+   select **BOOX Picco**, choose the custom-firmware option and give it the
+   downloaded file. For Picco it reads the partition table and writes the
+   application slot only, leaving the bootloader, partition table and recovery
+   software untouched.
+4. Press and hold the power button to restart Picco.
+
+Never erase the flash, write at address `0x0`, or use a firmware made for another
+model: either would remove the recovery software.
+
+#### With esptool instead
+
+From a computer (macOS or Linux; see [Command Line](#command-line) to install
+`esptool` and find the port), after steps 1 and 2:
+
+1. Check that the reader has the stock layout before writing anything:
+
+   ```sh
+   esptool.py --chip esp32s3 --port /dev/cu.usbmodem2101 read_flash 0x8000 0xc00 picco-partitions.bin
+   python3 -c "import struct; d = open('picco-partitions.bin', 'rb').read(); [print(e[12:28].rstrip(b'\0').decode(), hex(struct.unpack('<I', e[4:8])[0])) for e in (d[i:i + 32] for i in range(0, len(d), 32)) if e[:2] == b'\xaa\x50']"
+   ```
+
+   The list must include `safeboot 0x20000` and `app 0xe0000`. If it does not, stop:
+   the address below would overwrite something else.
+2. Write the firmware into the `app` slot only, leaving the bootloader, settings and
+   `safeboot` recovery untouched:
+
+   ```sh
+   esptool.py --chip esp32s3 --port /dev/cu.usbmodem2101 --baud 921600 write_flash 0xe0000 /path/to/firmware-picco-v<version>.bin
+   ```
+
+3. Press and hold the power button to restart Picco.
 
 ## USB Drive
 
@@ -61,7 +107,8 @@ fork is flashed back.
 ## Command Line
 
 These instructions are for macOS and Linux, and for the ESP32-C3 devices (X3 and X4);
-for the other devices, use the web installer.
+for Picco, follow [BOOX Picco](#boox-picco) above; for the other devices, use the web
+installer.
 
 Install `esptool`:
 

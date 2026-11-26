@@ -39,11 +39,15 @@ push and on CI.
   another EPUB. Both are marked as being read. Two-device scenarios use this synthetic
   device as the "other" reader — the simulator's MAC is fixed, so two real
   simulator instances would share one device id.
-- **Harness**: [harness/run_scenarios.py](harness/run_scenarios.py) prepares an
-  isolated `fs_/` SD directory per scenario (settings, BookOrbit credentials,
-  seeded books), launches the simulator binary with `SDL_VIDEODRIVER=dummy`,
-  drives it, and asserts on both sides: the SD tree (progress files, clipping
-  and bookmark stores) and the server state via API. The simulator's silent
+- **Harness**: [harness/run_scenarios.py](harness/run_scenarios.py) runs the
+  scenarios of [harness/scenarios/](harness/scenarios/), one module per
+  functional area (see [Scenarios by area](#scenarios-by-area)). Each one
+  prepares an isolated `fs_/` SD directory ([harness/sim.py](harness/sim.py):
+  settings, BookOrbit credentials, seeded books), launches the simulator binary
+  with `SDL_VIDEODRIVER=dummy`, drives it, and asserts on both sides: the SD tree,
+  read through [harness/formats.py](harness/formats.py) (progress files, clipping
+  and bookmark stores, download index), and the server state via API
+  ([harness/server.py](harness/server.py)). The simulator's silent
   network reboot re-execs the process in place, so a sync flow runs unattended
   end to end. Synthetic input does not survive that reboot (the simulator only
   promotes `_AFTER_WAKE` scripts on deep-sleep wakes), so the sync's screens
@@ -75,8 +79,10 @@ python3 test/integration/seed/seed.py                  # idempotent
 pio run -e simulator
 python3 test/integration/harness/run_scenarios.py
 
-# one scenario, verbose
+# one scenario, verbose; one area; every scenario by area, with what it proves
 python3 test/integration/harness/run_scenarios.py --scenario sync_progress_pull -v
+python3 test/integration/harness/run_scenarios.py --area catalog
+python3 test/integration/harness/run_scenarios.py --list
 ```
 
 `docker compose ... down -v` resets the server completely; `seed.py` starts
@@ -115,45 +121,24 @@ patcher step that reports `anchor not found` means upstream rewrote the code
 that step edits. Check whether it now carries the fix in its own words, and add
 that spelling to the step's markers.
 
-## Scenario inventory
+## Scenarios by area
 
-| Scenario | What it proves |
-| --- | --- |
-| `sync_progress_pull` | A further server position (seeded by the synthetic device) is applied to both local progress homes. |
-| `sync_progress_push` | A further local position reaches the server under the simulator's device id. |
-| `sleep_sync_push` | With Sync on Sleep on, putting the device to sleep hands over to the sleep sync, which uploads a further local position from behind the sleep screen. Its sync marker is the 12-byte one earlier releases wrote, so the scenario also proves those still read. |
-| `sleep_sync_after_web_open` | Issue #91, two runs on one card: a manual sync uploads the device's position, the book is then opened in BookOrbit's web reader (a save through the web API, which the server dates as of now and serves as `bookorbit-web`), and the device reads on and goes to sleep. The server's date moved but its position did not, so the sleep sync uploads instead of leaving the progress for a manual sync. The web save is checked to be the one the server serves, dated after the device's sync; without that the scenario would pass on dates alone. |
-| `sleep_sync_conflict` | The guard on the scenario above: the peer device read past the position this device last synced, and this device read on too. The sleep sync leaves both positions and its own history untouched. |
-| `sleep_sync_keeps_progress_reset` | The other guard: the book's progress is reset in BookOrbit, which the server serves as the start of the book dated now, under the same `bookorbit-web` id as a web reader save. The device is further on, but the sleep sync does not upload over the reset, which the server would accept and then ignore; the reset is still served afterwards. |
-| `sleep_sync_cancel` | A Power press during the sleep sync cancels it and boots the device the way a power-button wake does. |
-| `highlight_pull` | A highlight created by the peer device lands in the local clipping store, with a minted position record. |
-| `highlight_push` | A pre-seeded local highlight (clipping + position record, what the reader persists) reaches the server and is offered to a device that never saw it. |
-| `highlight_push_backlog` | Twenty local highlights, listed out of datetime order, reach the server in one sync (batches of 8 on one session), and the watermark ends on the newest. |
-| `highlight_pull_backlog` | Twenty highlights from the peer reach the device in one sync: each acknowledged batch of 8 makes room for the next pull. |
-| `highlight_delete_propagates_large` | On a book of 80 highlights, past the 64 a key set used to be held to, deleting two on the device deletes them on the server, and the summary counts them. |
-| `highlight_mint_outside_paragraph` | Highlights saved without a position (what the reader left before the #84 fix) in a heading, a list item and a control `<p>` are positioned by the reader itself, one per wake into their chapter, and reach the server at their exact text node. The heading precedes every `<p>`, so its paragraph hint is 0: the old resolver rejected it, and retrying it on every visit starved the other two. The `<p>` keeps the position the `<p>`-only resolver gave it. |
-| `highlight_delete_propagates` | Two runs on one SD: pull a highlight, delete its clipping locally, sync again — the complete key set deletes it server-side. |
-| `highlight_delete_guard` | Same, but with the sync-state store lost between runs: the guard reports no key set and the server keeps the highlight. |
-| `bookmark_pull` | A bookmark created by the peer lands in the local bookmark store, with a minted position record. |
-| `bookmark_push` | A pre-seeded local bookmark reaches the server and is offered to a device that never saw it. |
-| `outdated_copy_holds_changes` | The server writes its metadata into a book's file (`write-and-rename`), so the device's copy, the library's original, becomes an older hash of it. Both exchanges are answered `positionIncompatible` with no result; the sync still ends normally, and the pre-seeded highlight and bookmark stay unsent (both upload watermarks unmoved), where v1.6.1+bookorbit.7 counted them as sent. Skipped on a server that does not answer `positionIncompatible`. |
-| `book_update_carries_state` | A catalog update interrupted by a reset: the library's copy is in place and the replaced one still waits at `<book>.old`, with a highlight in an unchanged chapter, one in a chapter the copies disagree on (its CRC-32 differs), and an upload watermark past both. The next sync, started from Home, first moves the highlights and sync state to the new copy's hash, orphans only the changed chapter's highlight, removes the old copy, and the sync sends the other highlight (watermark rewound) but not the orphan. |
-| `book_update_offer` | The whole update. BookOrbit writes its metadata into a fresh book's file; the device holds the library's original copy, not in its download index. Its sync takes the `positionIncompatible` reply, finds the book through the match check and offers the update; the scripted run accepts it (`CROSSINK_SIM_BOOKORBIT_UPDATE`). The catalog downloads the library's file over the copy and reopens the book: the highlight followed it to the new hash, the chapter comparison ran and orphaned nothing. A second sync sends the highlight. |
-| `web_move_keeps_book_state` | The simulator boots into the file transfer portal. A book moved with the portal's `/move` and another moved over WebDAV `MOVE` reach their new folder with their reading position (render cache) and recent entry; their old cache is gone. A WebDAV rename to `x.epub.bak` still succeeds as a plain move. |
-| `catalog_collections_browse` | Scripted UI navigation: home menu → BookOrbit catalog → Collections → the seeded collection; asserted through the browser's list cache. Browsing never silent-reboots before exit, so input scripts drive it end to end; only a download restarts (see below). |
-| `catalog_empty_listing_back` | Opening the seeded empty collection shows the no-entries error; Back climbs out of it onto the row it left, and the next listing still loads (regression: Back reloaded the same empty listing forever). |
-| `catalog_libraries_browse` | Libraries as a browsable root section: its listing carries the seeded library's book count, opening it lists that library's books (cache key carries the library id), and the root's per-section counts (dashboard fetch) are cached. |
-| `catalog_hides_non_epub` | Continue reading and Recently added list only EPUBs: the audiobook-only record is absent, the EPUB+audio record stays, and the root's two book counts equal those listings' totals rather than the dashboard's all-format ones. Continue reading lists only books being read. Expected numbers come from the server's own filtered listings. |
-| `catalog_download_naming` | A download lands where the account's KOReader file naming template says, folders created on the way, instead of a flat `Title - Author.epub`. The expected path is the `devicePath` the server itself resolved for the book the browser listed first, so the test never reimplements the template. The download index must record it in the documented BOD2 layout, read back by the harness from [docs/file-formats.md](../../docs/file-formats.md) rather than from the firmware. The simulator's X4 profile has no PSRAM, so the download restarts into a network boot of its own first, like an X3/X4 does (issue #96): the run checks that hand-over, that the transfer ran in the new boot and that it left no resume file behind. A second run then proves "On device" still counts the book, which it can only do from the download index. A third run replaces the index with 135 other books, as if the file had been copied there: Confirm on the same row opens the copy without downloading it, and the index records it after the others. |
-| `catalog_book_actions` | Four runs on one card around the first book of All books. Holding Confirm opens a menu whose only entry, Download, fetches the book. Once the book is on the device, Re-download replaces it where it is and keeps its reading progress; the book is damaged first, at the same size, so the check can tell the copies apart. A plain Confirm then opens the book in the reader rather than downloading it again, and Delete removes it along with its cache. Each menu choice is checked against the action the firmware logs, since a hold that simply downloaded on release would otherwise pass. |
-| `catalog_deep_listing` | Issue #96: All books (five pages) walked to page 4 with Next presses, the selected book downloaded, then 45 Previous presses in the download boot. The rows in memory never exceed three pages, the download fetches the book the selection was on, the restored window holds its row (pages 3 and 4 only), and walking back puts page 2 in front of the window from the list cache. Asserted through the firmware's per-page log line. |
-| `catalog_sort_filter` | All books sorted by date added (Left), its direction flipped (the picker's first row) and filtered to the books being read (Right), then the first book downloaded. Each listing matches the server's answer to the same `sort`/`order`/`readStatus` query, the download is that listing's first book, and the download boot rebuilds that exact listing from the list cache. Sorted by date because the seeded books carry no title, author or series metadata. |
-| `catalog_sections_and_shelf` | The data behind the list sections and the Want to Read shelf. Two books are marked want to read first. All books keeps, with its first page, where each letter starts as the server ranks it; Recently added keeps each book's date added; the root's Want to Read row counts the server's shelf and lists exactly it. The headings drawn from that data are checked on screen. |
-| `catalog_download_index_migration` | A download index written by an earlier release (BOD1, crafted by the harness) listing three books in series folders the flat scan never visits: the first catalog visit still counts all three under "On device", and leaves the same entries on the card as BOD2 with no temporary or backup file behind. |
-| `catalog_large_local_list` | 210 books: 135 in a series folder known only through a BOD2 index, one indexed book in the download folder itself, the rest flat in the download folder, `/Read` and the SD root. The root counts all 210 once; "On device" opens on its first page, Up wraps to the last row by opening the last page alone, Down wraps back to the first, and no more than three pages are ever in memory. Confirm on the last row opens Book 210, last only in a natural sort; the list's files on the card are gone after it. Fails against the 200-row list. |
-| `catalog_download_index_beyond_legacy_cap` | A BOD2 index listing 150 books in series folders, past BOD1's 128-entry cap: "On device" counts all 150. Both index scenarios fail against the pre-BOD2 index. |
-| `sleep_sync_device_scan` | Under the BookOrbit theme, three sleep syncs on one card (download folder at the root). First, two library books copied to /Inbox and the open book move to the paths the server's naming template gives them (read back from the download index, not recomputed), the open book's state and cache following it; a book in /Read stays and an unknown EPUB is left alone. Then, with the download index and the scan's state deleted and a stray copy of one book added, nothing is moved, the stray copy is deleted and the index is rebuilt identically. Finally, with nothing changed, nothing is hashed and a single match check carries the remembered file's bare hash. Checked against the firmware's `Device scan:` log lines. |
-| `home_refresh_device_scan` | The Home tile's sync runs the card scan in its own network boot: a library book copied twice to /Inbox is filed where the download index says, the other copy is deleted, and the sync ends on the scan's summary before it restarts to Home. |
+Each scenario's docstring says what it proves; `run_scenarios.py --list` prints
+them by area.
+
+| Area | Module | What it covers |
+| --- | --- | --- |
+| `progress` | [progress.py](harness/scenarios/progress.py) | Reading position through the Smart sync and Sync on Sleep: pull, push, a book opened in the web reader (#91), a conflict, a progress reset, a sleep sync cancelled by a press. |
+| `highlights` | [highlights.py](harness/scenarios/highlights.py) | Highlight exchange both ways and in batches, deletions carried by the complete key set and the guard when it is lost, copies the server offers back, notes, positions minted outside `<p>` (#84). |
+| `bookmarks` | [bookmarks.py](harness/scenarios/bookmarks.py) | Bookmark exchange both ways, deletions, several bookmarks in one chapter (#120) and the recovery of those earlier builds lost. |
+| `home` | [home.py](harness/scenarios/home.py) | The BookOrbit Home theme: the tile's sync and its snapshot, the Library shelves and their sources, a download from a shelf, the sleep sync's refresh. |
+| `catalog` | [catalog.py](harness/scenarios/catalog.py) | Catalog browsing, EPUB-only listings, sort and filter, list sections and the Want to Read shelf, the page window of long listings (#96), downloads and the book action menu. |
+| `local_books` | [local_books.py](harness/scenarios/local_books.py) | Books on the card: the download index (BOD1 migration, past BOD1's cap), "On device" on a 210-book card, the card scan from the sleep sync and the Home tile, moves through the file transfer portal. |
+| `book_update` | [book_update.py](harness/scenarios/book_update.py) | A copy BookOrbit has rewritten since: its changes held back, the update offer, highlights carried to the new copy. |
+
+A new scenario is a `scenario_<name>` function in its area's module. A book with
+no seeded server state takes a library index of its own in `FRESH_BOOK`
+([harness/server.py](harness/server.py)), so runs never share one.
 
 ### Repeatability
 

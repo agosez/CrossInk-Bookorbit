@@ -207,4 +207,10 @@ void PendingRebuild::add(const uint32_t dayIndex, const uint32_t seconds) {
   if (!addToSlot(file, dayIndex, seconds, Column::Pending)) LOG_ERR("DMIN", "Cannot update %s", PATH);
 }
 
+void recordSession(const uint32_t seconds) {
+  if (seconds < 10) return;
+  // Also runs on boards without a clock chip, on the system clock set over Wi-Fi.
+  record(nullptr, seconds);
+}
+
 }  // namespace ReadingDailyMinutes

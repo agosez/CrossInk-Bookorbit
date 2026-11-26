@@ -8,6 +8,7 @@ class HalClock {
  public:
   bool getDateTime(uint16_t&, uint8_t&, uint8_t&, uint8_t&, uint8_t&) const { return false; }
   bool hasCurrentTime() const { return systemClockSet; }
+  bool getReadingDateTime(uint16_t&, uint8_t&, uint8_t&, uint8_t&, uint8_t&, uint8_t&) const { return false; }
   bool systemClockSet = true;
 };
 

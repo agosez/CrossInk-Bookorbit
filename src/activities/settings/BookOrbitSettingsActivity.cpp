@@ -17,7 +17,6 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
-#include "activities/browser/BookOrbitCatalogBrowserActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/settings/BookOrbitAuthActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
@@ -389,7 +388,7 @@ void BookOrbitSettingsActivity::buildListScreen(UiApp::ScreenType& screen) {
       values[i] = BOOKORBIT_STORE.getSyncBehavior() == BookOrbitSyncBehavior::SMART ? tr(STR_SMART_SYNC)
                                                                                     : tr(STR_ASK_EVERY_TIME);
     } else if (i == 7) {
-      values[i] = BOOKORBIT_STORE.getSyncOnSleep() ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+      values[i] = BOOKORBIT_STORE.getSyncOnSleep() ? tr(STR_ON) : tr(STR_OFF);
     } else if (i == HOME_ROW) {
       // A page of its own: no value.
     } else {
@@ -445,7 +444,7 @@ void BookOrbitSettingsActivity::render(RenderLock&&) {
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   if (fetching || fetchFailed) {
-    GUI.drawPopup(renderer, fetching ? tr(STR_LOADING_POPUP) : tr(STR_BOOKORBIT_CATALOG_ERROR));
+    GUI.drawPopup(renderer, fetching ? tr(STR_LOADING) : tr(STR_BOOKORBIT_CATALOG_ERROR));
   }
 
   renderer.displayBuffer();

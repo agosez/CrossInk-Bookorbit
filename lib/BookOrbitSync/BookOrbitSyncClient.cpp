@@ -11,6 +11,9 @@
 #include <Memory.h>
 #include <esp_mac.h>
 #ifdef SIMULATOR
+// With the SDK HTTP stack (CROSSPOINT_SIM_USE_SDK_HTTP), WiFi.h no longer brings
+// WiFiClient; the SecureHttpClient shim does, as in KOReaderSyncClient.
+#include <SecureHttpClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #else
@@ -1092,8 +1095,10 @@ class ExchangeReplyReader {
       : documentHash(documentHash),
         incoming(incoming),
         skipServerIds(skipServerIds),
+        // No onStringPrefix: a text longer than the SDK parser's 2 KB token buffer is dropped,
+        // and the entry with it, rather than stored cut short (the text is a highlight's identity).
         parser(JsonCallbacks{this, onKey, onString, onNumber, onBool, nullptr, onObjectStart, onObjectEnd, onArrayStart,
-                             onArrayEnd, onStringPart}) {}
+                             onArrayEnd}) {}
 
   void feed(const uint8_t* data, const size_t len) { parser.feed(reinterpret_cast<const char*>(data), len); }
 
@@ -1271,12 +1276,6 @@ class ExchangeReplyReader {
       default:
         break;
     }
-  }
-
-  // Only a text outgrows the parser's buffer; any other value that long is dropped.
-  static void onStringPart(void* ctx, const char* part, const size_t len, bool) {
-    ExchangeReplyReader& r = self(ctx);
-    if (r.inEntry() && r.incoming && r.lastKey[ENTRY] == Key::Text) r.appendText(part, len);
   }
 
   static void onNumber(void* ctx, const char* value, size_t) {

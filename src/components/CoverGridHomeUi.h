@@ -19,18 +19,18 @@ class CoverGridHomeUi final : public UiAppHost<16, 1> {
   static constexpr int GRID_ROWS = 2;
   static constexpr int MAX_BOOKS = 1 + GRID_COLUMNS * GRID_ROWS;
   static_assert(MAX_BOOKS <= HomeCoverCache::MAX_COVERS);
-  // The tab bar's entries, in display order. OPDS and this fork's BookOrbit catalog only
+  // The tab bar's entries, in display order. Plugins and this fork's BookOrbit catalog only
   // take a slot once they are set up, so positions are resolved through the helpers
   // below rather than counted by hand.
-  enum class Tab : uint8_t { Files, Library, Opds, BookOrbit, Transfer, Settings, Count };
+  enum class Tab : uint8_t { Files, Library, Plugins, BookOrbit, Transfer, Settings, Count };
   static constexpr int MAX_TABS = static_cast<int>(Tab::Count);
-  static int tabCount(bool hasOpds, bool hasBookOrbit);
+  static int tabCount(bool hasPlugins, bool hasBookOrbit);
   // Tab::Count when the position is outside the bar.
-  static Tab tabAt(int position, bool hasOpds, bool hasBookOrbit);
+  static Tab tabAt(int position, bool hasPlugins, bool hasBookOrbit);
   // -1 when the tab is not shown.
-  static int tabPosition(Tab tab, bool hasOpds, bool hasBookOrbit);
+  static int tabPosition(Tab tab, bool hasPlugins, bool hasBookOrbit);
   explicit CoverGridHomeUi(GfxRenderer& renderer);
-  void begin(const std::vector<RecentBook>& books, bool hasOpds, bool hasBookOrbit, bool hasContinueReading,
+  void begin(const std::vector<RecentBook>& books, bool hasPlugins, bool hasBookOrbit, bool hasContinueReading,
              float featuredProgress);
   void refreshCoverPaths();
   void setSelection(int selection) { selected = selection; }
@@ -65,7 +65,7 @@ class CoverGridHomeUi final : public UiAppHost<16, 1> {
   int selected = 0;
   int pending = -1;
   int progress = -1;
-  bool hasOpds = false;
+  bool hasPlugins = false;
   bool hasBookOrbit = false;
   char progressText[12]{};
   // Component styles and interaction tables stay off the render task's stack.

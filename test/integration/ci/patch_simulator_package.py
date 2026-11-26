@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Patch the fetched crossink-simulator package with shims the firmware needs.
 
-The simulator package (lib_deps: uxjulia/crossink-simulator, unpinned) trails the
+The simulator package (lib_deps: uxjulia/crossink-simulator) trails the
 firmware's HAL surface. Until the fixes land upstream, a cold build — CI, or a
 fresh checkout — needs these shims applied to the fetched copy under
 .pio/libdeps/<env>/simulator/. Each patch checks for its own marker first, so
@@ -133,6 +133,16 @@ def patch_env(env: str) -> None:
             "    (void)async;\n    (void)show_hidden;",
             "    if (async)\n      return -1; // WIFI_SCAN_RUNNING\n    (void)show_hidden;", 1)):
         changed.append("async scanNetworks")
+
+    # 5. CrossInk v2.0.0's web server times out idle WebSocket clients and sizes
+    #    its per-client table with the real library's WEBSOCKETS_SERVER_CLIENT_MAX,
+    #    which the simulator's stand-in header does not define (its client loop
+    #    itself is device-only).
+    if patch(src / "WebSocketsServer.h", "WEBSOCKETS_SERVER_CLIENT_MAX", lambda t: t.replace(
+            '#include "WString.h"\n',
+            '#include "WString.h"\n\n#ifndef WEBSOCKETS_SERVER_CLIENT_MAX\n'
+            '#define WEBSOCKETS_SERVER_CLIENT_MAX 5\n#endif\n', 1)):
+        changed.append("WebSockets client limit")
 
     if changed:
         print(f"[{env}] patched: {', '.join(changed)}")

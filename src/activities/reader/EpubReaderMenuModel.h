@@ -63,6 +63,7 @@ enum class ReaderDrawerPane : uint8_t {
   DictionaryFont,
   EnumOptions,
   TtfRendering,
+  CharacterSpacing,
 };
 
 enum class ReaderButtonSliderInput : uint8_t { Next, Previous, Confirm, Back };
@@ -100,8 +101,11 @@ enum class ReaderDrawerCatalogItem : uint8_t {
   DictionaryFont,
   Spacing,
   TextAa,
+  TwoToneTextAa,
+  TextDarkness,
   Focus,
   GuideDots,
+  RuledLines,
   Margins,
   Orientation,
   Alignment,
@@ -110,6 +114,7 @@ enum class ReaderDrawerCatalogItem : uint8_t {
   ExtraSpacing,
   ForceIndents,
   EmbeddedStyle,
+  PublisherFonts,
   Images,
   SelectChapter,
   GoToPercent,
@@ -136,6 +141,7 @@ enum class ReaderDrawerCatalogItem : uint8_t {
   AutoPageTurn,
   FontFamily,
   FontSize,
+  CharacterSpacing,
   DictionaryFontFamily,
   DictionaryFontSize,
   TtfHinting,
@@ -151,6 +157,7 @@ enum class ReaderDrawerCatalogItem : uint8_t {
   SyncProgress,
   NearbyPositionSync,
   SendNearbyBook,
+  BookWordHoldAction,
   BookOrbitSync,  // this fork's provider, alongside upstream's KOReader SyncProgress
 };
 
@@ -183,11 +190,19 @@ constexpr ReaderDrawerCatalog makeReaderDrawerCatalog(const ReaderDrawerAvailabi
   ReaderDrawerCatalog catalog{};
   auto& font = catalog[static_cast<size_t>(ReaderDrawerTab::Font)];
   font.add(ReaderDrawerCatalogItem::ReaderFont);
+#if CROSSINK_SCALABLE_FONTS
+  font.add(ReaderDrawerCatalogItem::PublisherFonts);
+#endif
   font.add(ReaderDrawerCatalogItem::DictionaryFont);
   font.add(ReaderDrawerCatalogItem::Spacing);
   font.add(ReaderDrawerCatalogItem::TextAa);
+#if FREEINK_DEVICE_EEGO_A4
+  font.add(ReaderDrawerCatalogItem::TwoToneTextAa);
+#endif
+  font.add(ReaderDrawerCatalogItem::TextDarkness);
   font.add(ReaderDrawerCatalogItem::Focus);
   font.add(ReaderDrawerCatalogItem::GuideDots);
+  font.add(ReaderDrawerCatalogItem::RuledLines);
 
   auto& layout = catalog[static_cast<size_t>(ReaderDrawerTab::Layout)];
   layout.add(ReaderDrawerCatalogItem::Margins);
@@ -233,6 +248,9 @@ constexpr ReaderDrawerCatalog makeReaderDrawerCatalog(const ReaderDrawerAvailabi
   auto& settings = catalog[static_cast<size_t>(ReaderDrawerTab::Settings)];
   settings.add(ReaderDrawerCatalogItem::StatusBar);
   settings.add(ReaderDrawerCatalogItem::Controls);
+#if CROSSINK_APP_CAP_TOUCH
+  if (!available.buttonDevice) settings.add(ReaderDrawerCatalogItem::BookWordHoldAction);
+#endif
   settings.add(ReaderDrawerCatalogItem::BookDictionary);
   settings.add(ReaderDrawerCatalogItem::RenderMode);
   settings.add(ReaderDrawerCatalogItem::IndexingMethod);
@@ -246,23 +264,32 @@ constexpr ReaderDrawerCatalog makeReaderDrawerCatalog(const ReaderDrawerAvailabi
 }
 
 constexpr bool readerDrawerStepChangesSettings(const ReaderDrawerPane pane) {
-  return pane == ReaderDrawerPane::Spacing || pane == ReaderDrawerPane::Margins ||
-         pane == ReaderDrawerPane::AutoPageTurn;
+  return pane == ReaderDrawerPane::CharacterSpacing || pane == ReaderDrawerPane::Spacing ||
+         pane == ReaderDrawerPane::Margins || pane == ReaderDrawerPane::AutoPageTurn;
+}
+
+constexpr bool readerDrawerPreviewsEnum(const ReaderDrawerCatalogItem row) {
+  return row == ReaderDrawerCatalogItem::FontSize || row == ReaderDrawerCatalogItem::Alignment ||
+         row == ReaderDrawerCatalogItem::RuledLines;
 }
 
 // Only settings with an existing live text preview reserve sample space.
 constexpr bool readerDrawerShowsSamplePreview(const ReaderDrawerPane pane, const ReaderDrawerTab tab,
                                               const ReaderDrawerCatalogItem option) {
   return (pane == ReaderDrawerPane::Root && tab == ReaderDrawerTab::Font) || pane == ReaderDrawerPane::ReaderFont ||
-         pane == ReaderDrawerPane::FontFamily || pane == ReaderDrawerPane::Spacing ||
-         pane == ReaderDrawerPane::Margins ||
-         (pane == ReaderDrawerPane::EnumOptions &&
-          (option == ReaderDrawerCatalogItem::FontSize || option == ReaderDrawerCatalogItem::Alignment));
+         pane == ReaderDrawerPane::FontFamily || pane == ReaderDrawerPane::CharacterSpacing ||
+         pane == ReaderDrawerPane::Spacing || pane == ReaderDrawerPane::Margins ||
+         (pane == ReaderDrawerPane::EnumOptions && readerDrawerPreviewsEnum(option));
 }
 
 constexpr bool readerDrawerSliderPreviewsText(const ReaderDrawerPane pane) {
-  return pane == ReaderDrawerPane::Spacing || pane == ReaderDrawerPane::Margins;
+  return pane == ReaderDrawerPane::CharacterSpacing || pane == ReaderDrawerPane::Spacing ||
+         pane == ReaderDrawerPane::Margins;
 }
+
+// A landscape body is too short to stack a readable sample above the controls,
+// so every preview pane puts the sample in a full-height column beside them.
+constexpr bool readerDrawerSamplePreviewBesideControls(const bool landscape) { return landscape; }
 
 constexpr bool shouldRenderReaderDrawerAntiAliasing(const bool previewRendered, const bool textAntiAliasing,
                                                     const bool foregroundBlack) {
@@ -330,11 +357,15 @@ struct ReaderSettingsDraft {
   std::array<char, 64> sdFontFamilyName{};
   uint8_t lineHeightPercent = 0;
   uint8_t wordSpacing = 0;
+  uint8_t characterSpacing = 5;
   uint8_t screenMarginVertical = 0;
   uint8_t screenMarginHorizontal = 0;
   uint8_t orientation = 0;
   uint8_t paragraphAlignment = 0;
   uint8_t textAntiAliasing = 0;
+  uint8_t twoToneTextAA = 0;
+  uint8_t textDarkness = 0;
+  uint8_t ruledLines = 0;
   uint8_t focusReadingEnabled = 0;
   uint8_t guideReadingEnabled = 0;
   uint8_t hyphenationEnabled = 0;
@@ -342,7 +373,9 @@ struct ReaderSettingsDraft {
   uint8_t extraParagraphSpacing = 0;
   uint8_t forceParagraphIndents = 0;
   uint8_t embeddedStyle = 0;
+  uint8_t publisherFonts = 0;
   uint8_t imageRendering = 0;
+  uint8_t imageGrayscale = 1;
   uint8_t epubRenderMode = 0;
   uint8_t indexingMethod = 0;
 };

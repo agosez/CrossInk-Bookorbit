@@ -65,7 +65,7 @@ class BookOrbitSyncActivity final : public Activity, private BookOrbitSyncReport
   bool blocksGlobalInput() const override { return sleepSync; }
 
  private:
-  // The integration harness reads these values from the logs (run_scenarios.py): keep the order.
+  // The integration harness reads these values from the logs (test/integration/harness/sim.py): keep the order.
   enum State {
     WIFI_SELECTION,
     CONNECTING,

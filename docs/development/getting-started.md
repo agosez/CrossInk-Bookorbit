@@ -62,11 +62,64 @@ git submodule update --init --recursive
 ## Build
 
 ```sh
-pio run -e simulator
-pio run -e default
+pio run -e simulator -j1
+pio run -e default -j1
 ```
 
-`pio run` without an environment builds the X3/X4 and Sticky firmware targets listed in `platformio.ini`.
+Always select one environment and use `-j1`. EEGO A4 uses `eego_a4`
+for production builds and `eego_a4-debug` for development with serial logs.
+Both are included in PR build validation; stable and RC workflows publish
+`firmware-eego_a4-*.bin`. See [EEGO A4](./eego-a4-hardware.md) for flashing and
+hardware checks.
+
+S3 debug builds log errors and info by default. To include verbose debug logs,
+set `s3_debug_log_level = 2` under `[crossink]` in `platformio.local.ini`.
+
+### Font download hosting
+
+Font downloads accept a `CROSSINK_FONT_BASE_URL` build environment
+variable to use a custom host. When it is unset, font downloads use the matching
+versioned GitHub release in `uxjulia/crossink-fonts`, including its individual
+font files.
+
+Use an HTTP or HTTPS URL ending in `/`. Firmware appends
+`sd-fonts-m<manifest-version>-b<font-version>/fonts.json`, so point the variable
+at the parent directory of those versioned folders. The catalog's `baseUrl`
+should also point at your own font files.
+
+For GitHub release and release-candidate builds, add `CROSSINK_FONT_BASE_URL`
+under **Settings → Secrets and variables → Actions → Variables**. For local
+builds, export the same environment variable before running PlatformIO.
+The separate `CROSSINK_ASSET_BASE_URL` setting controls language and hyphenation
+downloads.
+
+HTTP remains supported for public font hosting. HTTPS font downloads use the
+streaming wolfSSL transport already used by other network features, avoiding
+the esp_http_client path that has stalled on ESP32-C3 devices. Downloaded font
+files are validated by CRC before installation.
+
+### Language and hyphenation download hosting
+
+The release workflows publish language and hyphenation packs to this fork's
+GitHub Pages site with `scripts/export_pages_language_assets.py`, which signs
+every catalog with the `ASSET_CATALOG_SIGNING_KEY` repository secret (a PEM
+P-256 private key). The firmware refuses an unsigned catalog: on the X3 and X4
+these downloads use the wolfSSL transport, which does not check certificates, so
+the signature, and the SHA-256 digests the catalog lists, are what authenticate
+them.
+
+To serve packs from another host, build with `CROSSINK_ASSET_BASE_URL` set to
+that host and `CROSSINK_ASSET_CATALOG_KEY` set to the public half of your own
+key, as an uncompressed point in lowercase hex:
+
+```sh
+openssl ecparam -name prime256v1 -genkey -noout -out catalog-key.pem
+openssl ec -in catalog-key.pem -pubout -conv_form uncompressed -outform DER | tail -c 65 | xxd -p -c 65
+```
+
+Then export with `--signing-key catalog-key.pem` and the same
+`CROSSINK_ASSET_CATALOG_KEY` in the environment; the script refuses a key the
+firmware would not trust.
 
 ## Flash
 
@@ -78,8 +131,8 @@ pio run -e default --target upload
 
 ```sh
 ./bin/clang-format-fix
-pio check --fail-on-defect low --fail-on-defect medium --fail-on-defect high
-pio run
+pio check -e default --fail-on-defect low --fail-on-defect medium --fail-on-defect high
+pio run -e default -j1
 ```
 
 ## What to read next

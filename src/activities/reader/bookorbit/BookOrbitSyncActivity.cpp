@@ -32,8 +32,8 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
-#include "activities/browser/BookOrbitCatalogLink.h"
-#include "activities/browser/BookOrbitCatalogListCache.h"
+#include "activities/browser/bookorbit/BookOrbitCatalogLink.h"
+#include "activities/browser/bookorbit/BookOrbitCatalogListCache.h"
 #include "activities/home/RecentBookProgress.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/reader/EpubReaderUtils.h"
@@ -196,7 +196,6 @@ void BookOrbitSyncActivity::returnToReader() {
 void BookOrbitSyncActivity::resolveUpdateBook() {
   int64_t bookId = 0;
   if (!BookOrbitDownloadIndex::bookIdForPath(epubPath, bookId)) bookId = 0;
-  BookOrbitDownloadIndex::unload();
   if (bookId == 0) {
     // Not a catalog download (copied to the card, or the index lost it): the server still
     // resolves this copy's older hash to its book. A bare hash stays out of Books to Review.
@@ -629,6 +628,15 @@ bool BookOrbitSyncActivity::decideAutomatically(const BookOrbitSmartSync::Positi
 }
 
 void BookOrbitSyncActivity::performUpload() {
+  // Since CrossInk v2.0.0 an unresolvable position comes back invalid instead of as a
+  // guessed /body/p[N] path, which could send other readers to the start of the book.
+  if (!localProgress.valid || localProgress.xpath.empty()) {
+    LOG_ERR("BookOrbit", "Local position has no structural xpointer; not uploading it");
+    syncSession.reset();
+    SavedWifiConnect::disconnect();
+    fail(tr(STR_SYNC_FAILED_MSG));
+    return;
+  }
   {
     RenderLock lock(*this);
     state = UPLOADING;
@@ -878,8 +886,8 @@ void BookOrbitSyncActivity::renderResult(const Rect& screen, const ThemeMetrics&
   // sender's engine and is not comparable with the local card drawn beside it.
   const BookOrbitSyncScreens::ProgressCard remote{tr(STR_SYNC_REMOTE_TITLE), remoteProgress.device.c_str(),
                                                   remotePageStr, remoteChapter.c_str(), remoteLocalPercent};
-  const BookOrbitSyncScreens::ProgressCard local{tr(STR_SYNC_LOCAL_TITLE), nullptr, localPageStr, localChapter.c_str(),
-                                                 localProgress.percentage};
+  const BookOrbitSyncScreens::ProgressCard local{tr(STR_STATS_THIS_DEVICE_SCREEN), nullptr, localPageStr,
+                                                 localChapter.c_str(), localProgress.percentage};
   BookOrbitSyncScreens::drawResult(renderer, screen, metrics, top, remote, local, selectedOption,
                                    mappedInput.hasTouchHardware());
   drawHints(tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));

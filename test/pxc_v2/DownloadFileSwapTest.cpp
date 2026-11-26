@@ -47,7 +47,7 @@ TEST_F(DownloadSwap, CleanupFailureKeepsCommittedBookAndRetries) {
   EXPECT_EQ(Storage.bytes("/book"), std::vector<uint8_t>{2});
 }
 TEST_F(DownloadSwap, KeepReplacedLeavesOldCopyForCaller) {
-  ASSERT_TRUE(DownloadFileSwap::publish("/book", /*keepReplaced=*/true));
+  ASSERT_TRUE(DownloadFileSwap::publish("/book", /*requireBackupCleanup=*/false, /*keepReplaced=*/true));
   EXPECT_EQ(Storage.bytes("/book"), std::vector<uint8_t>{2});
   EXPECT_EQ(Storage.bytes("/book.old"), std::vector<uint8_t>{1});
   // Left behind by a crash before the caller removed it, the next staged download drops it.
@@ -57,7 +57,7 @@ TEST_F(DownloadSwap, KeepReplacedLeavesOldCopyForCaller) {
 }
 TEST_F(DownloadSwap, KeepReplacedWithNothingReplaced) {
   Storage.remove("/book");
-  ASSERT_TRUE(DownloadFileSwap::publish("/book", /*keepReplaced=*/true));
+  ASSERT_TRUE(DownloadFileSwap::publish("/book", /*requireBackupCleanup=*/false, /*keepReplaced=*/true));
   EXPECT_EQ(Storage.bytes("/book"), std::vector<uint8_t>{2});
   EXPECT_FALSE(Storage.exists("/book.old"));
 }

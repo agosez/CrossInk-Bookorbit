@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <ctime>
 
 #include "BookOrbitAnnotationStore.h"
 #include "BookOrbitKeySet.h"
@@ -61,11 +62,17 @@ uint32_t freeClippingTimestamp(const uint16_t spine, const uint16_t paragraph) {
     }
     return false;
   };
-  const uint32_t now = std::max<uint32_t>(1, static_cast<uint32_t>(millis() / 1000UL));
-  for (uint32_t timestamp = now; timestamp >= 1; timestamp--) {
+  // Clippings are dated in UTC (ClippingStore::addClipping), and a sync has just set the
+  // clock over NTP. Without it, fall back on seconds since boot, never 0: the BookOrbit
+  // stores read 0 as "no timestamp" and never join such a clipping to its record.
+  const time_t wallClock = time(nullptr);
+  const uint32_t now = wallClock >= 946684800LL && static_cast<uint64_t>(wallClock) <= UINT32_MAX
+                           ? static_cast<uint32_t>(wallClock)
+                           : std::max<uint32_t>(1, static_cast<uint32_t>(millis() / 1000UL));
+  for (uint32_t timestamp = now; timestamp >= 1 && now - timestamp <= CLIPPING_MAX_PER_BOOK; timestamp--) {
     if (!taken(timestamp)) return timestamp;
   }
-  // A network boot is only seconds old: past those, the store's own bound ends the search.
+  // At most CLIPPING_MAX_PER_BOOK times can be taken: past those, the store's own bound ends the search.
   uint32_t timestamp = now + 1;
   while (taken(timestamp)) timestamp++;
   return timestamp;
@@ -145,7 +152,7 @@ void BookOrbitHighlightSync::prepare(const bool serverAcceptsSidecar) {
   const bool syncedHereBefore = BookOrbitAnnotationStore::readAll(stateDir, records, &watermark);
   // The store is loaded only for as long as it takes to copy the batch out, and unloaded
   // before returning: only the small batch stays resident beside the open TLS session.
-  if (!CLIPPINGS.loadForSync(epubPath, 0)) {
+  if (!CLIPPINGS.loadForBookOrbitSync(epubPath, 0)) {
     LOG_ERR("BookOrbit", "Could not read clippings; highlights will not sync");
     return;
   }
@@ -348,7 +355,7 @@ bool BookOrbitHighlightSync::prepareNextAnnotationBatch(const uint32_t watermark
     LOG_ERR("BookOrbit", "Could not read the highlight store again; the rest follows on the next sync");
     return false;
   }
-  if (!CLIPPINGS.loadForSync(epubPath, 0)) {
+  if (!CLIPPINGS.loadForBookOrbitSync(epubPath, 0)) {
     LOG_ERR("BookOrbit", "Could not read clippings; the rest follows on the next sync");
     return false;
   }
@@ -413,7 +420,7 @@ bool BookOrbitHighlightSync::applyIncomingAnnotations(const Epub& epub, size_t& 
   const size_t additions =
       static_cast<size_t>(std::count_if(incomingAnnotations.begin(), incomingAnnotations.end(),
                                         [](const BookOrbitIncomingAnnotation& incoming) { return !incoming.deleted; }));
-  if (!CLIPPINGS.loadForSync(epubPath, additions)) {
+  if (!CLIPPINGS.loadForBookOrbitSync(epubPath, additions)) {
     LOG_ERR("BookOrbit", "Could not open clippings; server-side highlights stay pending");
     return false;
   }
@@ -564,6 +571,7 @@ bool BookOrbitHighlightSync::applyIncomingAnnotations(const Epub& epub, size_t& 
     // No table selection either: a server annotation carries text, not a cell coordinate.
     const auto addResult = CLIPPINGS.addClipping(spine, 0, 0, 0, 0, 0, 0, incoming.chapter.c_str(), paragraphHint,
                                                  incoming.text, /*tableSelection=*/UINT16_MAX, /*layoutSignature=*/0,
+                                                 /*sourceStart=*/UINT32_MAX, /*sourceEnd=*/UINT32_MAX,
                                                  freeClippingTimestamp(spine, paragraphHint));
     if (addResult != ClippingStore::AddResult::Added) {
       LOG_ERR("BookOrbit", "Could not store server annotation %lu (result=%d)",

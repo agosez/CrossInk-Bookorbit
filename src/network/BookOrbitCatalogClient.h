@@ -27,6 +27,10 @@ struct BookOrbitCatalogFile {
   // account and device. Empty on servers that predate the field; the caller then
   // names the file itself.
   std::string devicePath;
+  // What the server delivers for this file: "original", or "audioless_epub" for a read-along
+  // EPUB. Naming it in the download takes the server's delivery route, which serves byte
+  // ranges under a strong ETag (BookOrbit 3.4.0+). Empty on servers that predate the field.
+  std::string downloadVariant;
 };
 
 /** One entry in a BookOrbit book listing. */
@@ -198,8 +202,12 @@ class BookOrbitCatalogClient {
   /** Download one book's catalog thumbnail (always a JPEG) to the SD card. */
   static HttpDownloader::DownloadError downloadThumbnail(int64_t bookId, const char* destPath, bool (*shouldStop)());
 
-  /** Download a catalog file (by file id, not book id) to the SD card. */
+  /**
+   * Download a catalog file (by file id, not book id) to the SD card. A non-empty variant
+   * (the file's downloadVariant) asks for it by name, so the server can resume the transfer.
+   */
   static HttpDownloader::DownloadError downloadFile(
-      int64_t fileId, const std::string& destPath, HttpDownloader::ProgressCallback progress = nullptr,
-      bool* cancelFlag = nullptr, HttpDownloader::DownloadOptions options = HttpDownloader::DownloadOptions());
+      int64_t fileId, const std::string& variant, const std::string& destPath,
+      HttpDownloader::ProgressCallback progress = nullptr, bool* cancelFlag = nullptr,
+      HttpDownloader::DownloadOptions options = HttpDownloader::DownloadOptions());
 };
