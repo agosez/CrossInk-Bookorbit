@@ -206,6 +206,8 @@ bool AssetDownloadActivity::verifySignature(const char* catalogRelative, const u
     LOG_ERR("ASSET", "OOM: catalog signature");
     return false;
   }
+  // cppcheck 2.11 types unique_ptr<char[]>::get() as void* and flags the offset below.
+  char* const buffer = text.get();
   size_t length = 0;
   HttpDownloader::DownloadOptions options;
   options.maxBytes = AssetCatalogSignature::MAX_ENVELOPE_BYTES;
@@ -216,9 +218,9 @@ bool AssetDownloadActivity::verifySignature(const char* catalogRelative, const u
   options.shouldCancel = [this] { return pollCancel(); };
   const auto result = HttpDownloader::streamUrl(
       url_,
-      [&text, &length](const uint8_t* bytes, size_t count) {
+      [buffer, &length](const uint8_t* bytes, size_t count) {
         if (count > AssetCatalogSignature::MAX_ENVELOPE_BYTES - length) return false;
-        std::memcpy(text.get() + length, bytes, count);
+        std::memcpy(buffer + length, bytes, count);
         length += count;
         return true;
       },
